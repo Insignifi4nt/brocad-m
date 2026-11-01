@@ -97,29 +97,39 @@ every build (`CadBuildResult.bodies`, `CadMesh.bodyKey`). A kind's `body` behavi
 - A key that one solid continues stays. When several solids continue it, each becomes `key/split(q)`, numbered by the first face of the
   body before that it keeps, never by position or size, then the solids that keep no face in the kernel's order. Fresh keys are
   `feature/split(k)`: solids of the tool, then merges, then solids that keep no face. Faces rank within their source in the order the
-  kernel lists its solids, so ranks order solids only when the faces they are numbered by lie in the same solid of one source. Solids
-  numbered by faces of different solids, as the several solids of a whole body are, by equal ranks, or in the kernel's order, are marked
-  `ambiguous` when there are two or more of them: the kernel might list them in another order for the same input. A piece no solid continues is lost, and
-  references to it resolve as missing.
-- Ambiguity is kept in groups (`CadBodyState.ambiguous`), and an ambiguous key resolves only to the pieces of its own group. The keys
-  that descend from one group through one source form a group, so each pattern copy's pieces stay apart from every other copy's, until K5
-  can establish identity. A group's earlier keys that no solid continues stay in it, as keys that can't be found, while a solid descends
-  from the group through the target; once none does, they are lost. So do earlier keys that solids continue under other keys, as
-  `key/split(q)` or a pattern copy's `key/inst(i,j)`: the kernel's order picked which member's key each solid continued, so the old key
-  may name any solid descending from the group in another order. A pattern keeps them in the original's group.
-- A key no body lists resolves as ambiguous when another kernel order would have given it a solid. The order decides only which sibling
-  of an interchangeable set names which solid: the pieces one split numbered by faces of different solids, by equal ranks or in the
-  kernel's order, which the body keeps in `CadBodyState.interchangeable`. Every later step follows its solid, so pieces the faces
-  numbered, pattern copies and mirror images never trade keys, even when they inherit a group's ambiguity. The keys other orders would
-  have given are the key with any of its steps, read from the first, changed to a sibling in that step's set, and the key resolves among
-  the groups of those the body lists. A later feature's key with the same steps, such as the copy of a join that merged the originals, is
-  never one of them. A set stays while one of its keys is, or leads to, a piece, a group's key or a key of another set that stays.
-  `cadBodyOrders.test.ts` checks the rule over generated histories: every key listed, or formed by changing split indices, must resolve to
-  the same solids under every combination of per-Boolean solid orders, and kernel cases check it on real builds.
+  kernel lists its solids, and the kernel may list a source's solids, a Boolean's result and a tool in any order for the same input.
+  Within one solid the faces keep their order. So where pieces are numbered by faces of different solids, as the several solids of a
+  whole body are, by equal ranks, or in the kernel's order, the split is recorded in `CadBodyState.orders`: the sibling keys, in this
+  build's order, and for pieces numbered by faces (`by`) the solids each keeps its first faces of, with its first rank in each. Reordering
+  the solids moves whole blocks of pieces, not single pieces: the pieces keeping faces of one solid alone keep their order among
+  themselves, and only their block moves among the others. From `by` each piece's places, the indices some order gives it, are found
+  exactly (`cadBodyOrderPlaces`); tied pieces trade places among themselves. A piece with more than one place is ambiguous. Past
+  `MAX_CAD_BODY_SHARED_SOLIDS` (10) solids that pieces share, or `MAX_CAD_BODY_ORDER_WORK` (2^22) steps of work, the order is recorded
+  without `by`, so any of its pieces may take any of its indices: a stated superset of the true places.
+- A key resolves among the pieces it names in some kernel order. Reading it from its first step, each split step the body's orders record
+  may be any sibling that some order places at that index, and every other step stays: a split whose pieces the faces ordered, a copy and
+  an image follow their solid. Different splits are decided independently: a split of one solid orders its pieces by that solid's faces,
+  and only whole bodies, tools and merges, which start fresh keys, mix solids. So a key resolves to its piece when it names that piece in
+  every order, as ambiguous among exactly the pieces it names in some order otherwise, and as missing when it names none. A later
+  feature's key with the same steps, such as the copy of a join that merged the originals, is never a substitute. An order stays while
+  one of its keys is, or leads to, a piece or a group's key.
+- Ambiguity from incomplete provenance is kept in groups (`CadBodyState.ambiguous`): a solid keeping no face may continue any of the keys
+  it is grouped with, which no order shows, so a key resolves also to the pieces of any group a key it may be is in. The keys that
+  descend from one group through one source form a group, so each pattern copy's pieces stay apart from every other copy's, until K5 can
+  establish identity. A group's earlier keys that are no longer pieces stay in it while a solid descends from the group through the
+  target. Orders never join groups.
+- A key that named a piece before a feature, in some order, and names none after it is lost, and references to it resolve as missing,
+  unless a solid it could name continues: then that solid split or was copied, and the key is an old one. So a piece the feature removed
+  is not lost while another order gives its key a solid that is left.
+- `cadBodyOrders.test.ts` checks the rule over generated histories. It builds each history under every combination of the orders the
+  kernel may choose, the body's first solids', each Boolean's result's and each tool's, while there are at most 2,000, and checks every
+  key listed, or formed by changing split indices, against what the builds show: missing when no build has it as a piece, resolved when
+  every build has it as the same piece, and otherwise ambiguous among exactly the solids it is a piece as in some build, plus only the
+  pieces of provenance groups. Larger histories are built in a sample of combinations, where each key must resolve the same way in all
+  of them and stand for every solid the sample shows. Kernel cases check the same on real builds in every order of their Booleans.
 - Each feature reports these in `CadBuildResult.bodyIssues` for D1 to adopt: `ambiguous-body-parts` for keys it makes ambiguous,
-  `lost-body-parts` for pieces it removes or merges into another solid, and `untracked-body-parts` when a body tracks more than
-  `MAX_CAD_BODY_LIST` (4,096) distinct part keys: its pieces, the keys its groups keep and the keys its interchangeable sets keep,
-  together, and the worker check holds a reply to the same count. The body's parts are then untracked for the rest of the history, and
+  `lost-body-parts` for keys it leaves naming nothing, by removing or merging their solids, and `untracked-body-parts` when a body tracks
+  more than `MAX_CAD_BODY_LIST` (4,096) distinct part keys: its pieces, the keys its groups keep and the keys its orders keep, together, and the worker check holds a reply to the same count. The body's parts are then untracked for the rest of the history, and
   references to them resolve as missing. Since groups keep every former member's key while a solid descends from them,
   the keys grow with the history, not the solid count: a body of 100 ambiguous solids that loses one piece and splits another at each
   feature adds two keys a feature and passes the limit at the 1,999th such feature. That limit is separate from an issue's 4,096 keys

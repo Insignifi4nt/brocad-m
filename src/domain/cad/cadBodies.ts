@@ -86,27 +86,49 @@ export interface CadBodyState {
    */
   readonly pieces?: readonly CadBodyKey[];
   /**
-   * Groups of keys that no build ties to one solid each with certainty. Each key in a group may be any of the group's pieces: pieces the
-   * kernel might list in another order, pieces a solid keeping no face might have split from, their descendants through each source,
-   * and earlier pieces of the body that can't be found among its solids. A reference to one resolves as ambiguous, with its group's
-   * pieces as candidates. No key is in two groups.
+   * Groups of keys that a solid keeping no face leaves uncertain, since no face shows which piece it came from: the solid, the keys one
+   * solid continued unchanged beside it and the keys no solid continues, then their descendants through each source and the members
+   * that can't be found while the group descends through the target. A reference to one resolves as ambiguous with the group's pieces
+   * among its candidates: a stated superset of the pieces it names. No key is in two groups.
    */
   readonly ambiguous?: readonly (readonly CadBodyKey[])[];
   /**
-   * Sets of sibling keys that one split gave in an order the kernel decided: pieces tied by rank, or ordered by faces of different solids
-   * or by none. These are the only steps where another kernel order would have given a solid another key, since every later step follows
-   * its solid. Each set has two or more keys with one parent, each ending in a `split` step. A set is kept while one of its keys is, or
-   * leads to, a piece, a group's key or a key of another kept set.
+   * The splits whose pieces the kernel's order numbered, with what decides each piece's place, from which `cadBodyOrderPlaces` gives every
+   * index each piece takes in some order. These are the only steps where another kernel order would give a solid another key, since
+   * every later step follows its solid. An order is kept while one of its keys is, or leads to, a piece or a group's key.
    */
-  readonly interchangeable?: readonly (readonly CadBodyKey[])[];
+  readonly orders?: readonly CadBodyOrder[];
   /** The body has more parts than the lineage tracks, so it keeps none, and references to its parts resolve as missing. */
   readonly untracked?: true;
 }
 
 /**
- * The most distinct part keys a body tracks: its pieces, the keys its groups keep and the keys its interchangeable sets keep, together.
- * Past it the body's parts are untracked from then on, never a rejected build. A group keeps every former member's key while a solid
- * descends from it, so each feature that splits or removes an ambiguous piece adds keys, however few solids are left.
+ * A split whose pieces the kernel's order numbered: their keys, siblings with consecutive indices, in this build's order, and what decides
+ * each one's place. A Boolean may list its solids in any order, and a source's faces follow the order of the source's solids, so:
+ * - without `by`, any order may number the pieces in any order: they tied on their first face, or kept no face;
+ * - with `by`, each piece's first face lies in one of several source solids, and `by` gives, for each piece, pairs of a source solid and
+ *   the piece's first face in it, both as ranks from 0, solids ascending. A piece comes after every piece keeping a face of a solid listed
+ *   before the first of its own, then after the pieces whose first face in that solid comes before its own, and among those tying with it
+ *   in any order.
+ * `cadBodyOrderPlaces` gives every index each piece takes in some order.
+ */
+export interface CadBodyOrder {
+  readonly keys: readonly CadBodyKey[];
+  readonly by?: readonly (readonly number[])[];
+}
+
+/**
+ * The most source solids an order's places are found for exactly when its pieces keep faces of several of them: past it, and past
+ * `MAX_CAD_BODY_ORDER_WORK`, the order is recorded without `by`, so each of its pieces may take any of its indices, a stated superset.
+ */
+export const MAX_CAD_BODY_SHARED_SOLIDS = 10;
+/** The most work finding an order's places may take, in steps over its shared solids and its pieces. */
+export const MAX_CAD_BODY_ORDER_WORK = 2 ** 22;
+
+/**
+ * The most distinct part keys a body tracks: its pieces, the keys its groups keep and the keys its orders number, together. Past it the
+ * body's parts are untracked from then on, never a rejected build. A group keeps every former member's key while a solid descends from it,
+ * so each feature that splits or removes an ambiguous piece adds keys, however few solids are left.
  */
 export const MAX_CAD_BODY_LIST = 4096;
 
@@ -139,27 +161,49 @@ export function isCadBodyState(value: unknown): value is CadBodyState {
   if (!Array.isArray(modifiedBy)) return false;
   for (const id of modifiedBy) if (!isFeatureId(id)) return false;
   if (body.consumedBy !== undefined && !isFeatureId(body.consumedBy)) return false;
-  if (body.untracked !== undefined) return body.untracked === true && body.pieces === undefined && body.ambiguous === undefined && body.interchangeable === undefined;
+  if (body.untracked !== undefined) return body.untracked === true && body.pieces === undefined && body.ambiguous === undefined && body.orders === undefined;
   let makers: ReadonlySet<string> | undefined;
   const made = () => makers ??= new Set([body.createdBy as string, ...modifiedBy as string[]]);
   const pieces = new Set<string>();
   if (body.pieces !== undefined && !isPartKeys(body.pieces, key, made, pieces)) return false;
-  // Pieces and the keys groups and sets keep count against the list limit together.
+  // Pieces and the keys groups and orders keep count against the list limit together.
   const all = new Set(pieces);
-  const lists = (value: unknown, fits: (list: readonly string[]) => boolean) => {
+  const lists = (value: unknown, list: (item: unknown) => unknown, fits: (item: unknown, keys: readonly string[]) => boolean) => {
     if (value === undefined) return true;
     if (!Array.isArray(value) || value.length > MAX_CAD_BODY_LIST) return false;
     const seen = new Set<string>();
-    for (const list of value) {
-      if (!Array.isArray(list) || !list.length || !isPartKeys(list, key, made, seen) || !fits(list)) return false;
-      for (const part of list) all.add(part);
+    for (const item of value) {
+      const keys = list(item);
+      if (!Array.isArray(keys) || !keys.length || !isPartKeys(keys, key, made, seen) || !fits(item, keys)) return false;
+      for (const part of keys) all.add(part);
       if (all.size > MAX_CAD_BODY_LIST) return false;
     }
     return true;
   };
-  const parent = (part: string) => part.slice(0, part.lastIndexOf('/'));
-  return lists(body.ambiguous, () => true)
-    && lists(body.interchangeable, set => set.length > 1 && set.every(part => parent(part) === parent(set[0]) && part.startsWith('split(', part.lastIndexOf('/') + 1)));
+  return lists(body.ambiguous, group => group, () => true)
+    && lists(body.orders, order => typeof order === 'object' && order !== null ? (order as Readonly<Record<string, unknown>>).keys : undefined, isOrder);
+}
+
+/** Whether `keys`, part keys already checked, and `order`'s `by` make an order `cadBodyParts` could have recorded. */
+function isOrder(order: unknown, keys: readonly string[]): boolean {
+  if (keys.length < 2) return false;
+  const first = keys[0], parent = first.slice(0, first.lastIndexOf('/') + 1), start = splitIndexOf(first);
+  if (start === undefined) return false;
+  for (const [i, part] of keys.entries()) if (part !== `${parent}split(${start + i})`) return false;
+  const by = (order as Readonly<Record<string, unknown>>).by;
+  if (by === undefined) return true;
+  if (!Array.isArray(by) || by.length !== keys.length) return false;
+  for (const pairs of by) {
+    if (!Array.isArray(pairs) || !pairs.length || pairs.length % 2 || pairs.length > 2 * MAX_CAD_BODY_SHARED_SOLIDS) return false;
+    for (const [i, value] of pairs.entries()) if (!Number.isSafeInteger(value) || value < 0 || i % 2 === 0 && i && value <= pairs[i - 2]) return false;
+  }
+  return orderWork(by) <= MAX_CAD_BODY_ORDER_WORK;
+}
+
+/** The index of a key whose last occurrence is `split(k)`, or `undefined`. */
+function splitIndexOf(key: string): number | undefined {
+  const match = /\/split\((0|[1-9]\d{0,5})\)$/.exec(key);
+  return match ? Number(match[1]) : undefined;
 }
 
 const BODY_ISSUE_CODES: ReadonlySet<unknown> = new Set<CadBodyIssue['code']>(['ambiguous-body-parts', 'lost-body-parts', 'untracked-body-parts', 'more-body-issues']);
@@ -186,7 +230,8 @@ export function cadBodyFeatureId(state: Pick<CadBodyState, 'createdBy' | 'modifi
  *   resolve as ambiguous. Each ambiguous key is listed by the issue of the feature that made it ambiguous: a later key that is ambiguous
  *   only because it descends from one extends that issue, so the same uncertainty is reported once, until the issue lists
  *   `MAX_CAD_BODY_LIST` keys; past that, the later feature lists the rest in an issue of its own.
- * - `lost-body-parts`: `featureId` removed `pieces` of `body`, or merged them into another solid. References to them resolve as missing.
+ * - `lost-body-parts`: `featureId` removed the solids `pieces` of `body` named, in every kernel order, or merged them into another solid.
+ *   References to them resolve as missing.
  * - `untracked-body-parts`: after `featureId`, `body` has more parts than the lineage tracks, so it keeps none from then on.
  * - `more-body-issues`: the issues from `featureId` on did not fit in the list; the message gives how many were left out.
  */
@@ -297,7 +342,7 @@ function freeze<T extends object>(value: T): T { return Object.freeze(value); }
 export interface CadBodyParts {
   readonly pieces?: readonly CadBodyKey[];
   readonly ambiguous?: readonly (readonly CadBodyKey[])[];
-  readonly interchangeable?: readonly (readonly CadBodyKey[])[];
+  readonly orders?: readonly CadBodyOrder[];
   readonly untracked?: true;
   /**
    * Keys the feature itself left ambiguous, for a new `ambiguous-body-parts` issue: none was ambiguous before it or descends from a key
@@ -306,7 +351,7 @@ export interface CadBodyParts {
   readonly ambiguousNow: readonly CadBodyKey[];
   /** Keys that are ambiguous because they descend from a key that was ambiguous before the feature, each with that key, whose issue lists them too. */
   readonly inherited: readonly (readonly [CadBodyKey, CadBodyKey])[];
-  /** Keys of the body before the feature that it removed or merged into another solid, for a `lost-body-parts` issue. */
+  /** Keys of the body before the feature that it left naming no solid in any kernel order, for a `lost-body-parts` issue. */
   readonly lost: readonly CadBodyKey[];
   /** The feature gave the body more parts than the lineage tracks, for an `untracked-body-parts` issue. */
   readonly overflowed?: true;
@@ -319,34 +364,250 @@ const UNTRACKED: CadBodyParts = freeze({ untracked: true as const, ambiguousNow:
 const OVERFLOWED: CadBodyParts = freeze({ untracked: true as const, ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE, overflowed: true as const });
 /** What every tool solid passes on: never a key, since a key is never empty. Solids of a fused tool alone get fresh keys. */
 const TOOL = '' as CadBodyKey;
-/** The `from` of a solid that keeps no face. */
-const NO_FACE = -2;
 
-/** The faces of one source that a solid of the result keeps for one key: the lowest rank, and the source solid they lie in, -1 for several. */
-interface Lead { rank: number; readonly source: number; solid: number }
+/**
+ * The faces of one source that a solid of the result keeps for one key: the lowest rank, the source it lies in, which comes first of those
+ * the key's faces come through, and the lowest rank in each of that source's solids.
+ */
+interface Lead { rank: number; source: number; solids: Map<number, number> }
 /**
  * A solid of the result in an ordered list: those continuing one key, the tool's, the merges, or those keeping no face. `rank` orders the
- * list, by the lowest face the solid keeps, which lies in solid `from` of source `source`: -1 when it decides by several of that source's
- * solids, `NO_FACE` when it keeps none.
+ * list, by the lowest face the solid keeps, which lies in source `source`, -1 when it keeps none. `solids` gives the lowest face it keeps in
+ * each solid of that source, which decides its place in other kernel orders.
  */
-interface Placed { readonly solid: number; readonly rank: number; readonly source: number; readonly from: number }
+interface Placed { readonly solid: number; readonly rank: number; readonly source: number; readonly solids: readonly (readonly [number, number])[] }
 /** A key before a feature that a solid of its result keeps faces of, and the source they came through. */
 interface Descent { readonly origin: CadBodyKey; readonly via: number }
+/** Entries `start` to `end` of an ordered list, which the kernel's order numbers, with what places each one, as `CadBodyOrder.by`. */
+interface Run { readonly start: number; readonly end: number; readonly by?: readonly (readonly number[])[] }
 
 /**
- * The entries of an ordered list whose order the kernel decides: ranks order solids only when the faces they decide by lie in the same
- * solid of a source, since faces of different solids rank in the order the kernel lists those solids, and solids keeping no face come in
- * the kernel's order. So each source's entries form a group unless they all decide by one solid, and then entries of equal rank, which the
- * kernel's order breaks, still do.
+ * The runs of an ordered list whose order the kernel decides: ranks order solids by faces of one solid of a source, since faces of
+ * different solids rank in the order the kernel lists those solids, and solids keeping no face come in the kernel's order. So a source's
+ * entries that decide by several of its solids are a run, with what places each one; of those that decide by one, entries of equal rank,
+ * which the kernel's order breaks, are a run, as the entries keeping no face are. An entry alone is in no run, whatever decides it.
  */
-function unsettled(list: readonly Placed[]): readonly (readonly Placed[])[] {
-  const group = (entries: readonly Placed[], by: (entry: Placed) => number) => {
-    const groups = new Map<number, Placed[]>();
-    for (const entry of entries) { const same = groups.get(by(entry)); if (same) same.push(entry); else groups.set(by(entry), [entry]); }
-    return [...groups.values()].filter(same => same.length > 1);
+function orderRuns(list: readonly Placed[]): readonly Run[] {
+  const runs: Run[] = [];
+  for (let start = 0, end = 1; start < list.length; start = end, end = start + 1) {
+    while (end < list.length && list[end].source === list[start].source) end++;
+    if (end - start < 2) continue;
+    const group = list.slice(start, end), solids = [...new Set(group.flatMap(entry => entry.solids.map(([solid]) => solid)))].sort((a, b) => a - b);
+    if (solids.length > 1) {
+      const by = orderBy(group, solids);
+      runs.push(orderWork(by) <= MAX_CAD_BODY_ORDER_WORK ? { start, end, by } : { start, end });
+    } else if (!solids.length) runs.push({ start, end });
+    else for (let at = start, to = at + 1; at < end; at = to, to = at + 1) {
+      while (to < end && list[to].rank === list[at].rank) to++;
+      if (to - at > 1) runs.push({ start: at, end: to });
+    }
+  }
+  return runs;
+}
+
+/** Each entry's source solids and first faces in them, as ranks from 0, solids ascending. */
+function orderBy(group: readonly Placed[], solids: readonly number[]): readonly (readonly number[])[] {
+  const numbers = new Map(solids.map((solid, n) => [solid, n])), ranks = new Map<number, number[]>(solids.map(solid => [solid, []]));
+  for (const entry of group) for (const [solid, rank] of entry.solids) ranks.get(solid)!.push(rank);
+  const dense = new Map([...ranks].map(([solid, list]) => [solid, new Map([...new Set(list)].sort((a, b) => a - b).map((rank, n) => [rank, n]))]));
+  return freeze(group.map(entry => freeze([...entry.solids].sort((a, b) => a[0] - b[0]).flatMap(([solid, rank]) => [numbers.get(solid)!, dense.get(solid)!.get(rank)!]))));
+}
+
+/**
+ * The work finding the places of an order with `by` takes: each piece keeping a face of a shared solid, one some piece keeps first faces
+ * of together with another solid, counts each subset of the shared solids, and the sums of the other pieces' blocks. Infinite past
+ * `MAX_CAD_BODY_SHARED_SOLIDS`.
+ */
+function orderWork(by: readonly (readonly number[])[]): number {
+  const shared = new Set<number>();
+  for (const pairs of by) if (pairs.length > 2) for (let i = 0; i < pairs.length; i += 2) shared.add(pairs[i]);
+  if (shared.size > MAX_CAD_BODY_SHARED_SOLIDS) return Infinity;
+  let touching = 0;
+  for (const pairs of by) for (let i = 0; i < pairs.length; i += 2) if (shared.has(pairs[i])) { touching++; break; }
+  return touching * (2 ** shared.size + Math.min(touching, by.length - touching + 1) * ((by.length >>> 5) + 1));
+}
+
+/** A set of places from 0, as bits. */
+type Places = Uint32Array;
+function noPlaces(count: number): Places { return new Uint32Array((count >>> 5) + 1); }
+function hasPlace(places: Places, at: number): boolean { return (places[at >>> 5] >>> (at & 31) & 1) === 1; }
+function addPlace(places: Places, at: number): void { places[at >>> 5] |= 1 << (at & 31); }
+/** Adds to `into` each place of `from` moved up by `shift`, top down so that `from` may be `into`. Places past `into`'s size are dropped. */
+function addShifted(into: Places, from: Places, shift: number): void {
+  const words = shift >>> 5, bits = shift & 31;
+  for (let i = into.length - 1; i >= words; i--) {
+    const at = i - words;
+    into[i] |= from[at] << bits | (bits && at ? from[at - 1] >>> 32 - bits : 0);
+  }
+}
+/** `places` moved up by each of 0 to `width`. */
+function spread(places: Places, width: number): Places {
+  const out = places.slice();
+  for (let covered = 1; covered <= width;) { const step = Math.min(covered, width + 1 - covered); addShifted(out, out, step); covered += step; }
+  return out;
+}
+
+const orderPlaces = new WeakMap<CadBodyOrder, readonly Places[]>();
+/** The places, from the order's first index, each of `order`'s pieces takes in some kernel order; found once per order. */
+function placesOf(order: CadBodyOrder): readonly Places[] {
+  let found = orderPlaces.get(order);
+  if (!found) {
+    if (order.by) found = byPlaces(order.by);
+    else {
+      const every = noPlaces(order.keys.length);
+      for (let at = 0; at < order.keys.length; at++) addPlace(every, at);
+      found = order.keys.map(() => every);
+    }
+    orderPlaces.set(order, found);
+  }
+  return found;
+}
+
+/** Every index each of `order`'s pieces takes in some kernel order, ascending. */
+export function cadBodyOrderPlaces(order: CadBodyOrder): readonly (readonly number[])[] {
+  const start = splitIndexOf(order.keys[0]) ?? 0, count = order.keys.length;
+  return placesOf(order).map(places => { const list: number[] = []; for (let at = 0; at < count; at++) if (hasPlace(places, at)) list.push(start + at); return list; });
+}
+
+/** Whether a kernel order other than this build's may give `order`'s piece `i` another index. */
+function unsettledAt(order: CadBodyOrder, i: number): boolean {
+  if (!order.by) return true;
+  const places = placesOf(order)[i];
+  let seen = 0;
+  for (let at = 0; at < order.keys.length; at++) if (hasPlace(places, at) && ++seen > 1) return true;
+  return false;
+}
+
+/**
+ * The places of an order with `by`. A piece comes first in its solid t when the other solids it keeps faces of come after t, and then
+ * comes after the pieces keeping a face of a solid before t, whichever of the other solids those are, after the pieces whose first face in t
+ * comes before its own, and anywhere among those tying with it there. A solid whose pieces keep faces of it alone adds them as a block, so
+ * the blocks before t add each sum of block sizes; for the shared solids, each subset that may come before t is counted.
+ */
+function byPlaces(by: readonly (readonly number[])[]): readonly Places[] {
+  const count = by.length, bit = new Map<number, number>();
+  for (const pairs of by) if (pairs.length > 2) for (let i = 0; i < pairs.length; i += 2) if (!bit.has(pairs[i])) bit.set(pairs[i], bit.size);
+  const full = (1 << bit.size) - 1, masks = by.map(pairs => {
+    let mask = 0;
+    for (let i = 0; i < pairs.length; i += 2) { const b = bit.get(pairs[i]); if (b !== undefined) mask |= 1 << b; }
+    return mask;
+  });
+  const touching = masks.filter(mask => mask).length, blocks = new Map<number, number[]>();
+  by.forEach((pairs, e) => { if (masks[e]) return; const block = blocks.get(pairs[0]); if (block) block.push(e); else blocks.set(pairs[0], [e]); });
+  // within[m]: the pieces keeping faces of shared solids in m only, so the shared solids in p come before every other piece of theirs.
+  const within = new Int32Array(full + 1);
+  for (const mask of masks) if (mask) within[mask]++;
+  for (let b = 0; b < bit.size; b++) for (let m = 0; m <= full; m++) if (m & 1 << b) within[m] += within[m ^ 1 << b];
+  const claimed = (before: number) => touching - within[full & ~before];
+  // The sums of block sizes, leaving one block of a size out for that block's own pieces, by bounded subset sums.
+  const sizes = new Map<number, number>(), sums = new Map<number, Places>();
+  for (const block of blocks.values()) sizes.set(block.length, (sizes.get(block.length) ?? 0) + 1);
+  const sumsWithout = (size: number) => {
+    let found = sums.get(size);
+    if (!found) {
+      found = noPlaces(count); addPlace(found, 0);
+      for (const [length, many] of sizes)
+        for (let left = many - (length === size ? 1 : 0), take = 1; left > 0; left -= take, take *= 2) addShifted(found, found, length * Math.min(take, left));
+      sums.set(size, found);
+    }
+    return found;
   };
-  return group(list, entry => entry.source).flatMap(same => same.every(entry => entry.from >= 0 && entry.from === same[0].from)
-    ? group(same, entry => entry.rank) : [same]);
+  const places = new Array<Places>(count);
+  // A block's piece: any subset of the shared solids and any other blocks may come before its solid.
+  const claims = noPlaces(count), withClaims = new Map<number, Places>();
+  for (let before = 0; before <= full; before++) addPlace(claims, claimed(before));
+  for (const block of blocks.values()) {
+    let base = withClaims.get(block.length);
+    if (!base) {
+      const without = sumsWithout(block.length);
+      base = noPlaces(count);
+      for (let at = 0; at <= touching; at++) if (hasPlace(claims, at)) addShifted(base, without, at);
+      withClaims.set(block.length, base);
+    }
+    const ranks = block.map(e => by[e][1]).sort((a, b) => a - b);
+    for (const e of block) {
+      const rank = by[e][1], less = lowerBound(ranks, rank), ties = lowerBound(ranks, rank + 1) - less - 1, placed = noPlaces(count);
+      addShifted(placed, spread(base, ties), less);
+      places[e] = placed;
+    }
+  }
+  // A piece keeping faces of shared solids: for each solid t of its own that comes first, each subset of the shared solids it keeps no face
+  // of may come before t, counted with the pieces of t before it and those tying with it that keep no face of that subset.
+  const spans: number[][] = by.map(() => []);
+  const add = (counts: Int32Array, mask: number, step: number) => { for (let m = mask; m <= full; m = (m + 1) | mask) counts[m] += step; };
+  for (const [solid, b] of bit) {
+    const at: (readonly [number, number])[] = [];
+    by.forEach((pairs, e) => { if (masks[e] & 1 << b) for (let i = 0; i < pairs.length; i += 2) if (pairs[i] === solid) at.push([e, pairs[i + 1]]); });
+    at.sort((x, y) => x[1] - y[1]);
+    const less = new Int32Array(full + 1), tied = new Int32Array(full + 1);
+    for (let from = 0, to = 1; from < at.length; from = to, to = from + 1) {
+      while (to < at.length && at[to][1] === at[from][1]) to++;
+      for (let i = from; i < to; i++) add(tied, masks[at[i][0]], 1);
+      for (let i = from; i < to; i++) {
+        const e = at[i][0], others = full & ~masks[e];
+        for (let before = others; ; before = (before - 1) & others) {
+          const after = full & ~before, first = claimed(before) + less[after];
+          spans[e].push(first, first + tied[after] - 1);
+          if (!before) break;
+        }
+      }
+      for (let i = from; i < to; i++) { add(tied, masks[at[i][0]], -1); add(less, masks[at[i][0]], 1); }
+    }
+  }
+  const sumsAll = sumsWithout(0);
+  masks.forEach((mask, e) => {
+    if (!mask) return;
+    const list = spans[e], pairs: [number, number][] = [];
+    for (let i = 0; i < list.length; i += 2) pairs.push([list[i], list[i + 1]]);
+    pairs.sort((x, y) => x[0] - y[0]);
+    const placed = noPlaces(count);
+    for (let i = 0; i < pairs.length;) {
+      const low = pairs[i][0];
+      let high = pairs[i][1];
+      for (i++; i < pairs.length && pairs[i][0] <= high + 1; i++) high = Math.max(high, pairs[i][1]);
+      addShifted(placed, spread(sumsAll, high - low), low);
+    }
+    places[e] = placed;
+  });
+  // Each piece takes the index this build gave it: kept should faces ever rank otherwise, so a piece is never settled at another index.
+  places.forEach((placed, e) => addPlace(placed, e));
+  return freeze(places);
+}
+
+/** The first place in `sorted` holding a value of at least `value`. */
+function lowerBound(sorted: readonly number[], value: number): number {
+  let low = 0, high = sorted.length;
+  while (low < high) { const mid = (low + high) >>> 1; if (sorted[mid] < value) low = mid + 1; else high = mid; }
+  return low;
+}
+
+/** A body's orders by the keys they number, and by the key whose pieces they number, for resolving its keys; made once per list. */
+interface OrderIndex { readonly at: ReadonlyMap<string, readonly [CadBodyOrder, number]>; readonly under: ReadonlyMap<string, readonly CadBodyOrder[]> }
+const NO_ORDERS: OrderIndex = { at: new Map(), under: new Map() };
+const orderIndexes = new WeakMap<readonly CadBodyOrder[], OrderIndex>();
+function orderIndex(orders: readonly CadBodyOrder[] | undefined): OrderIndex {
+  if (!orders?.length) return NO_ORDERS;
+  let index = orderIndexes.get(orders);
+  if (!index) {
+    const at = new Map<string, readonly [CadBodyOrder, number]>(), under = new Map<string, CadBodyOrder[]>();
+    for (const order of orders) {
+      order.keys.forEach((part, i) => at.set(part, [order, i]));
+      const parent = order.keys[0].slice(0, order.keys[0].lastIndexOf('/')), list = under.get(parent);
+      if (list) list.push(order); else under.set(parent, [order]);
+    }
+    orderIndexes.set(orders, index = { at, under });
+  }
+  return index;
+}
+
+/** Whether a kernel order other than this build's may give the solid `key` names, or one it descends from, another index. */
+function unsettled(index: OrderIndex, key: string): boolean {
+  if (!index.at.size) return false;
+  for (let end = key.length; end > 0; end = key.lastIndexOf('/', end - 1)) {
+    const found = index.at.get(key.slice(0, end));
+    if (found && unsettledAt(found[0], found[1])) return true;
+  }
+  return false;
 }
 
 /**
@@ -369,25 +630,24 @@ function unsettled(list: readonly Placed[]): readonly (readonly Placed[])[] {
  *   it, or which piece no solid continues it is: those keys and it are ambiguous together.
  * A key continued by one solid stays; continued by several, each is `key/split(q)`, q by the rank of the first face it keeps, then the
  * solids keeping none. Fresh keys are `feature/split(k)`: solids continuing the tool by rank, merges by rank, then solids keeping no face.
- * Ranks order only solids whose first faces lie in the same solid of a source and differ: solids ordered by faces of different solids of
- * one source, as a whole body's several solids are, by equal ranks or by the kernel's order are ambiguous when there are two or more of
- * them, never ordered by where they lie. A piece no solid continues or merges is lost, unless pieces can't be identified.
+ * Where the kernel's order decides those indices, the split is recorded as an order (`orderRuns`) with what places each piece; a piece
+ * that some order places otherwise is ambiguous, and so is every key continuing it. A key that named a piece before, in some order, and
+ * names none now is lost, unless a solid it could name continues, as an old key does once its solid split or was copied.
  *
- * Ambiguity carries in groups: the keys that descend from one group through one source form a group, so the copies of one pattern
- * occurrence are never confused with another's. A group's earlier pieces that no solid continues stay in it, as keys that can't be found,
- * while any solid descends from the group through the target, and are lost once none does. So do earlier pieces continued under other
- * keys, split or copied, since the kernel's order picked which member's key each solid continued.
+ * Uncertain provenance carries in groups: the keys that descend from one group through one source form a group, so the copies of one
+ * pattern occurrence are never confused with another's. A group's earlier keys that are no longer pieces stay in it, as keys that can't
+ * be found, while any solid descends from the group through the target, and are lost once none does.
  */
 export function cadBodyParts(input: {
   readonly featureId: string;
-  readonly previous: Pick<CadBodyState, 'key' | 'pieces' | 'ambiguous' | 'interchangeable' | 'untracked'>;
+  readonly previous: Pick<CadBodyState, 'key' | 'pieces' | 'ambiguous' | 'orders' | 'untracked'>;
   readonly beforeSolids: number | undefined;
   readonly facts: CadBodyKernelFacts;
 }): CadBodyParts {
   const { featureId, previous, facts } = input, key = previous.key, count = facts.solids, before = previous.pieces;
   if (previous.untracked) return UNTRACKED;
   if (before && facts.sameSolidOrder && before.length === count) return freeze({ pieces: before, ...(previous.ambiguous ? { ambiguous: previous.ambiguous } : {}),
-    ...(previous.interchangeable ? { interchangeable: previous.interchangeable } : {}), ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
+    ...(previous.orders ? { orders: previous.orders } : {}), ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
   const patterned = facts.sources.some(source => source.kind === 'copy'), fused = facts.sources.some(source => source.kind === 'tool');
   const beforeSolids = input.beforeSolids ?? 1;
   if (!before && (count <= 1 || fused && !patterned || !patterned && !facts.removesMaterial && count <= beforeSolids)) return WHOLE;
@@ -396,19 +656,24 @@ export function cadBodyParts(input: {
   if (traced.length !== count) throw new Error('Each solid of the result needs its sources.');
   if (!before && (patterned ? traced.every(sources => sources.some(entry => entry.source === 0)) : !splits(traced, count, beforeSolids))) return WHOLE;
 
-  // The key each source solid passes on, and for a target solid or a copy the piece before it came from.
+  // The key each source solid passes on, and the key before it came from.
   const previousKey = (solid: number) => {
     const found = before ? before[solid] : key;
     if (found === undefined) throw new Error('A source solid the body did not have.');
     return found;
   };
-  const targetFrom = new Map<CadBodyKey, CadBodyKey>();
+  const originOf = new Map<CadBodyKey, CadBodyKey>();
   const continued = new Map<CadBodyKey, Placed[]>(), merged: Placed[] = [], orphans: number[] = [];
   const continuedFrom = new Set<CadBodyKey>(), mergedFrom = new Set<CadBodyKey>(), descends: (readonly Descent[])[] = [];
+  // Only the first source a key's faces come through decides the solid's place: its faces rank before any later source's.
   const note = (into: Map<CadBodyKey, Lead>, passed: CadBodyKey, rank: number, source: number, solid: number) => {
     const lead = into.get(passed);
-    if (!lead) into.set(passed, { rank, source, solid });
-    else { if (rank < lead.rank) lead.rank = rank; if (lead.solid !== solid) lead.solid = -1; }
+    if (!lead) { into.set(passed, { rank, source, solids: new Map([[solid, rank]]) }); return; }
+    if (source > lead.source) return;
+    if (source < lead.source) { lead.rank = rank; lead.source = source; lead.solids = new Map([[solid, rank]]); return; }
+    if (rank < lead.rank) lead.rank = rank;
+    const known = lead.solids.get(solid);
+    if (known === undefined || rank < known) lead.solids.set(solid, rank);
   };
   const push = (passed: CadBodyKey, entry: Placed) => { const list = continued.get(passed); if (list) list.push(entry); else continued.set(passed, [entry]); };
   traced.forEach((sources, solid) => {
@@ -421,16 +686,16 @@ export function cadBodyParts(input: {
       if (source.kind === 'tool') { note(added, TOOL, rank, entry.source, entry.solid); continue; }
       const origin = previousKey(entry.solid);
       from.push({ origin, via: entry.source });
-      if (source.kind === 'copy') { note(added, cadBodyKeyWith(origin, { kind: 'inst', i: source.i, j: source.j }), rank, entry.source, entry.solid); continue; }
-      const passed = patterned ? cadBodyKeyWith(origin, { kind: 'inst', i: 0, j: 0 }) : origin;
-      targetFrom.set(passed, origin);
-      note(targets, passed, rank, entry.source, entry.solid);
+      const passed = source.kind === 'copy' ? cadBodyKeyWith(origin, { kind: 'inst', i: source.i, j: source.j })
+        : patterned ? cadBodyKeyWith(origin, { kind: 'inst', i: 0, j: 0 }) : origin;
+      originOf.set(passed, origin);
+      note(source.kind === 'copy' ? added : targets, passed, rank, entry.source, entry.solid);
     }
     descends[solid] = from;
-    const placed = (lead: Lead): Placed => ({ solid, rank: lead.rank, source: lead.source, from: lead.solid });
+    const placed = (lead: Lead): Placed => ({ solid, rank: lead.rank, source: lead.source, solids: [...lead.solids] });
     if (targets.size === 1) {
       const [[passed, lead]] = targets;
-      push(passed, placed(lead)); continuedFrom.add(targetFrom.get(passed)!);
+      push(passed, placed(lead)); continuedFrom.add(originOf.get(passed)!);
     } else if (targets.size === 0 && added.size === 1) {
       const [[passed, lead]] = added;
       push(passed, placed(lead));
@@ -438,48 +703,51 @@ export function cadBodyParts(input: {
       const leads = [...targets.values(), ...added.values()];
       let first = leads[0];
       for (const lead of leads) if (lead.rank < first.rank) first = lead;
-      // Which of a merge's keys gives its first face depends on the kernel's order when two of them come through the same source.
-      merged.push({ ...placed(first), from: leads.some(lead => lead !== first && lead.source === first.source) ? -1 : first.solid });
-      for (const passed of targets.keys()) mergedFrom.add(targetFrom.get(passed)!);
+      // A merge's first face is the first that any of its keys keeps through the source that comes first.
+      const solids = new Map<number, number>();
+      for (const lead of leads) {
+        if (lead.source !== first.source) continue;
+        for (const [at, rank] of lead.solids) { const known = solids.get(at); if (known === undefined || rank < known) solids.set(at, rank); }
+      }
+      merged.push({ solid, rank: first.rank, source: first.source, solids: [...solids] });
+      for (const passed of targets.keys()) mergedFrom.add(originOf.get(passed)!);
     } else orphans.push(solid);
   });
 
   // A solid keeping no face descends from the target's one key when nothing else could have made it.
   if (orphans.length && !patterned && !fused && (!before || before.length === 1)) {
     const origin = before ? before[0] : key;
-    for (const solid of orphans) { push(origin, { solid, rank: Infinity, source: -1, from: NO_FACE }); descends[solid] = [{ origin, via: 0 }]; }
-    continuedFrom.add(origin);
+    for (const solid of orphans) { push(origin, { solid, rank: Infinity, source: -1, solids: [] }); descends[solid] = [{ origin, via: 0 }]; }
+    continuedFrom.add(origin); originOf.set(origin, origin);
     orphans.length = 0;
   }
-  const pieces = new Array<CadBodyKey>(count), unordered: (readonly Placed[])[] = [], unchanged: number[] = [];
+  const pieces = new Array<CadBodyKey>(count), unchanged: number[] = [], orders: CadBodyOrder[] = [];
   const byRank = (a: Placed, b: Placed) => a.rank - b.rank || a.solid - b.solid;
+  const ordered = (list: readonly Placed[]) => {
+    for (const run of orderRuns(list))
+      orders.push(freeze({ keys: freeze(list.slice(run.start, run.end).map(entry => pieces[entry.solid])), ...(run.by ? { by: run.by } : {}) }));
+  };
   for (const [passed, list] of continued) {
     if (passed === TOOL) continue;
     list.sort(byRank);
     if (list.length === 1 && passed !== key) { pieces[list[0].solid] = passed; unchanged.push(list[0].solid); }
     else list.forEach((entry, q) => { pieces[entry.solid] = withSplit(passed, q); });
-    unordered.push(...unsettled(list));
+    ordered(list);
   }
-  const tools = (continued.get(TOOL) ?? []).sort(byRank), left = orphans.map(solid => ({ solid, rank: Infinity, source: -1, from: NO_FACE }));
+  const tools = (continued.get(TOOL) ?? []).sort(byRank), left = orphans.map((solid): Placed => ({ solid, rank: Infinity, source: -1, solids: [] }));
   merged.sort(byRank);
-  unordered.push(...unsettled(tools), ...unsettled(merged), ...unsettled(left));
   [...tools, ...merged, ...left].forEach((entry, k) => { pieces[entry.solid] = cadBodyKey(featureId, [{ kind: 'split', k }]); });
+  ordered(tools); ordered(merged); ordered(left);
 
-  // Keys that must share a group: those whose order the kernel decides, and below, those a solid keeping no face leaves uncertain and the
-  // descendants of each earlier group through each source.
-  const sets: (readonly CadBodyKey[])[] = unordered.map(list => list.map(entry => pieces[entry.solid]));
-  // Those are siblings under one parent each, and the body's new interchangeable sets.
-  const swapped = sets.map(set => freeze(set));
-  const groupOf = new Map<CadBodyKey, number>();
-  previous.ambiguous?.forEach((group, g) => { for (const earlier of group) groupOf.set(earlier, g); });
-  // Keys before that no solid continues: unidentified when a solid keeping no face could be one of them, whatever group they were in;
-  // otherwise lost when merged or removed, or, for keys of an earlier group, left to their group below.
-  const lost: CadBodyKey[] = [], unidentified = new Set<CadBodyKey>();
-  for (const piece of before ?? []) {
-    if (continuedFrom.has(piece)) continue;
-    if (orphans.length && !mergedFrom.has(piece)) unidentified.add(piece); else if (!groupOf.has(piece)) lost.push(piece);
-  }
-  if (orphans.length) for (const [earlier] of groupOf) if (!continuedFrom.has(earlier) && !mergedFrom.has(earlier)) unidentified.add(earlier);
+  // Keys that must share a group: those a solid keeping no face leaves uncertain, and the descendants of each earlier group through each
+  // source.
+  // The group each earlier key is in comes from the index the previous state already has.
+  const sets: (readonly CadBodyKey[])[] = [], groupOf = partsOf(previous).groupOf;
+  const groupAt = new Map(previous.ambiguous?.map((group, g) => [group, g]));
+  // Keys before that no solid continues are unidentified when a solid keeping no face could be one of them, whatever group they were in.
+  const unidentified = new Set<CadBodyKey>();
+  if (orphans.length) for (const piece of before ?? []) if (!continuedFrom.has(piece) && !mergedFrom.has(piece)) unidentified.add(piece);
+  if (orphans.length) for (const earlier of previous.ambiguous?.flat() ?? []) if (!continuedFrom.has(earlier) && !mergedFrom.has(earlier)) unidentified.add(earlier);
   if (orphans.length) {
     // A key continued unchanged by one solid may also have split into a solid keeping no face, which would then have made it key/split(q).
     const uncertain = [...left.map(entry => pieces[entry.solid]), ...unchanged.map(solid => pieces[solid]), ...unidentified];
@@ -488,21 +756,28 @@ export function cadBodyParts(input: {
   const descent = new Map<string, CadBodyKey[]>(), inherited: (readonly [CadBodyKey, CadBodyKey])[] = [];
   pieces.forEach((piece, solid) => {
     for (const { origin, via } of descends[solid]) {
-      const g = groupOf.get(origin);
-      if (g === undefined) continue;
-      const id = `${g} ${via}`, group = descent.get(id);
+      const originGroup = groupOf.get(origin);
+      if (!originGroup) continue;
+      const id = `${groupAt.get(originGroup)} ${via}`, group = descent.get(id);
       if (!group) descent.set(id, [piece]); else if (group[group.length - 1] !== piece) group.push(piece);
       if (!groupOf.has(piece)) inherited.push([piece, origin]);
     }
   });
-  const now = new Set(pieces);
+  // A key continuing one that another kernel order could have numbered otherwise names another solid in that order, so it is ambiguous
+  // through that key. A merge's fresh key is not: it names the merge whichever key each piece had.
+  const earlier = orderIndex(previous.orders);
+  for (const [passed, list] of continued) {
+    const origin = originOf.get(passed);
+    if (origin === undefined || groupOf.has(origin) || !unsettled(earlier, origin)) continue;
+    for (const entry of list) if (pieces[entry.solid] !== origin) inherited.push([pieces[entry.solid], origin]);
+  }
+  const current = new Set(pieces);
   previous.ambiguous?.forEach((group, g) => {
     const home = descent.get(`${g} 0`);
-    for (const earlier of group) {
-      // Which member's key each solid continued follows the kernel's order, so a member's key that is no longer a piece, whether its solid
-      // split, was copied or went, may name any solid descending from the group in another order: it stays while one does.
-      if (now.has(earlier)) continue;
-      if (home) home.push(earlier); else if (!unidentified.has(earlier)) lost.push(earlier);
+    for (const member of group) {
+      // Which member a solid continued is uncertain, so a member's key that is no longer a piece, whether its solid split, was copied or
+      // went, may name any solid descending from the group: it stays while one does.
+      if (!current.has(member) && home) home.push(member);
     }
   });
   sets.push(...descent.values());
@@ -519,24 +794,32 @@ export function cadBodyParts(input: {
     for (const part of set) if (!parent.has(part)) parent.set(part, part);
     for (const part of set.slice(1)) parent.set(root(part), root(set[0]));
   }
-  // An earlier interchangeable set stays while one of its keys is, or leads to, a piece, a group's key or a key of another set that stays.
-  const leads = new Set<string>(), stays = new Set<readonly CadBodyKey[]>();
-  const reach = (part: string) => { for (let end = part.length; end > 0 && !leads.has(part.slice(0, end)); end = part.lastIndexOf('/', end - 1)) leads.add(part.slice(0, end)); };
-  for (const part of [...pieces, ...parent.keys(), ...swapped.flat()]) reach(part);
-  for (let more = true; more;) {
-    more = false;
-    for (const set of previous.interchangeable ?? []) if (!stays.has(set) && set.some(part => leads.has(part))) { stays.add(set); set.forEach(reach); more = true; }
-  }
-  const interchangeable = [...(previous.interchangeable ?? []).filter(set => stays.has(set)), ...swapped];
-  const all = new Set<CadBodyKey>([...pieces, ...parent.keys(), ...interchangeable.flat()]);
+  // An earlier order stays while one of its keys is, or leads to, a piece or a group's key: no key leads through its others.
+  const leads = addLeads(new Set(), [...pieces, ...parent.keys()]);
+  const kept = [...(previous.orders ?? []).filter(order => order.keys.some(part => leads.has(part))), ...orders];
+  const all = new Set<CadBodyKey>([...pieces, ...parent.keys(), ...kept.flatMap(order => order.keys)]);
   if (all.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED;
   const groups = new Map<CadBodyKey, CadBodyKey[]>();
   for (const part of parent.keys()) { const top = root(part), group = groups.get(top); if (group) group.push(part); else groups.set(top, [part]); }
-  const descended = new Set(inherited.map(([piece]) => piece));
-  const ambiguousNow = [...parent.keys()].filter(part => !groupOf.has(part) && !descended.has(part));
   const ambiguous = [...groups.values()].map(group => freeze(group));
+  // A key that named a piece before, in some kernel order, and names none now is lost, unless a solid it could name continues: then that
+  // solid split or was copied, and the key is an old one. So a piece's key is not lost while another order gives it a solid that is left.
+  const after: CadBodyPartsView = { pieces, ambiguous: ambiguous.length ? ambiguous : undefined, orders: kept };
+  partsOf(after, leads);
+  const namedNow = piecesNamer(after, () => true), namedBefore = piecesNamer(previous, () => true);
+  const continues = piecesNamer(previous, piece => continuedFrom.has(piece));
+  // The members of a group a solid descends from through the target are all in a group with that solid now, so none of them is lost.
+  const homeless = previous.ambiguous?.filter((_, g) => !descent.has(`${g} 0`)).flat() ?? [];
+  const lost = [...new Set<CadBodyKey>([...before ?? [], ...homeless, ...(previous.orders ?? []).flatMap(order => order.keys)])]
+    .filter(part => !namedNow(part) && !continues(part) && namedBefore(part));
+  // The keys this feature made ambiguous: its groups' keys and the pieces its orders may place otherwise, unless they were ambiguous before
+  // or are ambiguous through a key that was.
+  const descended = new Set(inherited.map(([piece]) => piece));
+  const orderedNow = orders.flatMap(order => order.keys.filter((_, i) => unsettledAt(order, i)));
+  const fresh = (part: CadBodyKey) => !descended.has(part) && !groupOf.has(part) && !unsettled(earlier, part);
+  const ambiguousNow = [...new Set([...[...parent.keys()].filter(fresh), ...orderedNow.filter(fresh)])];
   return freeze({ pieces: freeze(pieces), ...(ambiguous.length ? { ambiguous: freeze(ambiguous) } : {}),
-    ...(interchangeable.length ? { interchangeable: freeze(interchangeable) } : {}), ambiguousNow: freeze(ambiguousNow), inherited: freeze(inherited), lost: freeze(lost) });
+    ...(kept.length ? { orders: freeze(kept) } : {}), ambiguousNow: freeze(ambiguousNow), inherited: freeze(inherited), lost: freeze(lost) });
 }
 
 /**
@@ -571,7 +854,7 @@ interface Body {
   readonly consumedBy?: string;
   readonly pieces?: readonly CadBodyKey[];
   readonly ambiguous?: readonly (readonly CadBodyKey[])[];
-  readonly interchangeable?: readonly (readonly CadBodyKey[])[];
+  readonly orders?: readonly CadBodyOrder[];
   readonly untracked?: true;
   readonly solids: number | undefined;
   readonly order: number;
@@ -588,7 +871,7 @@ function stateOf(body: Body): CadBodyState {
     ...(body.untracked ? { untracked: true as const } : {}),
     ...(body.pieces && !body.untracked ? { pieces: body.pieces } : {}),
     ...(body.ambiguous?.length && !body.untracked ? { ambiguous: body.ambiguous } : {}),
-    ...(body.interchangeable?.length && !body.untracked ? { interchangeable: body.interchangeable } : {})
+    ...(body.orders?.length && !body.untracked ? { orders: body.orders } : {})
   });
 }
 
@@ -676,7 +959,7 @@ export function createCadBodyLineage(): CadBodyLineage {
         ...(from?.untracked ? { untracked: true as const } : {}),
         ...(from?.pieces && !from.untracked ? { pieces: from.pieces } : {}),
         ...(from?.ambiguous && !from.untracked ? { ambiguous: from.ambiguous } : {}),
-        ...(from?.interchangeable && !from.untracked ? { interchangeable: from.interchangeable } : {}),
+        ...(from?.orders && !from.untracked ? { orders: from.orders } : {}),
         solids: facts?.solids, order: applied
       };
       const gone: CadBodyKey[] = [];
@@ -758,57 +1041,112 @@ export type CadBodyRefResolution =
   | { readonly status: 'ambiguous'; readonly body: CadBodyState; readonly candidates: readonly CadBodyKey[] };
 
 /**
- * Resolves `ref` against `lineage` as it stands before the referring feature. A whole body's key resolves to it, and a piece's to that
- * part. An ambiguous key resolves as ambiguous, with the pieces of its group as candidates, or as missing once none is left. So does a
- * key no body lists that other kernel orders would have given a solid, among the groups of its twins (`twinGroups`). Anything else is
- * missing: a lost piece, a split piece's old key, a part of an untracked body, or a consumed body or one of its parts.
+ * Resolves `ref` against `lineage` as it stands before the referring feature. A whole body's key resolves to it. A part's key resolves
+ * among the pieces it names in some kernel order (`cadBodyKeyTwins`), with the pieces of any group those keys are in: to that part when it
+ * names the same piece in every order and is in no group, otherwise as ambiguous among those pieces, or as missing when there are none.
+ * So a lost piece, a split piece's old key, a part of an untracked body and a consumed body or one of its parts are missing.
  */
 export function resolveCadBodyRef(ref: CadBodyRef, lineage: Pick<CadBodyLineage, 'get' | 'bodies' | 'consumed'>): CadBodyRefResolution {
   const whole = lineage.get(ref.key);
   if (whole) return { status: 'resolved', body: whole };
-  const bodies = lineage.bodies(), among = (body: CadBodyState, groups: readonly (readonly CadBodyKey[])[]): CadBodyRefResolution | undefined => {
-    const pieces = new Set(body.pieces), candidates = groups.flat().filter(part => pieces.has(part));
-    return candidates.length ? { status: 'ambiguous', body, candidates } : undefined;
-  };
-  for (const body of bodies) {
-    const group = body.ambiguous?.find(keys => keys.includes(ref.key)), ambiguous = group && among(body, [group]);
-    if (ambiguous) return ambiguous;
-    if (body.pieces?.includes(ref.key)) return { status: 'resolved', body, part: ref.key };
+  for (const body of lineage.bodies()) {
+    const candidates = namedPieces(body, ref.key);
+    if (!candidates) continue;
+    if (!candidates.length) return { status: 'missing' };
+    if (candidates.length === 1 && candidates[0] === ref.key && !partsOf(body).groupOf.has(ref.key) && !unsettled(orderIndex(body.orders), ref.key))
+      return { status: 'resolved', body, part: ref.key };
+    return { status: 'ambiguous', body, candidates };
   }
-  for (const body of bodies) {
-    const groups = twinGroups(body, ref.key), ambiguous = groups && among(body, groups);
-    if (ambiguous) return ambiguous;
-  }
-  const gone = lineage.consumed().find(body => body.key === ref.key || body.pieces?.includes(ref.key) || body.ambiguous?.some(group => group.includes(ref.key))
-    || twinGroups(body, ref.key));
+  const gone = lineage.consumed().find(body => body.key === ref.key || cadBodyKeyTwins(body, ref.key).length);
   return gone?.consumedBy !== undefined ? { status: 'missing', consumedBy: gone.consumedBy } : { status: 'missing' };
 }
 
+/** What resolving a key reads of a body: its pieces, groups and orders. */
+type CadBodyPartsView = Pick<CadBodyState, 'pieces' | 'ambiguous' | 'orders'>;
+
 /**
- * The groups of the keys `body` lists in the place of `key`, which it does not list, in the order `body` lists its groups. Its twins are
- * the keys other kernel orders would have given its solid: kernel orders decide only which sibling of an interchangeable set names which
- * solid, and every later step follows its solid, so a twin is `key` with any of its steps, read from the first, changed to a sibling in
- * that step's interchangeable set. Steps no set holds stay, whatever groups their keys are in: a split whose pieces the faces ordered,
- * a copy and an image. Twins `body` never had lead nowhere, so the search keeps only keys that are, or lead to, a key it keeps.
+ * The pieces of `body` that `key` names in some kernel order, with the pieces of any group those keys are in, in the body's order: none
+ * when `key` led to the body's parts but names no piece now, and `undefined` when it never led to them.
  */
-function twinGroups(body: CadBodyState, key: CadBodyKey): readonly (readonly CadBodyKey[])[] | undefined {
-  if (!body.ambiguous || !body.interchangeable) return undefined;
-  const groupOf = new Map<string, readonly CadBodyKey[]>(), setOf = new Map<string, readonly CadBodyKey[]>(), leads = new Set<string>();
-  for (const group of body.ambiguous) for (const part of group) groupOf.set(part, group);
-  for (const set of body.interchangeable) for (const part of set) setOf.set(part, set);
-  for (const part of [...groupOf.keys(), ...setOf.keys()])
-    for (let end = part.length; end > 0 && !leads.has(part.slice(0, end)); end = part.lastIndexOf('/', end - 1)) leads.add(part.slice(0, end));
-  const steps = key.split('/');
+function namedPieces(body: CadBodyPartsView, key: CadBodyKey): readonly CadBodyKey[] | undefined {
+  const twins = cadBodyKeyTwins(body, key);
+  if (!twins.length) return undefined;
+  const { pieces, groupOf } = partsOf(body), named = new Set<string>();
+  for (const twin of twins) {
+    if (pieces.has(twin)) named.add(twin);
+    for (const part of groupOf.get(twin) ?? NONE) if (pieces.has(part)) named.add(part);
+  }
+  return body.pieces!.filter(piece => named.has(piece));
+}
+
+/**
+ * Tells whether a key names, in some kernel order, a piece of `body` that passes `test`, as `namedPieces` finds them: its own piece and
+ * group first, then its twins', looking through each group once.
+ */
+function piecesNamer(body: CadBodyPartsView, test: (piece: CadBodyKey) => boolean): (key: CadBodyKey) => boolean {
+  const { pieces, groupOf } = partsOf(body), passing = new Map<readonly CadBodyKey[], boolean>();
+  const passes = (part: CadBodyKey) => {
+    if (pieces.has(part) && test(part)) return true;
+    const group = groupOf.get(part);
+    if (!group) return false;
+    let found = passing.get(group);
+    if (found === undefined) passing.set(group, found = group.some(member => pieces.has(member) && test(member)));
+    return found;
+  };
+  return key => passes(key) || cadBodyKeyTwins(body, key).some(passes);
+}
+
+/**
+ * A body's pieces, the group each group key is in, and every key that is, or leads to, a piece or a group's key. Made once per list of
+ * pieces and groups, so the state a feature leaves reuses what `cadBodyParts` made for it.
+ */
+interface PartsIndex { readonly pieces: ReadonlySet<string>; readonly groupOf: ReadonlyMap<string, readonly CadBodyKey[]>; readonly leads: ReadonlySet<string> }
+const partsIndexes = new WeakMap<readonly CadBodyKey[], { readonly ambiguous: CadBodyState['ambiguous']; readonly index: PartsIndex }>();
+const NO_PARTS: PartsIndex = { pieces: new Set(), groupOf: new Map(), leads: new Set() };
+/** Adds to `leads` every key that is, or leads to, one of `parts`. */
+function addLeads(leads: Set<string>, parts: Iterable<string>): Set<string> {
+  for (const part of parts) for (let end = part.length; end > 0 && !leads.has(part.slice(0, end)); end = part.lastIndexOf('/', end - 1)) leads.add(part.slice(0, end));
+  return leads;
+}
+function partsOf(body: CadBodyPartsView, leads?: ReadonlySet<string>): PartsIndex {
+  if (!body.pieces) return NO_PARTS;
+  const known = partsIndexes.get(body.pieces);
+  if (known && known.ambiguous === body.ambiguous) return known.index;
+  const groupOf = new Map<string, readonly CadBodyKey[]>();
+  for (const group of body.ambiguous ?? []) for (const part of group) groupOf.set(part, group);
+  const index = { pieces: new Set(body.pieces), groupOf, leads: leads ?? addLeads(new Set(), [...body.pieces, ...groupOf.keys()]) };
+  partsIndexes.set(body.pieces, { ambiguous: body.ambiguous, index });
+  return index;
+}
+
+/**
+ * The pieces and group keys of `body` that name a solid `key` names in some kernel order, `key` among them when it is one. Kernel orders
+ * decide only the indices of the splits `body.orders` records, and each order decides one split, whatever the others did, while every later
+ * step follows its solid. So reading `key` from its first step, each split step may be the step itself or any sibling the split's order
+ * may place at its index; every other step stays: a split whose pieces the faces ordered, a copy and an image. Keys `body` never had lead
+ * nowhere, so the search keeps only keys that are, or lead to, a piece or a group's key.
+ */
+function cadBodyKeyTwins(body: CadBodyPartsView, key: CadBodyKey): readonly CadBodyKey[] {
+  if (!body.pieces) return NONE;
+  const { pieces, groupOf, leads } = partsOf(body), steps = key.split('/');
+  if (!leads.has(steps[0])) return NONE;
+  const index = orderIndex(body.orders);
   let twins = [steps[0]];
   for (const step of steps.slice(1)) {
-    const next = new Set<string>();
-    for (const twin of twins) for (const part of setOf.get(`${twin}/${step}`) ?? [`${twin}/${step}`]) if (leads.has(part)) next.add(part);
-    if (!next.size) return undefined;
+    const next = new Set<string>(), split = /^split\((\d+)\)$/.exec(step), at = split ? Number(split[1]) : -1;
+    for (const twin of twins) {
+      if (leads.has(`${twin}/${step}`)) next.add(`${twin}/${step}`);
+      if (!split) continue;
+      for (const order of index.under.get(twin) ?? []) {
+        const start = splitIndexOf(order.keys[0])!, places = placesOf(order);
+        if (at < start || at >= start + order.keys.length) continue;
+        order.keys.forEach((part, i) => { if (leads.has(part) && hasPlace(places[i], at - start)) next.add(part); });
+      }
+    }
+    if (!next.size) return NONE;
     twins = [...next];
   }
-  const groups = new Set<readonly CadBodyKey[]>();
-  for (const twin of twins) { const group = groupOf.get(twin); if (group) groups.add(group); }
-  return groups.size ? body.ambiguous.filter(group => groups.has(group)) : undefined;
+  return twins.filter(twin => pieces.has(twin) || groupOf.has(twin)) as CadBodyKey[];
 }
 
 /** What a body is for in a setup: the part made, the stock it is cut from, a fixture holding it, or reference geometry. */

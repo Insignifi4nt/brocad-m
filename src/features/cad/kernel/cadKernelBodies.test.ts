@@ -134,6 +134,50 @@ function sameShapes(a: readonly (readonly number[])[], b: readonly (readonly num
   const left = [...b];
   return a.length === b.length && a.every(shape => { const at = left.findIndex(other => sameShape(shape, other)); return at >= 0 && left.splice(at, 1).length > 0; });
 }
+/** Every key a body lists: its own, its pieces', its groups' and the keys its orders number. */
+const listedKeys = (body: CadBodyState): string[] =>
+  [body.key, ...body.pieces ?? [], ...body.ambiguous?.flat() ?? [], ...body.orders?.flatMap(order => order.keys) ?? []];
+
+/** Builds `features` once for every combination of solid orders its Boolean results of two or more solids can list, each on its own. */
+function inEveryOrder(features: readonly CadFeature[]): Bodies[] {
+  const counts: number[] = [];
+  reorderingSolids((result, solids) => { counts[result] = solids; return inOrder(solids); }, () => built(features, () => undefined));
+  const permutations = (list: readonly number[]): number[][] =>
+    list.length ? list.flatMap((first, at) => permutations(list.filter((_, other) => other !== at)).map(rest => [first, ...rest])) : [[]];
+  const combinations = counts.reduce<number[][][]>((all, solids) => all.flatMap(combination => permutations(inOrder(solids)).map(order => [...combination, order])), [[]]);
+  return combinations.map(combination => reorderingSolids(result => combination[result], () => built(features, bodiesOf)));
+}
+
+/**
+ * Checks every part key the builds of `inEveryOrder` list, or formed from one by changing the indices of its split steps, against what
+ * the builds show: missing when no build has it as a piece, resolved when every build has it as the same solid, and otherwise ambiguous
+ * among exactly the solids it is a piece as in some build, or among more only when they share a provenance group with one of them.
+ */
+function exactInEveryOrder(results: readonly Bodies[], label: string): void {
+  const wholes = new Set<string>(results.flatMap(result => result.bodies.map(body => body.key)));
+  const distinct = (shapes: readonly (readonly number[])[]) => shapes.filter((shape, at) => shapes.findIndex(other => sameShape(shape, other)) === at);
+  const within = (shapes: readonly (readonly number[])[], among: readonly (readonly number[])[]) => shapes.every(shape => among.some(other => sameShape(shape, other)));
+  for (const key of cadBodyKeyVariants(results.flatMap(result => result.bodies.flatMap(listedKeys)))) {
+    if (wholes.has(key)) continue;
+    const named = results.map(result => {
+      for (const body of result.bodies) { const at = body.pieces?.indexOf(key as CadBodyKey) ?? -1; if (at >= 0) return result.shapes.get(body.key)!.get(at)!; }
+      return undefined;
+    });
+    const truth = distinct(named.filter(shape => shape !== undefined));
+    results.forEach((result, at) => {
+      const resolution = resolveIn(result, key), where = `${label}, order ${at}: ${key}`;
+      if (!truth.length) return expect(resolution.status, `${where} is a piece in no order`).toBe('missing');
+      if (truth.length === 1 && named.every(shape => shape !== undefined)) return expect(resolution, `${where} is the same piece in every order`).toMatchObject({ status: 'resolved', part: key });
+      expect(resolution.status, `${where} names other solids in other orders`).toBe('ambiguous');
+      if (resolution.status !== 'ambiguous') return;
+      const found = distinct(shapesFor(result, resolution)), grouped = resolution.body.ambiguous?.flat().filter(part => resolution.body.pieces?.includes(part)) ?? [];
+      expect(within(truth, found), `${where} leaves out a solid it names in some order`).toBe(true);
+      const extra = found.filter(shape => !truth.some(other => sameShape(shape, other)));
+      expect(within(extra, shapesFor(result, { status: 'ambiguous', body: resolution.body, candidates: grouped })), `${where} adds a solid it names in no order`).toBe(true);
+    });
+  }
+}
+
 /**
  * Checks that two builds of one history, whose Booleans listed solids in different orders, agree: the same bodies, solid counts and issues,
  * and every key either build lists, or formed from one by changing the indices of its split steps, resolving the same way in both: a
@@ -146,7 +190,7 @@ function agreeInEitherOrder(normal: Bodies, reordered: Bodies, label: string): b
   const issues = (built: Bodies) => built.issues.map(issue => `${issue.code} ${issue.featureId} ${issue.body} ${issue.pieces.length}`).sort();
   expect(issues(reordered), label).toEqual(issues(normal));
   let renumbered = false;
-  const listed = [normal, reordered].flatMap(built => built.bodies.flatMap(body => [body.key, ...body.pieces ?? [], ...body.ambiguous?.flat() ?? [], ...body.interchangeable?.flat() ?? []]));
+  const listed = [normal, reordered].flatMap(built => built.bodies.flatMap(listedKeys));
   for (const key of cadBodyKeyVariants(listed)) {
     const [a, b] = [resolveIn(normal, key), resolveIn(reordered, key)];
     expect(a.status, `${label}: ${key} resolves as ${a.status} in one solid order and ${b.status} in the other`).toBe(b.status);
@@ -269,7 +313,9 @@ describe('kernel split pieces', () => {
 
   it('reports pieces that keep no face of the body before as ambiguous', () => {
     built(rod(), model => {
-      expect(model.result.bodies?.[0]).toMatchObject({ key: 'rod', pieces: ['rod/split(0)', 'rod/split(1)'], ambiguous: [['rod/split(0)', 'rod/split(1)']] });
+      // Which half is which is the kernel's order, which the body keeps as an order of the two halves.
+      expect(model.result.bodies?.[0]).toMatchObject({ key: 'rod', pieces: ['rod/split(0)', 'rod/split(1)'], orders: [{ keys: ['rod/split(0)', 'rod/split(1)'] }] });
+      expect(model.result.bodies?.[0].ambiguous).toBeUndefined();
       expect(model.result.bodyIssues).toEqual([expect.objectContaining({ code: 'ambiguous-body-parts', featureId: 'cleave', body: 'rod', pieces: ['rod/split(0)', 'rod/split(1)'] })]);
     });
   });
@@ -280,11 +326,10 @@ describe('kernel body parts are inherited only when continuity is certain', () =
     const creator = '3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f', copy = (i: number) => [0, 1].map(k => `${creator}/split(${k})/inst(${i},0)`);
     built([...rod(creator), row('cleave', 100, 25)], model => {
       const body = model.result.bodies![0], expected = Array.from({ length: 100 }, (_, i) => copy(i));
-      const groups = [[...copy(0), `${creator}/split(0)`, `${creator}/split(1)`].sort(), ...expected.slice(1)];
       expect(model.result.meshes[0].solidCount).toBe(200);
       expect(new Set(body.pieces)).toEqual(new Set(expected.flat()));
-      // The halves of each copy can't be told apart, but each copy's are told apart from every other copy's; the old keys stay with the first.
-      expect(body.ambiguous?.map(group => [...group].sort())).toEqual(groups);
+      // Which half is which is the kernel's order, kept once for the halves: each copy's halves trade keys with each other, never another copy's.
+      expect([body.ambiguous, body.orders]).toEqual([undefined, [{ keys: [0, 1].map(k => `${creator}/split(${k})`) }]]);
       expect(model.result.bodyIssues!.map(issue => [issue.code, issue.featureId, issue.pieces.length])).toEqual([['ambiguous-body-parts', 'cleave', 202]]);
       expect(model.result.bodyIssues![0].message).toBe(`202 pieces of body ${creator} can't be told apart after cleave, so references to them are ambiguous.`);
       expect(isCadKernelReply({ id: 1, kind: 'built', result: structuredClone(model.result) })).toBe(true);
@@ -298,9 +343,8 @@ describe('kernel body parts are inherited only when continuity is certain', () =
       expect(found.status, key).toBe('ambiguous');
       if (found.status === 'ambiguous') expect([...found.candidates].sort(), key).toEqual(copy(i));
     }
-    // The halves\' old keys stay with the copied originals.
-    const original = resolve(model, 'rod/split(0)');
-    expect(original.status === 'ambiguous' && [...original.candidates].sort()).toEqual(copy(0));
+    // Once the pattern copied the halves, their old keys name no piece in any order.
+    expect(resolve(model, 'rod/split(0)')).toEqual({ status: 'missing' });
     expect(model.result.bodyIssues).toEqual([expect.objectContaining({ code: 'ambiguous-body-parts', featureId: 'cleave', pieces: ['rod/split(0)', 'rod/split(1)', ...copy(0), ...copy(1)] })]);
   }));
 
@@ -320,18 +364,19 @@ describe('kernel body parts are inherited only when continuity is certain', () =
   it('carries ambiguity through a later modification of an ambiguous piece', () => {
     built([...rod(), ...pocket('hole', 5, 0, 'cleave')], model => {
       const body = model.result.bodies![0];
-      expect(body).toMatchObject({ key: 'rod', modifiedBy: ['cleave', 'hole'], pieces: ['rod/split(0)', 'rod/split(1)'], ambiguous: [['rod/split(0)', 'rod/split(1)']] });
+      expect(body).toMatchObject({ key: 'rod', modifiedBy: ['cleave', 'hole'], pieces: ['rod/split(0)', 'rod/split(1)'], orders: [{ keys: ['rod/split(0)', 'rod/split(1)'] }] });
       expect(model.result.bodyIssues!.map(issue => [issue.code, issue.featureId])).toEqual([['ambiguous-body-parts', 'cleave']]);
       expect(resolve(model, 'rod/split(0)')).toMatchObject({ status: 'ambiguous', candidates: ['rod/split(0)', 'rod/split(1)'] });
     });
   });
 
   it('never reports an ambiguous piece lost while the solid left could be it', () => {
-    // Which half the cut removed depends on the order the kernel listed the halves in, so neither key is lost.
+    // Which half the cut removed depends on the order the kernel listed the halves in, so neither key is lost: each names the half left in
+    // some order.
     built([...rod(), sketch('erase_sketch', rect(-20, -20, 20, 40)), pad('erase', 'erase_sketch', 30, 'cut', 'cleave')], model => {
       const body = model.result.bodies![0];
       expect(body.pieces).toHaveLength(1);
-      expect(body.ambiguous?.map(group => [...group].sort())).toEqual([['rod/split(0)', 'rod/split(1)']]);
+      expect([body.ambiguous, body.orders]).toEqual([undefined, [{ keys: ['rod/split(0)', 'rod/split(1)'] }]]);
       expect(model.result.bodyIssues!.map(issue => issue.code)).toEqual(['ambiguous-body-parts']);
       for (const key of ['rod/split(0)', 'rod/split(1)']) expect(resolve(model, key), key).toMatchObject({ status: 'ambiguous', candidates: body.pieces });
     });
@@ -348,7 +393,7 @@ describe('kernel body parts are inherited only when continuity is certain', () =
       // The first box may have split into the core, and the core may be what is left of the second: none of the three is certain.
       expect(model.result.bodies?.[0].ambiguous).toEqual([['keep/split(0)', 'box/inst(0,0)', 'box/inst(1,0)']]);
       expect(model.result.bodyIssues).toEqual([expect.objectContaining({ code: 'ambiguous-body-parts', featureId: 'keep', pieces: ['keep/split(0)', 'box/inst(0,0)', 'box/inst(1,0)'] })]);
-      for (const key of ['box/inst(0,0)', 'box/inst(1,0)', 'keep/split(0)']) expect(resolve(model, key), key).toMatchObject({ status: 'ambiguous', candidates: ['keep/split(0)', 'box/inst(0,0)'] });
+      for (const key of ['box/inst(0,0)', 'box/inst(1,0)', 'keep/split(0)']) expect(resolve(model, key), key).toMatchObject({ status: 'ambiguous', candidates: ['box/inst(0,0)', 'keep/split(0)'] });
     });
     // The same cut of a whole body of two solids splits it, though it leaves as many solids as the body had.
     built([sketches('multi_sketch', [rect(0, 0, 40, 20), rect(50, 0, 40, 20)]), pad('multi', 'multi_sketch', 10), ...tools, keep('multi')], model => {
@@ -363,12 +408,12 @@ describe('kernel body parts are inherited only when continuity is certain', () =
     for (const features of [[...rod(), flip, ...again], [...rod(), row('cleave', 2, 30), { ...flip, sourceId: 'row' }, ...again]]) {
       const label = features.map(feature => feature.id).join(' '), normal = built(features, bodiesOf), reordered = reversingSolids(() => built(features, bodiesOf));
       expect(agreeInEitherOrder(normal, reordered, label), `${label}: the order changes some ambiguous key`).toBe(true);
-      // Which half of the rod comes first depends on the kernel's order, so every piece keeping faces of a half is ambiguous. The piece cut
-      // off at x = 5–10 keeps no face of the mirror image, so it comes last in either order.
+      // Which half of the rod comes first depends on the kernel's order, so the pieces keeping faces of the halves are an order of the image,
+      // each ambiguous. The piece cut off at x = 5–10 keeps no face of the mirror image, so it comes last in either order.
       const image = normal.bodies.find(body => body.key === 'flip/mirror')!, solids = normal.shapes.get('flip/mirror')!, pieces = image.pieces!;
       const last = pieces.find((_, solid) => Math.abs(solids.get(solid)![0] - 5) < 0.5), halves = pieces.filter(piece => piece !== last).sort();
       expect(last, label).toBe(`flip/mirror/split(${pieces.length - 1})`);
-      expect(image.ambiguous?.map(group => [...group].sort()), label).toEqual([halves]);
+      expect([image.ambiguous, image.orders?.map(order => [...order.keys].sort())], label).toEqual([undefined, [halves]]);
       expect(normal.issues.filter(issue => issue.body === 'flip/mirror').map(issue => [issue.code, issue.featureId, [...issue.pieces].sort()]), label).toEqual([['ambiguous-body-parts', 'again', halves]]);
     }
   });
@@ -389,7 +434,7 @@ describe('kernel body parts are inherited only when continuity is certain', () =
       for (const rows of [traced, [...traced].reverse()]) {
         const facts = { solids: 2, removesMaterial: true, sources: [{ kind: 'target' as const }], provenance: () => rows };
         expect(cadBodyParts({ featureId: 'keep', previous: { key: 'imported' as CadBodyKey }, beforeSolids: 2, facts }))
-          .toMatchObject({ pieces: ['imported/split(0)', 'imported/split(1)'], ambiguous: [['imported/split(0)', 'imported/split(1)']] });
+          .toMatchObject({ pieces: ['imported/split(0)', 'imported/split(1)'], orders: [{ keys: ['imported/split(0)', 'imported/split(1)'] }] });
       }
       // Nor does a face two sources share prove either.
       const twice = createCadKernelFaceSources();
@@ -439,8 +484,8 @@ describe('kernel body parts are inherited only when continuity is certain', () =
   }, 120_000);
 
   it('resolves every key the same way in every combination of solid orders when a later cut splits a piece the faces ordered', () => {
-    // As above, then a cut at x = 24 splits the first of the halves the faces ordered. Those halves were never interchangeable, so no order
-    // gives the second half's key the pieces the first half split into.
+    // As above, then a cut at x = 24 splits the first of the halves the faces ordered. No order numbers those halves the other way round, so
+    // none gives the second half's key the pieces the first half split into.
     const features = [...box, ...slot('split', 18, 'box'), { ...base('round'), kind: 'fillet', targetId: 'split', radius: 1 } as CadFeature, ...slot('more', 30, 'round'),
       ...slot('again', 24, 'more')];
     const results = multiSolidResults(features), normal = built(features, bodiesOf);
@@ -451,6 +496,29 @@ describe('kernel body parts are inherited only when continuity is certain', () =
       for (const key of ['round/split(0)/split(1)/split(0)', 'round/split(1)/split(1)/split(0)']) expect(resolveIn(reordered, key).status, key).toBe('missing');
     }
   }, 120_000);
+
+  it('substitutes a split\'s index only as some order of whole source solids gives it, keeping each solid\'s pieces in their order', () => {
+    // A box at x = 0–40 joined to a detached island at x = 50–60 is one body of two solids. A slot at x = 18 splits the box in two, whose
+    // order its faces settle, while the island may come before, between or after them. A slot at x = 8 splits the box's piece at x = 0–18,
+    // which no order numbers first, so box/split(0)/split(0) is a piece in none of the 288 combinations and must be missing.
+    const results = inEveryOrder([...box, sketch('island_sketch', rect(50, 0, 10, 20)), pad('island', 'island_sketch', 10, 'join', 'box'),
+      ...slot('split', 18, 'island'), ...slot('again', 8, 'split')]);
+    expect(results).toHaveLength(288);
+    for (const result of results) expect(resolveIn(result, 'box/split(0)/split(0)')).toEqual({ status: 'missing' });
+    exactInEveryOrder(results, 'island');
+  }, 240_000);
+
+  it('substitutes a mirror image\'s split index only as some order of its source\'s solids gives it', () => {
+    // The box split at x = 18 and mirrored across XZ is a body of two solids in either order. Slots at x = 30 and x = 24 split the image's
+    // piece at x = 20–40 and then its piece at x = 20–30, which no order numbers first.
+    const across = (id: string, x: number, targetId: string) => [sketch(`${id}_sketch`, rect(x, -25, 2, 30)), pad(id, `${id}_sketch`, 10, 'cut', targetId)];
+    const results = inEveryOrder([...box, ...slot('split', 18, 'box'), { ...base('flip'), kind: 'mirror', sourceId: 'split', plane: 'XZ' } as CadFeature,
+      ...across('more', 30, 'flip'), ...across('again', 24, 'more')]);
+    expect(results).toHaveLength(288);
+    for (const result of results) for (const key of ['flip/mirror/split(0)/split(0)', 'flip/mirror/split(0)/split(1)'])
+      expect(resolveIn(result, key), key).toEqual({ status: 'missing' });
+    exactInEveryOrder(results, 'mirror');
+  }, 240_000);
 
   it.each<[string, (prefix: readonly CadFeature[]) => CadFeature[]]>([
     ['a pattern of the pieces and a cut across its copy', prefix => [...prefix, twice('across', 'more', [100, 0, 0]), ...slot('again', 124, 'across')]],
