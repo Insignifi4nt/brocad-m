@@ -2,6 +2,7 @@ import { Type, type Static, type TSchema } from '@sinclair/typebox';
 import { CadEditSchema } from '@/domain/cad/cadOperations';
 import { CadParameterNameSchema } from '@/domain/cad/cadParameters';
 import { CadDocumentSchema } from '@/domain/cad/cadSchema';
+import { storedCadDocument, storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
 import { CadError } from '@/domain/cad/cadError';
 import { CadStorageError } from '@/domain/cad/cadStorage';
 import { CadSectionRequestSchema } from '@/domain/cad/cadSection';
@@ -76,16 +77,19 @@ const pathConstructionSchema = object({ start: CadConstructionPointSchema,
  */
 function withSharedDefinitions(schema: TSchema, shared: Readonly<Record<string, TSchema>>): TSchema {
   const names = new Map(Object.entries(shared).map(([name, definition]) => [JSON.stringify(definition), name]));
-  const visit = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(visit);
-    if (!node || typeof node !== 'object') return node;
-    const name = names.get(JSON.stringify(node));
-    if (name) return Type.Ref(name);
+  const members = (node: object) => {
     const copy: Record<string | symbol, unknown> = {};
     for (const key of Reflect.ownKeys(node)) copy[key] = visit((node as Record<string | symbol, unknown>)[key]);
     return copy;
   };
-  return { ...visit(schema) as TSchema, $defs: Object.fromEntries(Object.entries(shared).map(([name, definition]) => [name, { ...definition, $id: name }])) };
+  const visit = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(visit);
+    if (!node || typeof node !== 'object') return node;
+    const name = names.get(JSON.stringify(node));
+    return name ? Type.Ref(name) : members(node);
+  };
+  // A definition names the others it holds as well.
+  return { ...visit(schema) as TSchema, $defs: Object.fromEntries(Object.entries(shared).map(([name, definition]) => [name, { ...members(definition), $id: name }])) };
 }
 const documentText = new WeakMap<CadDocument, string>();
 function diagnosticSummary(diagnostics: readonly CadDiagnostic[]) {
@@ -301,13 +305,13 @@ export function cadSiteTools(getController: () => CadController) {
     }, false),
     tool('cad_read_features', 'Read paginated feature definitions from the current CAD draft, including exact dimensions and expressions. Use IDs in updates; never infer them from names.', object({ ...version, ...pageFields }), (cad, input) => {
       cad.session.assertVersion(input.expectedVersion);
-      return { version: input.expectedVersion, ...page(cad.session.getSnapshot().document.features, input) };
+      return { version: input.expectedVersion, ...page(storedCadDocument(cad.session.getSnapshot().document).features, input) };
     }),
     tool('cad_read_document', 'Read complete current CAD JSON in exact bounded UTF-16 chunks, including large sketches that exceed one feature-page response. Concatenate text until nextOffset is null, then parse JSON. Offsets count JavaScript UTF-16 code units. Pin the same expectedVersion for every chunk. No save or browser download.', object({ ...version, offset: pageFields.offset, length: Type.Optional(Type.Integer({ minimum: 1, maximum: 4096 })) }), (cad, input) => {
       cad.session.assertVersion(input.expectedVersion);
       const document = cad.session.getSnapshot().document;
       let text = documentText.get(document);
-      if (text === undefined) { text = JSON.stringify(document); documentText.set(document, text); }
+      if (text === undefined) { text = storedCadDocumentText(document); documentText.set(document, text); }
       const offset = input.offset ?? 0;
       if (offset > text.length) throw new ToolError('INVALID_ARGUMENT', 'Offset exceeds the document text length.');
       const end = Math.min(text.length, offset + (input.length ?? 4096));
@@ -315,11 +319,11 @@ export function cadSiteTools(getController: () => CadController) {
     }),
     tool('cad_get_feature', 'Read one feature definition by exact ID in the current draft.', object({ ...version, featureId: id }), (cad, input) => {
       cad.session.assertVersion(input.expectedVersion);
-      const feature = cad.session.getSnapshot().document.features.find(value => value.id === input.featureId);
+      const feature = storedCadDocument(cad.session.getSnapshot().document).features.find(value => value.id === input.featureId);
       if (!feature) throw new ToolError('NOT_FOUND', 'Feature does not exist. Read cad_read_features.');
       return { version: input.expectedVersion, feature };
     }),
-    tool('cad_edit_document', 'Apply typed edits atomically to the CAD draft: parameters, sketch grips/dimensions/translations, independent profile copies, preceding-sketch construction references, rename, reorder or cascade deletion. copy-sketch-profile creates a new editable numeric graph sketch from one actual accepted profile; source data stays exact. One undo step; no save. Call cad_describe_edits(kind) for fields, cad_describe_features for complete add/update definitions; execution stays strict. Rejects invalid geometry, references, stale versions and active workflows. No code execution.', object({ ...version, edits: Type.Array(CadEditSchema, { minItems: 1, maxItems: 128 }) }), async (cad, input, signal) => {
+    tool('cad_edit_document', 'Apply typed edits atomically to the CAD draft: parameters, sketch geometry, grips, dimensions, relations and generators, profile copies, preceding-sketch construction references, rename, reorder or cascade deletion. One undo step; no save. Call cad_describe_edits(kind) for fields, cad_describe_features for complete add/update definitions; execution stays strict. Rejects invalid geometry, references, stale versions and active workflows. No code execution.', object({ ...version, edits: Type.Array(CadEditSchema, { minItems: 1, maxItems: 128 }) }), async (cad, input, signal) => {
       let warnings: readonly CadSketchEditWarning[] = [];
       await cad.edit(input.edits, input.expectedVersion, true, signal, found => { warnings = found; });
       // At most eight warnings, as other edit diagnostics are listed, with how many there were.

@@ -173,6 +173,10 @@ function currentKeys(graph: CadSketchGraph, index: GeneratorIndex, parameters: R
 }
 
 const same = (a: object, b: object) => a === b || Value.Equal(a, b);
+/** Whether the carried members are the generated objects themselves, in their order. */
+function identical(carried: { readonly points: readonly object[]; readonly entities: readonly object[]; readonly relations: readonly object[] }, members: CadSketchGeneratedGeometry): boolean {
+  return (['points', 'entities', 'relations'] as const).every(list => carried[list].length === members[list].length && carried[list].every((item, at) => item === members[list][at]));
+}
 /** Whether the carried members are exactly the generated ones, by id. */
 function carriesExactly(carried: Split['carried'] extends ReadonlyMap<string, infer V> ? V : never, members: CadSketchGeneratedGeometry): boolean {
   const lists = [[carried.points, members.points], [carried.entities, members.entities], [carried.relations, members.relations]] as const;
@@ -192,6 +196,14 @@ function accepted(stored: Split, generations: readonly Generation[], graph: CadS
   return result;
 }
 
+/** Refuses stored geometry that a generator owns: an edge of the sketch's own ending at a generated point. */
+function assertStoredOutsideMembers(stored: Split, index: GeneratorIndex): void {
+  for (const entity of stored.entities) for (const pointId of cadSketchEntityPointIds(entity)) {
+    const namespace = cadSketchIdNamespace(pointId), generator = namespace === undefined ? undefined : index.byPrefix.get(namespace);
+    if (generator) throw invalid(`Sketch edge "${entity.id}" cannot end at "${pointId}", which ${cadSketchGeneratorName(generator)} generates. Connect to it with a coincident relation instead.`);
+  }
+}
+
 /**
  * The sketch graph `value` with its generators' members, as the document parse accepts it. A graph that stores generator records alone
  * gets their members; one that carries members must carry exactly what its generators make now, or it is refused naming the generator.
@@ -205,7 +217,9 @@ export function expandCadSketchGenerators(value: unknown, parameters: Readonly<R
   const settled = settledKeys.get(graph);
   if (settled !== undefined && settled === currentKeys(graph, index, parameters)) return graph;
   for (const generator of index.generators) validateCadSketchGeneratorRecord(graph, generator);
-  const stored = split(graph, index), generations = generateAll(index, stored, parameters);
+  const stored = split(graph, index);
+  assertStoredOutsideMembers(stored, index);
+  const generations = generateAll(index, stored, parameters);
   let carriesAll = true;
   for (const { generator, members } of generations) {
     const carried = stored.carried.get(generator.idPrefix);
@@ -228,39 +242,90 @@ export function expandCadSketchGenerators(value: unknown, parameters: Readonly<R
  * changes.
  */
 export function regenerateCadSketchGenerators(source: CadSketchGraph, parameters: Readonly<Record<string, number>>): CadSketchGraph {
-  const graph = acceptCadSketchGraph(source), index = generatorIndex(graph);
-  if (!index.generators.length) return graph;
+  return settleCadSketchGenerators(source, source, parameters);
+}
+
+type Members = Split['carried'] extends ReadonlyMap<string, infer V> ? V : never;
+/** Whether two sets of members are the same items, by id. */
+function sameMembers(a: Members, b: Members): boolean {
+  return carriesExactly(a, b);
+}
+
+/**
+ * The edited sketch graph `candidate` with each generator's members as its inputs and `parameters` make them now, accepted. `previous`
+ * is the sketch's graph before the edit. The candidate's members of a generator must be untouched, which regenerates them from the inputs
+ * they had before, or exactly what the generator makes now, as an edit that regenerated them leaves them; a member edited, removed or
+ * added directly refuses the edit, naming the generator. Members that leave in a regeneration take the user relations on them through
+ * the relation remap, as `regenerateCadSketchGenerators` says. A generator stored without members gets them, taking the place of those it
+ * had before. The candidate itself when nothing needs generating.
+ */
+export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: CadSketchGraph | undefined, parameters: Readonly<Record<string, number>>): CadSketchGraph {
+  const graph = isAcceptedCadSketchGraph(candidate) ? candidate : detachCadSketchGraph(candidate), index = generatorIndex(graph);
+  if (!index.generators.length) return graph === candidate ? candidate : acceptCadSketchGraph(graph);
   const settled = settledKeys.get(graph);
   if (settled !== undefined && settled === currentKeys(graph, index, parameters)) return graph;
-  const stored = split(graph, index), generations = generateAll(index, stored, parameters);
-  if (generations.every(({ generator, members }) => { const carried = stored.carried.get(generator.idPrefix); return carried && carriesExactly(carried, members); })) {
+  for (const generator of index.generators) validateCadSketchGeneratorRecord(graph, generator);
+  const stored = split(graph, index);
+  assertStoredOutsideMembers(stored, index);
+  const generations = generateAll(index, stored, parameters);
+  const before = previous && previous !== candidate ? split(previous, index).carried : stored.carried;
+  // What each generator had before this regeneration: its carried members, or those of the graph before the edit when it carries none.
+  const had = new Map<string, Members>();
+  for (const { generator, members } of generations) {
+    const carried = stored.carried.get(generator.idPrefix), earlier = before.get(generator.idPrefix);
+    if (carried && !carriesExactly(carried, members) && !(earlier && sameMembers(carried, earlier))) {
+      const name = cadSketchGeneratorName(generator);
+      const known = new Set([...members.points, ...members.entities, ...members.relations, ...earlier ? [...earlier.points, ...earlier.entities, ...earlier.relations] : []].map(item => item.id));
+      const stranger = [...carried.points, ...carried.entities, ...carried.relations].find(item => !known.has(item.id));
+      throw owned(stranger ? `Sketch id "${stranger.id}" is in the id namespace "${generator.idPrefix}" of ${name}. Choose an id without the "${generator.idPrefix}_" prefix.`
+        : `${name} generates this geometry. Edit the generator's inputs, or detach it, before editing generated geometry.`);
+    }
+    const kept = carried ?? earlier;
+    if (kept) had.set(generator.idPrefix, kept);
+  }
+  if (generations.every(({ generator, members }) => { const kept = had.get(generator.idPrefix); return kept && kept === stored.carried.get(generator.idPrefix) && carriesExactly(kept, members); })) {
+    // Equal copies, as a solver's reply holds, give way to the generated objects themselves, which a later parse need not copy.
+    if (!generations.every(({ generator, members }) => identical(stored.carried.get(generator.idPrefix)!, members))) return accepted(stored, generations, graph);
     settledKeys.set(graph, keysOf(generations));
-    return graph;
+    return acceptCadSketchGraph(graph);
   }
   // Members that leave, or whose id now names another kind of edge, end the user relations on them.
   const curves = new Map<string, readonly never[]>(), points = new Map<string, null>(), owners = new Map<string, CadSketchGenerator>();
   for (const { generator, members } of generations) {
-    const carried = stored.carried.get(generator.idPrefix);
-    if (!carried) continue;
-    const kinds = new Map(members.entities.map(entity => [entity.id, entity.kind])), kept = new Set(members.points.map(point => point.id));
-    for (const entity of carried.entities) if (kinds.get(entity.id) !== entity.kind) { curves.set(entity.id, []); owners.set(entity.id, generator); }
-    for (const point of carried.points) if (!kept.has(point.id)) { points.set(point.id, null); owners.set(point.id, generator); }
+    const kept = had.get(generator.idPrefix);
+    if (!kept) continue;
+    const kinds = new Map(members.entities.map(entity => [entity.id, entity.kind])), keptPoints = new Set(members.points.map(point => point.id));
+    for (const entity of kept.entities) if (kinds.get(entity.id) !== entity.kind) { curves.set(entity.id, []); owners.set(entity.id, generator); }
+    for (const point of kept.points) if (!keptPoints.has(point.id)) { points.set(point.id, null); owners.set(point.id, generator); }
   }
   let relations = stored.relations;
   if (curves.size || points.size) {
-    const outcomes = remapCadSketchRelations(graph, { curves, points })
+    // The graph as it was, with the members the remap reads its relations' operands from.
+    const was: CadSketchGraph = { ...graph,
+      points: [...stored.points, ...[...had.values()].flatMap(item => item.points)],
+      entities: [...stored.entities, ...[...had.values()].flatMap(item => item.entities)],
+      relations: [...stored.relations, ...[...had.values()].flatMap(item => item.relations)] };
+    const outcomes = remapCadSketchRelations(was, { curves, points })
       .filter(outcome => outcome.relation.kind !== 'generator' && !cadSketchGeneratorOwner(graph, outcome.relation.id));
     const blocked = outcomes.find(outcome => outcome.kind === 'blocked');
     if (blocked?.kind === 'blocked') {
       const definition = cadSketchRelationDefinition(blocked.relation), operands = definition.operands(blocked.relation);
-      const leaving = [...operands, ...definition.owns?.(blocked.relation, graph).entityIds ?? []].find(id => owners.has(id))
-        ?? cadSketchRelationPointsOf(graph, blocked.relation).find(id => owners.has(id));
+      const leaving = [...operands, ...definition.owns?.(blocked.relation, was).entityIds ?? []].find(id => owners.has(id))
+        ?? cadSketchRelationPointsOf(was, blocked.relation).find(id => owners.has(id));
       const generator = (leaving === undefined ? undefined : owners.get(leaving)) ?? generations[0].generator;
       throw owned(`${cadSketchGeneratorName(generator)} no longer generates geometry that ${definition.nameOf?.(blocked.relation) ?? definition.name} "${blocked.relation.id}" uses. ${blocked.reason} Remove the relation first, or keep the generator's inputs.`);
     }
     relations = applyCadSketchRemapOutcomes(stored.relations, outcomes);
   }
-  return accepted(stored, generations, graph, relations);
+  const result = accepted(stored, generations, graph, relations);
+  regeneratedGraphs.add(result);
+  return result;
+}
+// Settled graphs whose generators made other members than the graph before them carried.
+const regeneratedGraphs = new WeakSet<CadSketchGraph>();
+/** Whether settling made `graph` by generating other members than its source carried, which a solve must then fit the sketch to. */
+export function isRegeneratedCadSketchGraph(graph: CadSketchGraph): boolean {
+  return regeneratedGraphs.has(graph);
 }
 /** The points a relation names through its operands, and through the edges it names. */
 function cadSketchRelationPointsOf(graph: CadSketchGraph, relation: CadSketchGraphRelation): readonly string[] {
@@ -282,6 +347,25 @@ export function storedCadSketchGraph(graph: CadSketchGraph): CadSketchGraph {
   const result: CadSketchGraph = Object.freeze({ ...graph, points: Object.freeze(stored.points), entities: Object.freeze(stored.entities), relations: Object.freeze(stored.relations) });
   if (isAcceptedCadSketchGraph(graph)) storedGraphs.set(graph, result);
   return result;
+}
+
+/**
+ * The stored form of the sketch graph `value` when each generator carries exactly the members generation keeps for its inputs, the same
+ * objects in the same order, as a settled edit leaves them: the parse then regenerates those objects instead of copying and comparing
+ * every member. `value` itself otherwise, which the parse checks in full. Only reads `value`, which the document schema check passed.
+ */
+export function withoutGeneratedCadSketchMembers(value: unknown, parameters: Readonly<Record<string, number>>): unknown {
+  if (typeof value !== 'object' || value === null || isAcceptedCadSketchGraph(value as CadSketchGraph)) return value;
+  const graph = value as CadSketchGraph;
+  if (!Array.isArray(graph.relations) || !graph.relations.some(relation => relation?.kind === 'generator')) return value;
+  try {
+    const index = generatorIndex(graph), stored = split(graph, index);
+    for (const { generator, members } of generateAll(index, stored, parameters)) {
+      const carried = stored.carried.get(generator.idPrefix);
+      if (carried && !identical(carried, members)) return value;
+    }
+    return { ...graph, points: stored.points, entities: stored.entities, relations: stored.relations };
+  } catch { return value; }
 }
 
 const NO_MEMBERS: CadSketchRelationOwnership & { readonly relationIds: readonly string[] } = Object.freeze({ pointIds: Object.freeze([]), entityIds: Object.freeze([]), relationIds: Object.freeze([]) });

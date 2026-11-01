@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import type { useWorkbenchAppController } from '@/app/useWorkbenchAppController';
 import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { cadFeatureProducesBody, createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
 import { archiveCadDocument, listCadDocuments, loadCadDocument, renameCadDocument, restoreCadDocument, saveCadDocument, type CadLibraryEntry } from '@/domain/cad/cadStorage';
 import { readExactUtf8Blob } from '@/domain/storage/exactTextStream';
 import { applyCadEdits, validateCadEditBatch, type CadEdit } from '@/domain/cad/cadOperations';
@@ -680,7 +681,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   function exportDocument(expectedVersion = session.getSnapshot().version) {
     editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document;
-    downloadCadBlob(new Blob([JSON.stringify(document)], { type: 'application/json' }), `${fileBase(document.name)}.cad.json`);
+    downloadCadBlob(new Blob([storedCadDocumentText(document)], { type: 'application/json' }), `${fileBase(document.name)}.cad.json`);
     return { downloadRequested: true, fileName: `${fileBase(document.name)}.cad.json`, version: expectedVersion };
   }
   async function exportSolid(format: 'step' | 'stl', expectedVersion = session.getSnapshot().version, signal?: AbortSignal) {

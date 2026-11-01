@@ -44,6 +44,12 @@ const annotations = {
   reference: { annotation: Type.Optional(Type.Union([linearAnnotation, radialAnnotation])) }
 };
 export const CadSketchDimensionAnnotationSchema = Type.Union([linearAnnotation, angleAnnotation, radialAnnotation, setbacksAnnotation]);
+/**
+ * Geometry a generator makes from its inputs and keeps: points, edges and relations with ids `<idPrefix>_<key>`. Only the record is stored;
+ * a document's parse regenerates the rest (see `expandCadSketchGenerators`).
+ */
+export const CadSketchGeneratorSchema = Type.Object({ id, kind: Type.Literal('generator'), idPrefix: Type.String({ pattern: CAD_SKETCH_GENERATOR_PREFIX_PATTERN }),
+  construction: Type.Boolean(), geometry: CadSketchGeneratorGeometrySchema }, strict);
 export const CadSketchGraphSchema = Type.Object({
   points: Type.Array(Type.Object({ id, position: CadPoint2Schema }, strict)),
   entities: Type.Array(Type.Union([
@@ -93,10 +99,7 @@ export const CadSketchGraphSchema = Type.Object({
     Type.Object({ id, kind: Type.Literal('axis-distance'), pointIds: refPair, axis: Type.Union([Type.Literal('x'), Type.Literal('y')]), value: CadScalarSchema, ...annotations.linear }, strict),
     Type.Object({ id, kind: Type.Literal('fillet-corner'), pointId: ref, lineIds: refPair, arcId: id, value: CadScalarSchema, ...annotations.radial }, strict),
     Type.Object({ id, kind: Type.Literal('chamfer-corner'), pointId: ref, lineIds: refPair, chamferId: id, values: Type.Tuple([CadScalarSchema, CadScalarSchema]), ...annotations.setbacks }, strict),
-    // Geometry it generates from its inputs and keeps: points, edges and relations with ids `<idPrefix>_<key>`. Only the record is stored;
-    // a document's parse regenerates the rest (see `expandCadSketchGenerators`).
-    Type.Object({ id, kind: Type.Literal('generator'), idPrefix: Type.String({ pattern: CAD_SKETCH_GENERATOR_PREFIX_PATTERN }), construction: Type.Boolean(),
-      geometry: CadSketchGeneratorGeometrySchema }, strict)
+    CadSketchGeneratorSchema
   ]))
 }, strict);
 type Immutable<T> = { readonly [K in keyof T]: Immutable<T[K]> };

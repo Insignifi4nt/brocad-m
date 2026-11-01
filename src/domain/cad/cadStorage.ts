@@ -4,6 +4,7 @@ import type { WorkbenchStorageAdapter } from '@/domain/storage/workbenchStorageA
 import { projectNameError } from '@/domain/workbench-catalog/projectName';
 import type { CadDocument } from './cadDocument';
 import { parseCadDocument } from './cadSchema';
+import { storedCadDocument } from './cadStoredDocument';
 
 const prefix = 'cad/documents/';
 export interface SavedCadDocument {
@@ -134,7 +135,8 @@ export async function saveCadDocument(adapter: WorkbenchStorageAdapter, document
   const validated = parseCadDocument(document);
   const path = cadDocumentPath(validated.id);
   const updatedAt = new Date().toISOString();
-  const raw = JSON.stringify({ format: 'wireedm-cad-save', schemaVersion: 1, updatedAt, document: validated });
+  // The stored form: sketch generators without the members a load generates again.
+  const raw = JSON.stringify({ format: 'wireedm-cad-save', schemaVersion: 1, updatedAt, document: storedCadDocument(validated) });
   options.signal?.throwIfAborted();
   // Prepare every fallible receipt field before a durable write. Once the
   // journal starts, cancellation or cleanup failure must retain this receipt.

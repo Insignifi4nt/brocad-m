@@ -331,14 +331,20 @@ describe('CAD tool argument boundary and discovery', () => {
       profiles: Array.from({ length: 257 }, (_, index) => ({ id: `circle_${index}`, name: `Circle ${index}`, construction: false, geometry: { kind: 'circle', x: index * 4, y: 0, radius: 1 } })) };
     expect(Value.Check(CadFeatureSchema, sketch)).toBe(true); expect(Value.Check(data.schema, references, sketch)).toBe(true);
     expect(Value.Check(data.schema, references, { ...sketch, unknown: true })).toBe(false);
-    // Repeated scalar, identifier and placement schemas are named once, so the definition stays within the reply budget.
-    expect(Object.keys(data.schema.$defs)).toEqual(['CadScalar', 'CadIdentifier', 'CadSketchLinearAnnotation', 'CadSketchAngleAnnotation', 'CadSketchRadialAnnotation', 'CadSketchSetbacksAnnotation']);
+    // Repeated scalar, identifier, element reference, profile geometry and placement schemas are named once, so the definition stays within the reply budget.
+    expect(Object.keys(data.schema.$defs)).toEqual(['CadScalar', 'CadIdentifier', 'CadSketchElementId', 'CadProfilePlugin', 'CadProfileRectangle', 'CadProfileCircle', 'CadProfilePolygon',
+      'CadProfilePath', 'CadProfileSlot', 'CadSketchLinearAnnotation', 'CadSketchAngleAnnotation', 'CadSketchRadialAnnotation', 'CadSketchSetbacksAnnotation']);
     expect(JSON.stringify(reply).length).toBeLessThan(30 * 1024);
     const graph = (annotation: unknown) => ({ ...sketch, profiles: [], graph: { points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }], entities: [],
       relations: [{ id: 'width', kind: 'distance', pointIds: ['a', 'b'], value: 10, annotation }] } });
     expect(Value.Check(data.schema, references, graph({ kind: 'linear', offset: 5, along: 0.25 }))).toBe(true);
     expect(Value.Check(data.schema, references, graph({ kind: 'radial', angle: 0, distance: 5 }))).toBe(false);
     expect(Value.Check(data.schema, references, graph({ kind: 'linear', offset: 5e6, along: 0.25 }))).toBe(false);
+    // A generator reads the same profile geometry by reference.
+    const generator = (geometry: unknown) => ({ ...sketch, profiles: [], graph: { points: [], entities: [], relations: [{ id: 'g', kind: 'generator', idPrefix: 'g', construction: false, geometry }] } });
+    expect(Value.Check(data.schema, references, generator({ kind: 'slot', x: 0, y: 0, length: 20, width: 'w', angle: 0 }))).toBe(true);
+    expect(Value.Check(data.schema, references, generator({ kind: 'regular-polygon', x: 0, y: 0, radius: 5, sides: 6, directionId: '@h' }))).toBe(true);
+    expect(Value.Check(data.schema, references, generator({ kind: 'slot', x: 0, y: 0, length: 20 }))).toBe(false);
   });
   it('offers a narrow feature-input build and tokened topology reads without granting editor workflow scope', async () => {
     const controller = vi.fn<() => CadController>(() => { throw new Error('Invalid input reached controller'); });

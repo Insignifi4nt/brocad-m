@@ -3,11 +3,13 @@ import { CadError } from './cadError';
 import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
 import { cadSketchEntityPointIds, cadSketchRelationEntityIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
 import { cadSketchLinearPatternForSelection } from './cadSketchLinearPattern';
+import { cadSketchGeneratorDeletion } from './sketch-generators/cadSketchGeneratorEdits';
 import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRelationCopy } from './sketch-relations/cadSketchRelationRemap';
 
 /** Structural intent only. The shared preparation stage solves before complete-part acceptance. */
 export function appendCadSketchEntities({ sketch, geometry }: { sketch: CadSketchFeature; geometry: CadSketchGraph }): CadSketchFeature {
   if (geometry.relations.some(relation => relation.kind === 'linear-pattern')) throw new CadError('invalid-sketch-pattern', 'Create a linear pattern with its set-relation operation.');
+  if (geometry.relations.some(relation => relation.kind === 'generator')) throw new CadError('invalid-sketch-generator', 'Create a generator with its set-sketch-generator operation.');
   const profileIds = new Set(sketch.profiles.map(profile => profile.id));
   for (const item of [...geometry.points, ...geometry.entities, ...geometry.relations]) {
     if (profileIds.has(item.id)) throw new CadError('duplicate-sketch-id', `Sketch identity "${item.id}" already belongs to a legacy profile.`);
@@ -66,9 +68,14 @@ export function deleteCadSketchElements({ sketch, pointIds, entityIds, relationI
     if (!cascade && !selected.has(id)) throw new CadError('dependent-sketch-element', `Sketch element "${id}" depends on selected geometry. Select it explicitly or use cascade deletion.`);
     selected.add(id);
   };
-  for (const entity of graph.entities) if (cadSketchEntityPointIds(entity).some(id => points.has(id))) remove(entity.id, entities);
-  for (const relation of graph.relations) if (cadSketchRelationPointIds(graph, relation).some(id => points.has(id))
-      || cadSketchRelationEntityIds(relation).some(id => entities.has(id))) remove(relation.id, relations);
+  // A generator goes with its members, and a cascade that removes a generator's input removes the generator: until nothing more goes.
+  for (let size = -1; size !== points.size + entities.size + relations.size;) {
+    size = points.size + entities.size + relations.size;
+    cadSketchGeneratorDeletion(graph, { pointIds: points, entityIds: entities, relationIds: relations });
+    for (const entity of graph.entities) if (!entities.has(entity.id) && cadSketchEntityPointIds(entity).some(id => points.has(id))) remove(entity.id, entities);
+    for (const relation of graph.relations) if (!relations.has(relation.id) && (cadSketchRelationPointIds(graph, relation).some(id => points.has(id))
+        || cadSketchRelationEntityIds(relation).some(id => entities.has(id)))) remove(relation.id, relations);
+  }
   return { ...sketch, graph: parseCadSketchGraph({
     points: graph.points.filter(point => !points.has(point.id)),
     entities: graph.entities.filter(entity => !entities.has(entity.id)),

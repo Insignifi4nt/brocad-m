@@ -5,7 +5,8 @@ import { CadProfileSchema } from '../../cadProfileSchema';
 import { CadIdentifierSchema, CadLabelSchema, CadPathSegmentSchema, CadPlaneSchema, CadScalarSchema, CadSketchPlaneSchema } from '../../cadPrimitives';
 import { CadDxfImportSourceSchema, parseCadDxfImportSource } from '../../cadDxfSource';
 import { CadSketchDimensionConstraintSchema, validateCadSketchConstraints } from '../../cadSketchConstraints';
-import { CadSketchGraphSchema, parseCadSketchGraph, type CadSketchGraph } from '../../cadSketchGraph';
+import { CadSketchGraphSchema, type CadSketchGraph } from '../../cadSketchGraph';
+import { expandCadSketchGenerators } from '../../sketch-generators/cadSketchGenerators';
 import { assertCadSketchExternalReferences } from '../../cadSketchExternalReferences';
 import { resolveCadSketchPlacement, resolveCadWorldDatum } from '../../cadDatumPlanes';
 import { resolveCadCurveGeometry } from '../../cadCurve';
@@ -76,7 +77,7 @@ export const sketch = {
     'invalid-sketch-graph', 'invalid-sketch-graph-geometry', 'sketch-graph-precision', 'missing-sketch-entity', 'missing-sketch-point', 'invalid-sketch-cycle',
     'non-canonical-sketch-relation', 'fixed-sketch-relation', 'overconstrained-sketch-dimension', 'already-driven-sketch-radius',
     'unsupported-sketch-dimension', 'unsupported-sketch-operand', 'invalid-sketch-operand', 'invalid-sketch-angle', 'invalid-sketch-angle-ray',
-    'invalid-sketch-line-pair', 'invalid-sketch-midpoint', 'invalid-sketch-pattern', 'owned-sketch-pattern', 'invalid-sketch-generator', 'invalid-sketch-point-line-distance',
+    'invalid-sketch-line-pair', 'invalid-sketch-midpoint', 'invalid-sketch-pattern', 'owned-sketch-pattern', 'invalid-sketch-generator', 'stale-sketch-generator', 'invalid-sketch-point-line-distance',
     'invalid-sketch-point-on-curve', 'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair',
     'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry', 'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'invalid-sketch-annotation',
     // Its regions.
@@ -89,9 +90,9 @@ export const sketch = {
     context.scalar(feature, 'offset');
     if (feature.graph) {
       if (document.schemaVersion !== 2) throw new CadError('unsupported-sketch-format', 'Stable sketch entities require CAD schema 2. Preserve the schema 1 original when saving an upgrade.');
-      // Keep the parser's accepted graph, so later parses of it are free. An accepted feature
-      // is frozen and holds its accepted graph already.
-      const graph = parseCadSketchGraph(feature.graph);
+      // Keep the parser's accepted graph, with its generators' members, so later parses of it are free. An accepted feature
+      // is frozen and holds its accepted graph already, whose members a parse with other parameters must not find stale.
+      const graph = expandCadSketchGenerators(feature.graph, document.parameters);
       if (graph !== feature.graph) (feature as { graph: CadSketchGraph }).graph = graph;
       assertCadSketchExternalReferences({ sketch: feature, parameters: document.parameters, previous: context.previous });
     }
