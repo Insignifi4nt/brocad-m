@@ -271,7 +271,7 @@ function checkHistory(seed: number, limit: number): { disagreements: Disagreemen
 }
 
 describe('body identity across kernel solid orders', () => {
-  it('resolves every key, listed or formed by changing a split index, the same way in every combination of Boolean orders', () => {
+  it('resolves every key, listed or formed by changing split indices, the same way in every combination of Boolean orders', () => {
     const seeds = Number(process.env.CAD_BODY_ORDER_SEEDS ?? 120), limit = Number(process.env.CAD_BODY_ORDER_COMBOS ?? 81);
     const found: Disagreement[] = [];
     let renumbered = 0, template = 0;
