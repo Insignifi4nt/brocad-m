@@ -14,8 +14,9 @@ import type { CadSketchGraphSelection } from './cadViewportControls';
 import { cadSketchPickScopeHasEdges, cadSketchPickScopeHasPoints, type CadSketchGraphPickScope } from './cadSketchGraphSelection';
 import type { CadBoxMode } from '@/domain/cad/selection/cadSelectionBox';
 import { prepareCadSketchGeometrySnaps } from './cadSketchGeometrySnaps';
-import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
-import { cadSketchExternalReferenceComponents, cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
+import { cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
+import { cadSketchFixedComponents } from '@/domain/cad/cadSketchFixedComponents';
 
 export type { CadSketchGraphSelection } from './cadViewportControls';
 export type { CadSketchGraphPickFilter } from './cadSketchGraphSelection';
@@ -44,7 +45,7 @@ export function cadSketchGraphCircleControl(graph: CadSketchGraph, parameters: R
   if (circle?.kind !== 'circle') throw new CadError('missing-sketch-circle', 'Choose an existing sketch circle.');
   const center = graph.points.find(point => point.id === circle.centerPointId);
   if (!center) throw new CadError('missing-sketch-point', 'The circle center no longer exists.');
-  const lockedReason = cadSketchLinearPatternLockReason(graph, { kind: 'entity', id: entityId }) ?? cadSketchExternalReferenceLockReason(graph, { kind: 'entity', id: entityId }) ?? (typeof circle.radius === 'string' ? 'Radius follows an expression. Edit or release it with fx.'
+  const lockedReason = cadSketchOwnedGeometryLockReason(graph, { kind: 'entity', id: entityId }) ?? cadSketchExternalReferenceLockReason(graph, { kind: 'entity', id: entityId }) ?? (typeof circle.radius === 'string' ? 'Radius follows an expression. Edit or release it with fx.'
     : graph.relations.some(relation => relation.kind === 'radial-size' && relation.entityId === entityId) ? 'Radius follows a radial dimension. Edit that dimension instead.'
       : graph.relations.some(relation => relation.kind === 'equal-radius' && relation.curveIds.includes(entityId)) ? 'Radius follows an equal-radius relation. Add or edit a radial dimension to control the shared size.' : null);
   return Object.freeze({ entityId: circle.id, center: Object.freeze([evaluateCadScalar(center.position[0], parameters),
@@ -92,7 +93,7 @@ export function prepareCadSketchGraphInteraction(graph: CadSketchGraph, paramete
 function prepareInteraction(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>) {
   const geometry = compileCadSketchGraph(graph, parameters);
   const fixed = new Map<string, Set<number>>();
-  for (const id of cadSketchExternalReferenceComponents(graph).pointIds) fixed.set(id, new Set([0, 1]));
+  for (const id of cadSketchFixedComponents(graph).pointIds) fixed.set(id, new Set([0, 1]));
   for (const relation of graph.relations) if (relation.kind === 'fixed-point' || relation.kind === 'fixed-axis') {
     const axes = fixed.get(relation.pointId) ?? new Set<number>();
     if (relation.kind === 'fixed-point') { axes.add(0); axes.add(1); } else axes.add(relation.axis === 'x' ? 0 : 1);
@@ -100,7 +101,7 @@ function prepareInteraction(graph: CadSketchGraph, parameters: Readonly<Record<s
   }
   const points: readonly CadSketchGraphPointControl[] = Object.freeze(graph.points.map(point => Object.freeze({ id: point.id,
     position: Object.freeze([evaluateCadScalar(point.position[0], parameters), evaluateCadScalar(point.position[1], parameters)] satisfies [number, number]),
-    freeAxes: Object.freeze([!cadSketchLinearPatternLockReason(graph, { kind: 'point', id: point.id }) && typeof point.position[0] === 'number' && !fixed.get(point.id)?.has(0), !cadSketchLinearPatternLockReason(graph, { kind: 'point', id: point.id }) && typeof point.position[1] === 'number' && !fixed.get(point.id)?.has(1)] satisfies [boolean, boolean])
+    freeAxes: Object.freeze([!cadSketchOwnedGeometryLockReason(graph, { kind: 'point', id: point.id }) && typeof point.position[0] === 'number' && !fixed.get(point.id)?.has(0), !cadSketchOwnedGeometryLockReason(graph, { kind: 'point', id: point.id }) && typeof point.position[1] === 'number' && !fixed.get(point.id)?.has(1)] satisfies [boolean, boolean])
   })));
   return { graph, parameters, geometry, points, snap: prepareCadSketchGeometrySnaps({ graph, points, segments: geometry.segments }),
     pick(point: SketchPoint, millimetersPerPixel: number, filter: CadSketchGraphPickScope = 'auto'): readonly CadSketchGraphSelection[] {

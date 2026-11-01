@@ -1,6 +1,6 @@
 import type { CadSketchGraph, CadSketchGraphRelation, CadSketchReferenceDimension } from '@/domain/cad/cadSketchGraph';
 import { cadSketchReferenceDimensionToDriving, resolveCadSketchReferenceDimension } from '@/domain/cad/cadSketchReferenceDimensions';
-import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
 import { cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
 import { resolveCadSketchPointIdentities } from '@/domain/cad/cadSketchGraphJoints';
 import { withCadSketchCarriedPlacement } from '@/domain/cad/cadSketchPlacedDimensions';
@@ -63,7 +63,7 @@ export function cadSketchReferenceDrivingLock(graph: CadSketchGraph, relation: C
   const target = resolveCadSketchReferenceDimension(graph, relation);
   const selections = target.kind === 'distance' ? target.pointIds.map(id => ({kind:'point' as const,id}))
     : target.kind === 'point-line-distance' ? [{kind:'point' as const,id:target.pointId}, {kind:'entity' as const,id:target.lineId}] : [{kind:'entity' as const,id:target.entityId}];
-  const owned = selections.map(atom => cadSketchLinearPatternLockReason(graph,atom)).find(Boolean); if (owned) return owned;
+  const owned = selections.map(atom => cadSketchOwnedGeometryLockReason(graph,atom)).find(Boolean); if (owned) return owned;
   if (target.kind === 'point-line-distance') {
     // A distance from an axis is stored as the coordinate it holds, so a hold on that coordinate already drives it.
     const identity = resolveCadSketchPointIdentities(graph), lineId = target.lineId, point = identity(target.pointId);

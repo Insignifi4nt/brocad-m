@@ -55,13 +55,18 @@ export interface CadSketchOperandSignature {
   readonly distinct?: { readonly slots: readonly number[]; readonly refusal: CadSketchRefusal };
   /** How a longer selection expands: one relation for each pick, or one between the first pick and each later one. */
   readonly expand?: 'each' | 'chain-from-first';
+  /** The relation generates geometry from its operands rather than holding them, so operands that are all fixed, such as an axis, are fine. */
+  readonly generates?: true;
 }
 /** The element each slot names, or undefined where a slot without a refusal names nothing. */
 export type CadSketchResolvedOperands = readonly (CadSketchElement | undefined)[];
 /** How operand labels name points and edges, such as "Point 3" and "Line 5". */
 export interface CadSketchOperandNames { point(id: string): string; entity(id: string): string }
-/** Points and edges a relation made and keeps: removing it removes them. Their own points belong to it too. */
-export interface CadSketchRelationOwnership { readonly pointIds: readonly string[]; readonly entityIds: readonly string[] }
+/**
+ * Points and edges a relation made and keeps: removing it removes them. Their own points belong to it too. A generator also keeps the
+ * relations it made among them.
+ */
+export interface CadSketchRelationOwnership { readonly pointIds: readonly string[]; readonly entityIds: readonly string[]; readonly relationIds?: readonly string[] }
 
 type Line = Extract<CadSketchGraphEntity, { kind: 'line' }>;
 type Round = Extract<CadSketchGraphEntity, { kind: 'arc' | 'circle' }>;
@@ -190,7 +195,8 @@ export interface CadSketchRelationDefinition<K extends CadSketchRelationKind> {
     readonly read: (relation: CadSketchRelationOf<K>) => readonly CadScalar[];
     readonly write: (relation: CadSketchRelationOf<K>, values: readonly CadScalar[]) => CadSketchRelationOf<K>;
   };
-  readonly owns?: (relation: CadSketchRelationOf<K>) => CadSketchRelationOwnership;
+  /** What the relation made and keeps. A generator's members are found in the graph, so it names them only when given one. */
+  readonly owns?: (relation: CadSketchRelationOf<K>, graph?: CadSketchGraph) => CadSketchRelationOwnership;
   /** Equal for relations that hold the same thing on the same operands, whatever order an unordered group is stored in; never compares values. */
   readonly key: (relation: CadSketchRelationOf<K>) => string;
   /** The operand labels a description lists, where they are not one for each point and edge slot. */

@@ -7,7 +7,8 @@ import type { CadEdit } from '@/domain/cad/cadOperations';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { withCadSketchCarriedPlacement } from '@/domain/cad/cadSketchPlacedDimensions';
 import { resolveCadSketchPointLineDistanceOperands } from '@/domain/cad/cadSketchPointLineDistanceRelations';
-import { cadSketchLinearPatternForSelection, cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchLinearPatternForSelection } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
 import { cadSketchExternalReferenceForSelection } from '@/domain/cad/cadSketchExternalReferences';
 import { CadScalarEditContext, ScalarField } from './CadFields';
 import { CadContextHelp } from './CadContextHelp';
@@ -75,7 +76,7 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
   const curvePair = selection.length === 2 && kinds.every(kind => kind === 'arc' || kind === 'circle');
   const pointLine = pointLineOperands(graph, selection);
   const pattern = singleton ? cadSketchLinearPatternForSelection(graph, singleton) : null;
-  const patternLock = selection.map(atom => cadSketchLinearPatternLockReason(graph, atom)).find(Boolean) ?? null;
+  const patternLock = selection.map(atom => cadSketchOwnedGeometryLockReason(graph, atom)).find(Boolean) ?? null;
   const reference = singleton ? cadSketchExternalReferenceForSelection(graph, singleton) : undefined;
   const referenceSource = reference ? cadDocument.features.find(feature => feature.id === reference.sourceSketchId)?.name : null;
   const radialDriver = entity ? cadSketchRadialRelationForEntity(graph, entity.id) : undefined;

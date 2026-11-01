@@ -40,7 +40,8 @@ import { withoutCadSketchDimensionAnnotation } from '@/domain/cad/cadSketchPlace
 import { CadSketchAreaRepairPanel } from './CadSketchAreaRepairPanel';
 import { CadSketchOffsetEditor, cadSketchOffsetSource } from './CadSketchOffsetEditor';
 import { CadSketchLinearPatternEditor, type CadSketchLinearPatternRequest, type CadSketchLinearPatternInteraction } from './CadSketchLinearPatternEditor';
-import { cadSketchLinearPatternForSelection, cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchLinearPatternForSelection } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
 import { CadSketchMirrorEditor, type CadSketchMirrorInteraction } from './CadSketchMirrorEditor';
 import { CadSketchPlacementEditor, type CadSketchPlacementInteraction } from './CadSketchPlacementEditor';
 import { CadSketchProfileCopyEditor } from './CadSketchProfileCopyEditor';
@@ -566,7 +567,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const graphEntities = sketch?.graph?.entities.filter(entity => isCadSketchGraphSelected(graphSelections, { kind: 'entity', id: entity.id })) ?? [];
   const selectedGraphEntity = graphSelection?.kind === 'entity' ? sketch?.graph?.entities.find(entity => entity.id === graphSelection.id) : null;
   const graphForReferences = sketch?.graph;
-  const graphEditLock = graphForReferences ? graphGeometry.map(atom => cadSketchLinearPatternLockReason(graphForReferences, atom) ?? cadSketchExternalReferenceLockReason(graphForReferences, atom)).find(Boolean) ?? null : null;
+  const graphEditLock = graphForReferences ? graphGeometry.map(atom => cadSketchOwnedGeometryLockReason(graphForReferences, atom) ?? cadSketchExternalReferenceLockReason(graphForReferences, atom)).find(Boolean) ?? null : null;
   const selectedPattern = graphForReferences && graphSelection ? cadSketchLinearPatternForSelection(graphForReferences, graphSelection) : null;
   const patternConstructionLocked = Boolean(graphForReferences && graphGeometry.some(atom => cadSketchLinearPatternForSelection(graphForReferences, atom)));
   const sketchCornerAvailable = useMemo(() => {
@@ -1592,7 +1593,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const dimensionPickTargets = useMemo(() => {
     const graph = sketch?.graph;
     // Generated pattern edges keep their pattern's spacing and take no dimension.
-    const entities = graph?.entities.filter(entity => !cadSketchLinearPatternLockReason(graph, { kind: 'entity', id: entity.id })) ?? [];
+    const entities = graph?.entities.filter(entity => !cadSketchOwnedGeometryLockReason(graph, { kind: 'entity', id: entity.id })) ?? [];
     return { entityIds: entities.map(entity => entity.id),
       // A linked edge follows its source, so it anchors a distance or an angle to other geometry but takes no size of its own. A circle whose
       // radius follows an expression keeps its size there; its center still takes distances.
@@ -1617,7 +1618,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (!graph || !sketch || !selections.length) return [];
     const sourceSketchId = sketch.id;
     const dimensionStart = preselectedDimensionOperands(selections), geometry = selections.filter(atom => !isCadSketchVirtualSelection(atom));
-    const moveLock = geometry.length ? geometry.map(atom => cadSketchLinearPatternLockReason(graph, atom) ?? cadSketchExternalReferenceLockReason(graph, atom)).find(Boolean) : cadSketchFixedElementError().message;
+    const moveLock = geometry.length ? geometry.map(atom => cadSketchOwnedGeometryLockReason(graph, atom) ?? cadSketchExternalReferenceLockReason(graph, atom)).find(Boolean) : cadSketchFixedElementError().message;
     const act = (action: () => void) => {
       const current = interactionState.current;
       if (current.locked || current.document !== document || current.version !== props.documentVersion || current.sketchId !== sourceSketchId) return;

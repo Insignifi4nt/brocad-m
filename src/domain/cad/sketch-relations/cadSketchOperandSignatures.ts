@@ -1,5 +1,6 @@
 import { CadError } from '../cadError';
 import type { CadSketchGraph, CadSketchGraphPoint } from '../cadSketchGraph';
+import { cadSketchGraphEntity, cadSketchGraphPoint } from '../cadSketchGraphLookup';
 import type { CadSketchEdge, CadSketchElement, CadSketchOperandCapability, CadSketchOperandSignature, CadSketchOperandSlot, CadSketchOperandTrait, CadSketchOperandType,
   CadSketchRefusal, CadSketchResolvedOperands } from './cadSketchRelationTypes';
 import { CAD_SKETCH_VIRTUAL_LABELS, cadSketchVirtualAxis, cadSketchVirtualPoint, isCadSketchVirtualId, type CadSketchVirtualPoint } from './cadSketchVirtualElements';
@@ -81,17 +82,17 @@ export function resolveCadSketchOperands(graph: CadSketchGraph, signature: CadSk
       seen.add(ids[index]);
     }
   }
-  if (ids.some(isCadSketchVirtualId) && signature.slots.every((slot, index) => slot.end || isCadSketchVirtualId(ids[index]))) throw refuse(ALL_FIXED);
+  if (!signature.generates && ids.some(isCadSketchVirtualId) && signature.slots.every((slot, index) => slot.end || isCadSketchVirtualId(ids[index]))) throw refuse(ALL_FIXED);
   return signature.slots.map((slot, index): CadSketchElement | undefined => {
     const id = ids[index];
     if (isCadSketchVirtualId(id)) return virtualOperand(slot, id);
     if (!slot.refusal) return undefined;
     if (pointSlot(slot)) {
-      const point = graph.points.find(item => item.id === id);
+      const point = cadSketchGraphPoint(graph, id);
       if (!point) throw refuse(slot.refusal);
       return point;
     }
-    const entity = graph.entities.find(item => item.id === id);
+    const entity = cadSketchGraphEntity(graph, id);
     if (!entity || !cadSketchSlotAccepts(slot, entity.kind)) throw refuse(slot.refusal);
     return entity;
   });

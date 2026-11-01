@@ -10,7 +10,8 @@ import { cadKernelParityModels } from '../../../features/cad/kernel/__tests__/ca
  * A plugin profile pins a copy of its package, whose numbers are the package's own (its API version, its inputs' defaults and bounds, its
  * generator recipe and its rules), not dimensions of the feature. The inputs the profile passes to it are declared.
  */
-const PINNED_PACKAGE = /^profiles\.\*\.geometry\{plugin\}\.package(\.|$)/;
+// A plugin's pinned package, on a profile or a generator: its numbers are the package's own rules, not the part's.
+const PINNED_PACKAGE = /^(profiles\.\*\.geometry|graph\.relations\.\*\{generator\}\.geometry)\{plugin\}\.package(\.|$)/;
 
 type Segment = { readonly key: string; readonly kind?: string };
 const segments = (path: string): readonly Segment[] => path.split('.').map(segment => {
@@ -77,8 +78,8 @@ describe('CAD feature quantities', () => {
   it('resolve the quantity of every number and expression stored across the parity and benchmark documents', () => {
     const features = corpus(), missing: string[] = [];
     for (const feature of features) {
-      // Only a plugin profile's geometry holds a package.
-      const paths = storedNumbers(feature, '').filter(path => !/^profiles\.\d+\.geometry\.package\./.test(path));
+      // Only a plugin profile's or generator's geometry holds a package.
+      const paths = storedNumbers(feature, '').filter(path => !/^(profiles\.\d+|graph\.relations\.\d+)\.geometry\.package\./.test(path));
       mapCadFeatureScalars(feature, (value, path) => { paths.push(path); return value; });
       for (const path of new Set(paths)) if (cadFeatureQuantityAt(feature, path) === undefined) missing.push(`${feature.kind} ${path}`);
     }

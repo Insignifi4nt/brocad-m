@@ -111,7 +111,7 @@ function graphIndex(graph: CadSketchGraph, traits: CadSketchCurveCapabilities = 
   const curves = new Map<string, CadSketchCurveTraits>();
   const add = (id: string, at: number) => { const list = naming.get(id); if (!list) naming.set(id, [at]); else if (list.at(-1) !== at) list.push(at); };
   graph.relations.forEach((relation, at) => {
-    const definition = cadSketchRelationDefinition(relation), owned = definition.owns?.(relation);
+    const definition = cadSketchRelationDefinition(relation), owned = definition.owns?.(relation, graph);
     for (const id of definition.operands(relation)) add(id, at);
     for (const id of [...owned?.entityIds ?? [], ...owned?.pointIds ?? []]) add(id, at);
   });
@@ -178,7 +178,7 @@ function resolveEdit(graph: CadSketchGraph, index: GraphIndex, edit: CadSketchRe
   const definition = cadSketchRelationDefinition(relation), rule = ruleOf(relation), roles = rolesOf(relation, rule);
   const slots = cadSketchRelationSignature(relation).slots, ids = definition.operands(relation), next = [...ids], reversed = ids.map(() => false);
   const points = edit.points ?? new Map<string, string | null>();
-  const owned = definition.owns?.(relation);
+  const owned = definition.owns?.(relation, graph);
   if (owned && (owned.entityIds.some(id => edit.curves.has(id) && !whole(edit.curves.get(id))) || owned.pointIds.some(id => points.get(id) === null)))
     return rule.owned === 'refuse' ? block(REASONS.source, false) : block(REASONS.owned);
   // Two points at the ends of one line, and of no other edge, hold that line's direction: each follows the line's end on its side.

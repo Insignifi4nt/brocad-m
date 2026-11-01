@@ -10,7 +10,8 @@ import { Value } from '@sinclair/typebox/value';
 import { cadFeatureInputs } from '@/domain/cad/cadFeatureInputs';
 import { assertCadSketchExternalReferences, refreshCadSketchExternalReferences } from '@/domain/cad/cadSketchExternalReferences';
 import { cadSketchSolutionMatchesInput } from './sketch-solver/cadSketchSolverProtocol';
-import { cadSketchPatternSnapshotNeedsExact, cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchPatternSnapshotNeedsExact } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { cadSketchFeaturesEqualButPlacement, cadSketchRelationsEqualButPlacement, withoutCadSketchDimensionAnnotation } from '@/domain/cad/cadSketchPlacedDimensions';
 
@@ -189,7 +190,7 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
       const sketch = candidate.features.find(feature => feature.id === edit.sketchId);
       const point = sketch?.kind === 'sketch' ? sketch.graph?.points.find(point => point.id === edit.pointId) : undefined;
       if (!point) throw new CadError('missing-sketch-point', 'The selected sketch point no longer exists.');
-      const reason = sketch?.kind === 'sketch' && sketch.graph ? cadSketchLinearPatternLockReason(sketch.graph, { kind: 'point', id: edit.pointId }) : null;
+      const reason = sketch?.kind === 'sketch' && sketch.graph ? cadSketchOwnedGeometryLockReason(sketch.graph, { kind: 'point', id: edit.pointId }) : null;
       if (reason) throw new CadError('owned-sketch-pattern', reason);
       const position = point.position.map((value, index) => evaluateCadScalar(value, candidate.parameters) + evaluateCadScalar(edit.translation[index], candidate.parameters));
       await solve({ sketchId: edit.sketchId, pointId: edit.pointId, position: [position[0], position[1]] });

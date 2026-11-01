@@ -25,7 +25,8 @@ import { CadSketchOffsetRequestSchema, prepareCadSketchOffset, type CadSketchOff
 import { CadSketchMirrorRequestSchema, prepareCadSketchMirror, type CadSketchMirrorRequest } from './cadSketchMirror';
 import { CadSketchProfileCopyRequestSchema, prepareCadSketchProfileCopy, type CadSketchProfileCopyRequest } from './cadSketchProfileCopy';
 import { CadSketchUseEntityRequestSchema, prepareCadSketchUseEntity, cadSketchExternalReferenceLockReason, type CadSketchUseEntityRequest } from './cadSketchExternalReferences';
-import { prepareCadSketchPatternSnapshot, reconcileCadSketchLinearPattern, cadSketchLinearPatternLockReason } from './cadSketchLinearPattern';
+import { prepareCadSketchPatternSnapshot, reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
 
 export type CadEdit =
   | { readonly kind: 'add-feature'; readonly feature: CadFeature; readonly beforeId?: string }
@@ -375,7 +376,7 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
         let graph = feature.graph;
         if (edit.kind === 'move-sketch-point') {
           if (!graph.points.some(point => point.id === edit.pointId)) throw new CadError('missing-sketch-point', 'The selected sketch point no longer exists.');
-          const reason = cadSketchLinearPatternLockReason(graph, { kind: 'point', id: edit.pointId }) ?? cadSketchExternalReferenceLockReason(graph, { kind: 'point', id: edit.pointId });
+          const reason = cadSketchOwnedGeometryLockReason(graph, { kind: 'point', id: edit.pointId }) ?? cadSketchExternalReferenceLockReason(graph, { kind: 'point', id: edit.pointId });
           if (reason) throw new CadError('referenced-sketch-geometry', reason);
           const delta = edit.translation.map(value => evaluateCadScalar(value, parameters));
           graph = { ...graph, points: graph.points.map(point => point.id !== edit.pointId ? point : { ...point, position: [

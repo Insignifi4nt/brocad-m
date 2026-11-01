@@ -1,18 +1,19 @@
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { CadIdentifierSchema, CadPoint2Schema, CadScalarSchema } from './cadPrimitives';
-import { isCadImportData } from './cadImportData';
+import { cadImportDataFields, isCadImportData } from './cadImportData';
 import { CadError } from './cadError';
 import { evaluateCadScalar } from './cadExpression';
 import { cadPathClosureTolerance } from './cadAnalyticSegments';
 import { cadSketchEntityPointIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
-import { cadSketchExternalReferenceComponents } from './cadSketchExternalReferences';
+import { cadSketchFixedComponents } from './cadSketchFixedComponents';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { cadSketchRelationsEqualButPlacement } from './cadSketchPlacedDimensions';
 import { cadSketchRelationDefinition, checkCadSketchRelationOperands } from './sketch-relations/cadSketchRelationRegistry';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 import { cadSketchCanonicalForm, cadSketchCanonicalRefusal } from './sketch-relations/cadSketchCanonicalForms';
 import { CAD_SKETCH_ELEMENT_ID_PATTERN, CadSketchPositions, isCadSketchReservedId } from './sketch-relations/cadSketchVirtualElements';
+import { CAD_SKETCH_GENERATOR_PREFIX_PATTERN, CadSketchGeneratorGeometrySchema } from './sketch-generators/cadSketchGeneratorSchema';
 
 const strict = { additionalProperties: false };
 const id = CadIdentifierSchema;
@@ -91,7 +92,11 @@ export const CadSketchGraphSchema = Type.Object({
     Type.Object({ id, kind: Type.Literal('point-line-distance'), pointId: ref, lineId: ref, side: Type.Union([Type.Literal('left'), Type.Literal('right')]), value: CadScalarSchema, ...annotations.linear }, strict),
     Type.Object({ id, kind: Type.Literal('axis-distance'), pointIds: refPair, axis: Type.Union([Type.Literal('x'), Type.Literal('y')]), value: CadScalarSchema, ...annotations.linear }, strict),
     Type.Object({ id, kind: Type.Literal('fillet-corner'), pointId: ref, lineIds: refPair, arcId: id, value: CadScalarSchema, ...annotations.radial }, strict),
-    Type.Object({ id, kind: Type.Literal('chamfer-corner'), pointId: ref, lineIds: refPair, chamferId: id, values: Type.Tuple([CadScalarSchema, CadScalarSchema]), ...annotations.setbacks }, strict)
+    Type.Object({ id, kind: Type.Literal('chamfer-corner'), pointId: ref, lineIds: refPair, chamferId: id, values: Type.Tuple([CadScalarSchema, CadScalarSchema]), ...annotations.setbacks }, strict),
+    // Geometry it generates from its inputs and keeps: points, edges and relations with ids `<idPrefix>_<key>`. Only the record is stored;
+    // a document's parse regenerates the rest (see `expandCadSketchGenerators`).
+    Type.Object({ id, kind: Type.Literal('generator'), idPrefix: Type.String({ pattern: CAD_SKETCH_GENERATOR_PREFIX_PATTERN }), construction: Type.Boolean(),
+      geometry: CadSketchGeneratorGeometrySchema }, strict)
   ]))
 }, strict);
 type Immutable<T> = { readonly [K in keyof T]: Immutable<T[K]> };
@@ -100,6 +105,8 @@ export type CadSketchGraphPoint = CadSketchGraph['points'][number];
 export type CadSketchGraphEntity = CadSketchGraph['entities'][number];
 export type CadSketchGraphRelation = CadSketchGraph['relations'][number];
 export type CadSketchLinearPattern = Extract<CadSketchGraphRelation, { kind: 'linear-pattern' }>;
+export type CadSketchGenerator = Extract<CadSketchGraphRelation, { kind: 'generator' }>;
+export type CadSketchGeneratorGeometry = CadSketchGenerator['geometry'];
 export type CadSketchReferenceDimension = Extract<CadSketchGraphRelation, { kind: 'reference-dimension' }>;
 export type CadSketchExternalReference = Extract<CadSketchGraphRelation, { kind: 'external-reference' }>;
 export type CadSketchCornerRelation = Extract<CadSketchGraphRelation, { kind: 'fillet-corner' | 'chamfer-corner' }>;
@@ -159,15 +166,58 @@ export function isAcceptedCadSketchGraph(graph: CadSketchGraph): boolean {
 /** Parse unsolved intent without solving, changing scalars, or checking geometric residuals. */
 export function parseCadSketchGraph(value: unknown): CadSketchGraph {
   if (typeof value === 'object' && value !== null && acceptedGraphs.has(value as CadSketchGraph)) return value as CadSketchGraph;
+  return acceptCadSketchGraph(detachCadSketchGraph(value));
+}
+
+// Points, edges and relations a sketch generator made. Generation is typed code whose output meets the schema, and it froze each one,
+// so they are kept as they are instead of being cloned and checked again each time a graph holding them is parsed. A proxy or copy of
+// one is a different object and crosses the full boundary.
+const generatedItems = new WeakSet<object>();
+/** Freeze and trust a sketch generator's output; only generation calls it, on what it has just made. */
+export function trustCadSketchGeneratedItems<T extends object>(items: readonly T[]): readonly T[] {
+  for (const item of items) generatedItems.add(deepFreezeCadData(item));
+  return Object.freeze(items);
+}
+const isGenerated = (item: unknown) => typeof item === 'object' && item !== null && generatedItems.has(item);
+type Detached = { -readonly [K in keyof CadSketchGraph]: CadSketchGraph[K] extends readonly (infer T)[] ? T[] : CadSketchGraph[K] };
+
+/**
+ * The graph detached from `value` and checked against the schema, not yet checked for references or accepted. Generated items are kept as
+ * they are; everything else is cloned and checked.
+ */
+export function detachCadSketchGraph(value: unknown): CadSketchGraph {
   const invalid = () => new CadError('invalid-sketch-graph', 'Sketch graph must contain complete portable point, entity and relation data.');
   // Accessors are refused before cloning reads them; the detached copy is then checked again,
   // since a proxy can change the source between the first walk and the clone.
-  if (!isCadImportData(value)) throw invalid();
-  let graph: CadSketchGraph;
-  try { graph = structuredClone(value) as CadSketchGraph; } catch { throw invalid(); }
-  if (!isCadImportData(graph)) throw invalid();
-  assertNoReservedCadSketchIds(graph);
-  if (!Value.Check(CadSketchGraphSchema, graph)) throw invalid();
+  if (!isCadImportData(value, isGenerated)) throw invalid();
+  const fields = cadImportDataFields(value);
+  const lists = fields && [fields.points, fields.entities, fields.relations].map(list => Array.isArray(list) ? Array.from(list as unknown[]) : null);
+  if (!fields || !lists || lists.some(list => !list) || !lists.some(list => list!.some(isGenerated))) {
+    let graph: CadSketchGraph;
+    try { graph = structuredClone(value) as CadSketchGraph; } catch { throw invalid(); }
+    if (!isCadImportData(graph)) throw invalid();
+    assertNoReservedCadSketchIds(graph);
+    if (!Value.Check(CadSketchGraphSchema, graph)) throw invalid();
+    return graph;
+  }
+  const [points, entities, relations] = lists as unknown[][];
+  const own = { ...fields, points: points.filter(item => !isGenerated(item)), entities: entities.filter(item => !isGenerated(item)), relations: relations.filter(item => !isGenerated(item)) };
+  let copy: Detached;
+  try { copy = structuredClone(own) as Detached; } catch { throw invalid(); }
+  if (!isCadImportData(copy)) throw invalid();
+  assertNoReservedCadSketchIds(copy);
+  if (!Value.Check(CadSketchGraphSchema, copy)) throw invalid();
+  // Each list in its submitted order, with the generated items where they were.
+  const merge = <T>(source: unknown[], cloned: T[]): T[] => { let at = 0; return source.map(item => isGenerated(item) ? item as T : cloned[at++]); };
+  return { ...copy, points: merge(points, copy.points), entities: merge(entities, copy.entities), relations: merge(relations, copy.relations) };
+}
+
+/**
+ * Accept a detached graph: identities, references, operands, canonical forms and placements are checked, then it is frozen. Generated
+ * items are checked as everything else is, since what they reference must still be there.
+ */
+export function acceptCadSketchGraph(graph: CadSketchGraph): CadSketchGraph {
+  if (acceptedGraphs.has(graph)) return graph;
   const ids = new Set<string>(), points = new Set(graph.points.map(point => point.id));
   for (const item of [...graph.points, ...graph.entities, ...graph.relations]) {
     if (ids.has(item.id)) throw new CadError('duplicate-sketch-id', `Duplicate sketch graph identity "${item.id}".`);
@@ -178,6 +228,8 @@ export function parseCadSketchGraph(value: unknown): CadSketchGraph {
     for (const ref of refs) if (!points.has(ref)) throw new CadError('missing-sketch-point', `Sketch graph "${owner}" references missing point "${ref}".`);
   };
   for (const item of graph.entities) references(item.id, cadSketchEntityPointIds(item));
+  // The lists are final here: frozen now, the relation checks look operands up by id instead of scanning.
+  deepFreezeCadData(graph.points, { skipFrozen: true }); deepFreezeCadData(graph.entities, { skipFrozen: true });
   // Each kind's definition checks its operands: the slots that refuse missing or mistyped ones, then its own checks.
   for (const item of graph.relations) {
     checkCadSketchRelationOperands(graph, item);
@@ -186,7 +238,7 @@ export function parseCadSketchGraph(value: unknown): CadSketchGraph {
     assertCadSketchPlacementFits(item);
     references(item.id, cadSketchRelationPointIds(graph, item));
   }
-  deepFreezeCadData(graph);
+  deepFreezeCadData(graph, { skipFrozen: true });
   acceptedGraphs.add(graph);
   return graph;
 }
@@ -249,10 +301,10 @@ export type CadSketchSolvedSlot = { readonly kind: 'point'; readonly index: numb
 
 /**
  * The numbers a solver writes, in this order: each point's numeric x then y, in point order, then
- * each circle's numeric radius, in entity order. Expressions and external-reference snapshots stay fixed.
+ * each circle's numeric radius, in entity order. Expressions, external-reference snapshots and generated members stay fixed.
  */
 export function cadSketchSolvedSlots(graph: CadSketchGraph): readonly CadSketchSolvedSlot[] {
-  const owned = cadSketchExternalReferenceComponents(graph), slots: CadSketchSolvedSlot[] = [];
+  const owned = cadSketchFixedComponents(graph), slots: CadSketchSolvedSlot[] = [];
   graph.points.forEach((point, index) => {
     if (owned.pointIds.has(point.id)) return;
     for (const axis of [0, 1] as const) if (typeof point.position[axis] === 'number') slots.push({ kind: 'point', index, axis });
