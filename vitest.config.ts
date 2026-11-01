@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath } from 'node:url';
 import { availableParallelism } from 'node:os';
+import { WeightedShardSequencer } from './scripts/unit-test-shards.ts';
 
 // Pure geometry/planning suites need no DOM or browser-storage coordination shim.
 const pureDomainTests = [
@@ -23,6 +24,8 @@ export default defineConfig({
     // Many-core hosts otherwise run dozens of jsdom/native-kernel workers at
     // once and starve real serialization/cancellation checks of their time budget.
     maxWorkers: Math.min(4, availableParallelism()),
+    // --shard splits by measured file time (scripts/unit-test-shard-weights.json), not by path hash.
+    sequence: { sequencer: WeightedShardSequencer },
     projects: [
       {
         extends: true,

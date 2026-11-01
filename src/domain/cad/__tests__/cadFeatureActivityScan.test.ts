@@ -206,9 +206,10 @@ describe('feature activity scanner', () => {
     expect(featureActivityReadsIn('fixture.tsx', source)).toEqual([]);
   });
 
+  // Parses every source file, so its time grows with the repository and the runner's load.
   it('passes on the repository, where only the activity module reads the flag', async () => {
     const result = await checkFeatureActivity();
     expect(result.problems).toEqual([]);
     expect(result.checked).toBeGreaterThan(500);
-  });
+  }, 30_000);
 });

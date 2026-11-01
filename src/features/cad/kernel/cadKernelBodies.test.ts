@@ -174,6 +174,21 @@ describe('kernel body identity', () => {
     expect(model.result.bodies?.[0].pieces).toBeUndefined();
   }));
 
+  it('answers adjacency and tangent chain requests for a body by its current feature, as every other topology request does', () =>
+    built([...box, { ...base('round'), kind: 'fillet', targetId: 'box', radius: 1 } as CadFeature], model => {
+      // The body's key is still box, but its current feature is the fillet: requests name that feature, which leads to the body.
+      expect(model.result.bodies?.map(body => [body.key, model.result.meshes[0].featureId])).toEqual([['box', 'round']]);
+      const buildId = model.result.buildId, adjacency = model.topologyAdjacency({ bodyId: 'round', expectedBuildId: buildId });
+      expect(adjacency).toMatchObject({ bodyId: 'round', buildId });
+      expect(adjacency.edges.length).toBeGreaterThan(12);
+      const chain = model.topologyTangentChain({ bodyId: 'round', expectedBuildId: buildId, edgeKey: adjacency.edges[0] });
+      expect(chain).toMatchObject({ bodyId: 'round', edgeKey: adjacency.edges[0] });
+      expect(chain.edges).toContain(adjacency.edges[0]);
+      // The pad is no longer a current body state, so naming it is refused, as inspection and pick resolution refuse it.
+      expect(() => model.topologyAdjacency({ bodyId: 'box', expectedBuildId: buildId })).toThrow('unavailable');
+      expect(() => model.topologyTangentChain({ bodyId: 'box', expectedBuildId: buildId, edgeKey: adjacency.edges[0] })).toThrow('unavailable');
+    }));
+
   it('keeps the target key of a boolean and drops its consumed tool', () => built([...box, ...peg, { ...base('merge'), kind: 'boolean', targetId: 'box', toolId: 'peg', operation: 'union' }], model => {
     expect(model.result.meshes.map(mesh => [mesh.featureId, mesh.bodyKey])).toEqual([['merge', 'box']]);
     expect(model.result.bodies?.[0]).toMatchObject({ key: 'box', modifiedBy: ['merge'] });

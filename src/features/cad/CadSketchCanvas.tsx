@@ -4,9 +4,13 @@ import { flushSync } from 'react-dom';
 import { cadSketchLinearPatternForSelection } from '@/domain/cad/cadSketchLinearPattern';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select } from '@/components/ui/select';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
-import { CloseIcon, ConfirmIcon, FitViewIcon, GridIcon, SnapIcon, UndoIcon } from '@wire-edm/icons-react';
+import { CloseIcon, ConfirmIcon, FitViewIcon, GridIcon, SelectIcon, SnapIcon, UndoIcon } from '@wire-edm/icons-react';
+import { CadToolbarMenu } from './CadToolbarMenu';
+import { CAD_DEFAULT_SELECTION_FILTER, cadSelectionAccepts, setCadSelectionKind, type CadSelectionFilter, type CadSelectionKind } from '@/domain/cad/selection/cadSelectionFilter';
+import { cadSketchSelectionChain } from '@/domain/cad/selection/cadSketchSelectionChain';
+import type { CadChainMode } from '@/domain/cad/selection/cadSelectionChain';
+import { cadSelectOtherApply, cadSelectOtherStep } from '@/domain/cad/selection/cadSelectionCycle';
 import { CadContextHelp } from './CadContextHelp';
 import { CadDrawingTools, CadViewTools } from './CadCommandDock';
 import type { CadCurveFeature, CadPathSegment, CadProfile, CadSketchFeature, CadSketchProfile } from '@/domain/cad/cadDocument';
@@ -43,7 +47,8 @@ import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmis
 import { useCadSketchBoxSelection } from './useCadSketchBoxSelection';
 import { cadSketchDimensionPick, cadSketchDimensionPickOf, cadSketchDimensionSelectionStatus, cadSketchRelationHighlight, isCadSketchGlyphRelation, type CadSketchDimensionPick } from './cadSketchDimensionSelection';
 import { cadSketchDrawnDimensions } from './cadSketchGraphDimensionLayout';
-import { CAD_SKETCH_AXIS_PIXELS, CAD_SKETCH_FIXED_SELECTIONS, cadSketchFixedEligible, cadSketchGeometryPickAllows, cadSketchGraphSelectionsEqual, pickCadSketchFixedElement, type CadSketchGraphPickFilter } from './cadSketchGraphSelection';
+import { CAD_SKETCH_AXIS_PIXELS, CAD_SKETCH_FIXED_SELECTIONS, cadSelectionFilterForSketchPick, cadSketchFixedEligible, cadSketchGeometryPickAllows, cadSketchGraphSelectionSet, cadSketchGraphSelectionsEqual,
+  cadSketchPickScope, cadSketchPickScopeHasEdges, cadSketchPickScopeHasPoints, pickCadSketchFixedElement, cadSketchFixedElementsAt, type CadSketchGraphPickFilter, type CadSketchGraphPickScope } from './cadSketchGraphSelection';
 import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_ORIGIN_ID, CAD_SKETCH_V_AXIS_ID, cadSketchVirtualSubject, isCadSketchVirtualId, type CadSketchVirtualId } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
 import { CadContextMenu, type CadContextMenuItem } from './CadContextMenu';
 import { CadSketchDimensionPreview, CadSketchPointerReadout } from './CadSketchDimensionPreview';
@@ -64,9 +69,12 @@ const ACQUIRED_POINTS = 4;
 const DRAWING_DRAG_PIXELS = 8;
 /** A second drawing press this soon after the previous one, within the drag slop of it, completes a double-click. */
 const DOUBLE_CLICK_MS = 500;
-/** The origin and the axes each selection filter reaches: the origin counts as a point and the axes as edges. */
-const CAD_SKETCH_FILTER_FIXED: Readonly<Record<CadSketchGraphPickFilter, readonly CadSketchGraphSelection[]>> = { auto: CAD_SKETCH_FIXED_SELECTIONS,
-  points: CAD_SKETCH_FIXED_SELECTIONS.filter(item => item.kind === 'point'), edges: CAD_SKETCH_FIXED_SELECTIONS.filter(item => item.kind === 'entity') };
+/** The kinds the sketch's selection filter menu offers; the model view offers its own from the same filter. */
+const SKETCH_SELECTION_KINDS: readonly { readonly kind: CadSelectionKind; readonly label: string }[] = Object.freeze([
+  { kind: 'point', label: 'Points' }, { kind: 'edge', label: 'Edges' }, { kind: 'axis', label: 'Axes' }, { kind: 'relation', label: 'Relations' }, { kind: 'dimension', label: 'Dimensions' }]);
+/** A sketch selection holds at most this many points and edges, as its schema allows. */
+const SKETCH_SELECTION_LIMIT = 64;
+const sameAtom = (a: CadSketchGraphSelection, b: CadSketchGraphSelection) => a.kind === b.kind && a.id === b.id;
 /** Picks whose relations name source geometry, so the source must not change while they are pending. */
 const referencesSource = (pick: CadFreshSketchPick) => pick.kind === 'coincident' || pick.kind === 'on-line' || pick.kind === 'on-curve';
 type DrawingPick = { readonly point: SketchPoint } & (
@@ -134,7 +142,7 @@ type CadSketchDetailSelection = { readonly kind: 'none' | 'profile' } | { readon
 interface CadSketchOverlapPick {
   readonly prepared: ReturnType<typeof prepareCadSketchGraphInteraction>;
   readonly document: CadSketchGraphControls['document'];
-  readonly version?: string; readonly cancelSignal: number; readonly filter: CadSketchGraphPickFilter; readonly frameKey: string; readonly frame: string;
+  readonly version?: string; readonly cancelSignal: number; readonly filter: CadSketchGraphPickScope; readonly frameKey: string; readonly frame: string;
   readonly clientX: number; readonly clientY: number; readonly toggle: boolean; readonly candidates: readonly CadSketchGraphSelection[];
   readonly target?: CadSketchGraphSelection;
   readonly selection: readonly CadSketchGraphSelection[];
@@ -180,7 +188,7 @@ function CadSketchAxes({ origin: [x, y], pixel, view: [width, height], fixedProp
   </g>;
 }
 
-export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVersion, placementLabel, tool, selectedProfileId, onSelectProfile, onAddProfile, onAddFreshSketch, onAddPath, onTranslateProfile, onMoveHandle, onAddCurve, onCancelCurve, curveCreation = false, onPendingChange, onDrawingControls, onExitTool, onError, cancelSignal, interactionLocked: externalInteractionLocked = false, onControlsReady, viewLocked = false, navigationMode = 'mouse', onContextMenu, graphContextMenu, previewProfile, previewSketch, graphControls, inspection, dimensionControls, getFitArea, onViewFrame, viewControls, outlined = false }: {
+export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVersion, placementLabel, tool, selectedProfileId, onSelectProfile, onAddProfile, onAddFreshSketch, onAddPath, onTranslateProfile, onMoveHandle, onAddCurve, onCancelCurve, curveCreation = false, onPendingChange, onDrawingControls, onExitTool, onError, cancelSignal, interactionLocked: externalInteractionLocked = false, onControlsReady, viewLocked = false, navigationMode = 'mouse', onContextMenu, graphContextMenu, previewProfile, previewSketch, graphControls, inspection, dimensionControls, getFitArea, onViewFrame, viewControls, outlined = false, selectionFilter: sharedSelectionFilter, onSelectionFilterChange }: {
   sketch: CadSketchFeature | CadCurveFeature;
   parameters: Readonly<Record<string, number>>;
   documentVersion?: string;
@@ -221,6 +229,9 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
   viewControls?: ReactNode;
   /** Draws a dark under-stroke beneath the sketch geometry and drawing previews, for the bright faces of a part shown plainly behind the sketch. */
   outlined?: boolean;
+  /** The shared selection filter, kept with the device preferences; without it the canvas keeps a filter of its own. */
+  selectionFilter?: CadSelectionFilter;
+  onSelectionFilterChange?(filter: CadSelectionFilter): void;
 }) {
 
   const sketch = previewSketch && sourceSketch.kind === 'sketch' && previewSketch.id === sourceSketch.id ? previewSketch : sourceSketch;
@@ -230,7 +241,18 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
   const [boxPending, setBoxPending] = useState(false);
   // Whether the selection icon row found a place clear of the selection; without one the status line says where its commands are.
   const [selectionActionsRoom, setSelectionActionsRoom] = useState(true);
-  const [pickFilter, setPickFilter] = useState<CadSketchGraphPickFilter>('auto');
+  const [ownSelectionFilter, setOwnSelectionFilter] = useState<CadSelectionFilter>(CAD_DEFAULT_SELECTION_FILTER);
+  const selectionFilter = sharedSelectionFilter ?? ownSelectionFilter, changeSelectionFilter = onSelectionFilterChange ?? setOwnSelectionFilter;
+  const pickFilter = cadSketchPickScope(selectionFilter);
+  const filterOwner = useRef({ selectionFilter, changeSelectionFilter }); filterOwner.current = { selectionFilter, changeSelectionFilter };
+  // An agent's sketch pick filter sets the points, edges and axes of the same filter.
+  const setPickFilter = useCallback((pick: CadSketchGraphPickFilter) => filterOwner.current.changeSelectionFilter(cadSelectionFilterForSketchPick(filterOwner.current.selectionFilter, pick)), []);
+  // The origin is a point and the axes are axes to the filter.
+  const filterFixed = useMemo(() => CAD_SKETCH_FIXED_SELECTIONS.filter(item => cadSelectionAccepts(selectionFilter, item.kind === 'point' ? 'point' : 'axis')), [selectionFilter]);
+  // A chain's summary, shown while the selection it made stays as it is.
+  const [chainStatus, setChainStatus] = useState<{ readonly selection: readonly CadSketchGraphSelection[]; readonly text: string } | null>(null);
+  // Where the pointer last was over the canvas, read only when Select other is asked for.
+  const lastPointer = useRef<{ readonly clientX: number; readonly clientY: number } | null>(null);
   const [overlap, setOverlap] = useState<CadSketchOverlapPick | null>(null);
   const [pickHighlight, setPickHighlight] = useState<CadSketchGraphSelection | null>(null);
   const [snapChoice, setSnapChoice] = useState<DrawingSnapChoice | null>(null);
@@ -409,7 +431,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
   const fixedPick = pickFixed?.length ? geometryPick : undefined;
   // In plain selection the origin and axes are selected like sketch geometry, as CATIA selects its H and V axes.
   const fixedSelect = !geometryPick && !positionPick && tool === 'select' && graphControls?.onSelectSet ? graphControls : undefined;
-  const fixedEligible = fixedPick ? pickFixed ?? undefined : fixedSelect ? CAD_SKETCH_FILTER_FIXED[pickFilter] : undefined;
+  const fixedEligible = fixedPick ? pickFixed ?? undefined : fixedSelect ? filterFixed : undefined;
   const fixedAt = (point: SketchPoint, millimetersPerPixel: number) => fixedEligible ? pickCadSketchFixedElement(point, millimetersPerPixel, fixedEligible) : null;
   /**
    * Sketch geometry, profile grips and profile edges keep their picks where an axis crosses them; the axes take the rest of
@@ -578,7 +600,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
     graphControls ? [graphControls.selection, graphControls.relation, graphControls.inspection, graphControls.degreesOfFreedom, graphControls.definition?.revision, graphControls.definitionLocked, graphControls.diagnosis?.revision, graphControls.showDimensions, placement] : null, inspection, dragPreview?.translation]);
   if (viewRevision.current.signature !== viewSignature) { viewRevision.current = { signature: viewSignature, revision: viewRevision.current.revision + 1 }; }
   const currentView = useRef<CadRenderedViewState>({ mode: sketch.kind, available: false, plane: renderedPlane, gridVisible: grid, snapEnabled: snap, gridSnapEnabled: gridSnap, gridStepMm: gridStep, centerMm: center, heightSpanMm: span, revision: viewRevision.current.revision });
-  currentView.current = Object.freeze({ mode: sketch.kind, available: Boolean(svg.current), plane: renderedPlane, gridVisible: grid, snapEnabled: snap, gridSnapEnabled: gridSnap, gridStepMm: gridStep, centerMm: Object.freeze([...center] satisfies [number, number]), heightSpanMm: span, revision: viewRevision.current.revision, ...(sketch.kind === 'sketch' ? { sketchPickFilter: pickFilter } : {}) });
+  currentView.current = Object.freeze({ mode: sketch.kind, available: Boolean(svg.current), plane: renderedPlane, gridVisible: grid, snapEnabled: snap, gridSnapEnabled: gridSnap, gridStepMm: gridStep, centerMm: Object.freeze([...center] satisfies [number, number]), heightSpanMm: span, revision: viewRevision.current.revision, ...(sketch.kind === 'sketch' && pickFilter !== 'none' ? { sketchPickFilter: pickFilter } : {}) });
   const fitView = useRef<(() => void) | null>(null);
   const initialCursorFit = useRef(false);
   useLayoutEffect(() => {
@@ -701,7 +723,8 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
   const selectionActionsShown = Boolean(graphControls?.selectionActions && sourceGraph && tool === 'select' && !geometryPick && !positionPick && !isPreview && !boxPending
     && !graphPending && !submission.applying && dragPreview === null && points.length === 0 && !pathPending);
   const roomStatus = selectionActionsShown && !selectionActionsRoom ? 'No room beside the selection for its relation icons · Constrain and Dimension apply the same' : null;
-  const contextStatus = [dimensionStatus, glyphStatus, roomStatus].filter(Boolean).join(' · ') || null;
+  const chainStatusText = chainStatus && graphControls && cadSketchGraphSelectionsEqual(chainStatus.selection, graphControls.selection) ? chainStatus.text : null;
+  const contextStatus = [chainStatusText, dimensionStatus, glyphStatus, roomStatus].filter(Boolean).join(' · ') || null;
   const layerControls = useMemo(() => graphControls && boxSelections ? { ...graphControls, selection: boxSelections } : graphControls, [graphControls, boxSelections]);
   const graphPickAt = useRef<(event: { clientX: number; clientY: number }) => CadSketchGraphSelection | null>(() => null);
   graphPickAt.current = event => { const point = getRawPoint(event), rect = svg.current?.getBoundingClientRect(); return point && rect?.height ? graphPicks(point, span / rect.height)[0] ?? null : null; };
@@ -723,8 +746,8 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
     if (!sourceGraph || !graphControls || !projection || !rect?.height || tool !== 'select' || isPreview || interactionLocked) return false;
     const candidates = graphPicks(projection.point, span / rect.height);
     const focused = focusedAtom && trigger === 'keyboard' && (geometryPick ? cadSketchGeometryPickAllows(geometryPick, focusedAtom)
-      : focusedAtom.kind === 'point' ? graphContextMenu && pickFilter !== 'edges' && sourceGraph.graph.points.some(point => point.id === focusedAtom.id)
-      : pickFilter !== 'points' && sourceGraph.graph.entities.some(entity => entity.id === focusedAtom.id && (entity.kind !== 'circle' || graphContextMenu || cadSketchLinearPatternForSelection(sourceGraph.graph, focusedAtom) || cadSketchExternalReferenceForSelection(sourceGraph.graph, focusedAtom)))) ? focusedAtom : undefined;
+      : focusedAtom.kind === 'point' ? graphContextMenu && cadSketchPickScopeHasPoints(pickFilter) && sourceGraph.graph.points.some(point => point.id === focusedAtom.id)
+      : cadSketchPickScopeHasEdges(pickFilter) && sourceGraph.graph.entities.some(entity => entity.id === focusedAtom.id && (entity.kind !== 'circle' || graphContextMenu || cadSketchLinearPatternForSelection(sourceGraph.graph, focusedAtom) || cadSketchExternalReferenceForSelection(sourceGraph.graph, focusedAtom)))) ? focusedAtom : undefined;
     if (!candidates.length && !focused) return false;
     const selected = graphControls.selection.length === 1 ? graphControls.selection[0] : null;
     const target = trigger === 'pointer' ? candidates.length === 1 && (candidates[0].kind === 'entity' || graphContextMenu && !geometryPick) ? candidates[0]
@@ -744,6 +767,60 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
     try { selectGraphHit(atom, currentOverlap.toggle); }
     catch (cause) { onError(userFacingMessage(cause, 'Unable to select this geometry.')); return; }
     svg.current?.querySelector<SVGGElement>(`[data-cad-sketch-${atom.kind === 'point' ? 'point' : 'entity'}="${atom.id}"]`)?.focus({ preventScroll: true });
+  };
+  /**
+   * Selects the edges chained to `seed`: every edge joined end to end for a contour, or only those meeting without a turn for a tangent chain.
+   * A chain stops where the path forks and says so.
+   */
+  const selectChain = (seed: string, mode: CadChainMode, additive: boolean) => {
+    // A menu command runs after its menu closes, so it reads the lock of the render that closed it, not the one that opened it.
+    if (!sourceGraph || !graphControls?.onSelectSet || tool !== 'select' || sketch.kind !== 'sketch' || geometryPick || positionPick || isPreview || interactionLocked || !cadSketchPickScopeHasEdges(pickFilter)) return false;
+    const chain = cadSketchSelectionChain(sourceGraph.graph, sourceGraph.parameters, seed, mode);
+    if (!chain.ids.length) return false;
+    const name = mode === 'tangent' ? 'Tangent chain' : 'Contour', edges = chain.ids.map(id => ({ kind: 'entity' as const, id }));
+    const selection = [...additive ? graphControls.selection.filter(atom => !edges.some(edge => sameAtom(edge, atom))) : [], ...edges];
+    if (selection.length > SKETCH_SELECTION_LIMIT) { onError(`This ${name.toLowerCase()} has ${chain.ids.length} edges. A selection holds at most ${SKETCH_SELECTION_LIMIT} points and edges.`); return true; }
+    try {
+      const next = cadSketchGraphSelectionSet(sourceGraph.graph, selection);
+      graphControls.onSelectSet(next, additive);
+      // The status explains a chain that grew past its seed or stopped at a fork; a lone edge selected this way needs no explaining.
+      const forks = chain.branches.length;
+      if (chain.ids.length === 1 && !forks) { setChainStatus(null); return true; }
+      setChainStatus({ selection: next, text: `${name} · ${chain.ids.length} edge${chain.ids.length === 1 ? '' : 's'}${chain.closed ? ' · closed' : ''}${forks ? ` · stops at ${forks} fork${forks === 1 ? '' : 's'}` : ''}` });
+    } catch (cause) { onError(userFacingMessage(cause, 'Unable to select this chain.')); }
+    return true;
+  };
+  const currentSelectChain = useRef(selectChain);
+  currentSelectChain.current = selectChain;
+  /** The sketch position Select other works at: the pointer over the canvas, else the focused point or edge. */
+  const otherPoint = (target: EventTarget | null): SketchPoint | null => {
+    if (lastPointer.current) return getRawPoint(lastPointer.current);
+    const element = target instanceof Element ? target.closest('[data-cad-sketch-point], [data-cad-sketch-entity]') : null;
+    const pointId = element?.getAttribute('data-cad-sketch-point'), entityId = element?.getAttribute('data-cad-sketch-entity');
+    const point = pointId ? sourceGraph?.points.find(item => item.id === pointId)?.position : null;
+    const segment = entityId ? sourceGraph?.geometry.segments.find(item => item.id === entityId) : null;
+    return point ?? (segment ? [segment.start.x, segment.start.y] : null);
+  };
+  /**
+   * Select other: the next candidate under the pointer takes the place of the selected one, in the order a click prefers them, points
+   * before edges and each by distance, with the origin among the points and the axes after the edges. Shift goes back.
+   */
+  const selectOther = (direction: 1 | -1, target: EventTarget | null) => {
+    if (!sourceGraph || !graphControls?.onSelectSet || tool !== 'select' || sketch.kind !== 'sketch' || geometryPick || positionPick || isPreview || interactionLocked) return false;
+    const rect = svg.current?.getBoundingClientRect(), point = otherPoint(target);
+    if (!rect?.height || !point) return false;
+    const hits = graphPicks(point, span / rect.height), fixed = fixedEligible ? cadSketchFixedElementsAt(point, span / rect.height, fixedEligible) : [];
+    const candidates = [...hits.filter(hit => hit.kind === 'point'), ...fixed.filter(item => item.kind === 'point'), ...hits.filter(hit => hit.kind === 'entity'), ...fixed.filter(item => item.kind === 'entity')];
+    const step = cadSelectOtherStep(candidates, graphControls.selection, sameAtom, direction);
+    if (!step) return false;
+    try { graphControls.onSelectSet(cadSketchGraphSelectionSet(sourceGraph.graph, cadSelectOtherApply(graphControls.selection, step, sameAtom)), false); }
+    catch (cause) { onError(userFacingMessage(cause, 'Unable to select this geometry.')); return true; }
+    // Keys then act on the new selection: focus moves to its element, or to the canvas, never staying on the one it replaced.
+    const { candidate } = step;
+    const element = svg.current?.querySelector<SVGElement>(isCadSketchVirtualId(candidate.id) ? `[data-cad-sketch-fixed="${candidate.id}"]`
+      : `[data-cad-sketch-${candidate.kind === 'point' ? 'point' : 'entity'}="${CSS.escape(candidate.id)}"]`);
+    (element?.getAttribute('tabindex') === '0' ? element : svg.current)?.focus({ preventScroll: true });
+    return true;
   };
   const overlapTarget = currentOverlap?.target;
   const highlightEdgeAction = (action?: CadSketchOverlapPick['action'], extendEnd?: 'start' | 'end') => {
@@ -820,7 +897,12 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
       } }]),
     ...extendItems,
     { label: overlapTarget.kind === 'point' ? 'Select point' : 'Select edge', onHighlight: () => { highlightEdgeAction(); setPickHighlight(overlapTarget); }, onSelect: () => selectOverlap(overlapTarget) },
-    ...(currentOverlap.candidates.length > 1 ? [{ label: 'Select other', onSelect: () => setOverlap({ ...currentOverlap, target: undefined, split: undefined, trim: undefined, extend: undefined, extendEnds: undefined, extendEnd: undefined, action: undefined }) }] : [])
+    ...(overlapTarget.kind === 'entity' && !isCadSketchVirtualId(overlapTarget.id) && cadSketchPickScopeHasEdges(pickFilter) ? [
+      { label: 'Select contour', help: 'Every edge joined end to end with this one. Double-click an edge for the same.', onHighlight: () => { highlightEdgeAction(); setPickHighlight(overlapTarget); },
+        onSelect: () => actOnPattern(() => currentSelectChain.current(overlapTarget.id, 'contour', currentOverlap.toggle)) },
+      { label: 'Select tangent chain', help: 'The edges meeting this one without a turn. Alt + double-click an edge for the same.', onHighlight: () => { highlightEdgeAction(); setPickHighlight(overlapTarget); },
+        onSelect: () => actOnPattern(() => currentSelectChain.current(overlapTarget.id, 'tangent', currentOverlap.toggle)) }] : []),
+    ...(currentOverlap.candidates.length > 1 ? [{ label: 'Select other', help: 'N picks the next candidate under the pointer, and Shift + N the one before.', onSelect: () => setOverlap({ ...currentOverlap, target: undefined, split: undefined, trim: undefined, extend: undefined, extendEnds: undefined, extendEnd: undefined, action: undefined }) }] : [])
   ] : currentOverlap?.candidates.map(atom => {
     const point = atom.kind === 'point' ? sourceGraph?.points.find(point => point.id === atom.id) : null;
     const index = atom.kind === 'point' ? sourceGraph?.graph.points.findIndex(point => point.id === atom.id) : sourceGraph?.graph.entities.findIndex(entity => entity.id === atom.id);
@@ -1231,10 +1313,21 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
   const latestFit = useRef(fit); latestFit.current = fit;
   const pickLocked = viewLocked || interactionLocked || Boolean(geometryPick || positionPick);
   const planeLabel = placementLabel ?? (typeof sketch.plane === 'string' ? sketch.plane : 'Datum plane');
-  const viewTools = useMemo(() => <CadViewTools label="Sketch controls">{sketch.kind === 'sketch' && <Select aria-label="Sketch selection filter" title="Auto includes points, edges and profiles. Points or Edges restrict direct picking and box selection; Shift toggles selection." density="compact" value={pickFilter} disabled={pickLocked} onChange={event => setPickFilter(event.target.value as CadSketchGraphPickFilter)}><option value="auto">Auto</option><option value="points">Points</option><option value="edges">Edges</option></Select>}<span className="cad-plane-label">{planeLabel}</span><Button aria-label={sketch.kind === 'curve' ? 'Fit curve' : 'Fit sketch'} disabled={viewLocked} onClick={() => latestFit.current()}><FitViewIcon size={14} /></Button><Button aria-label="Toggle sketch grid" disabled={viewLocked} aria-pressed={grid} onClick={() => setGrid(!grid)}><GridIcon size={14} /></Button><Button aria-label="Toggle snapping" title="Snap to endpoints, centers, midpoints and other geometry. Hold Ctrl or Cmd to temporarily disable snapping." disabled={viewLocked} aria-pressed={snap} onClick={() => setSnap(!snap)}><SnapIcon size={14} /></Button><label className="cad-grid-step">Grid <Input aria-label="Grid spacing" disabled={viewLocked} type="number" min="0.01" value={gridStep} onChange={(event) => { const value = Number(event.target.value); if (value > 0 && Number.isFinite(value)) setGridStep(value); }} /> mm</label><label className="cad-check"><Input type="checkbox" aria-label="Snap to grid" title="Catch the pointer at grid nodes it passes close to. Off, the grid is only a visual reference." disabled={viewLocked} checked={gridSnap} onChange={event => setGridSnap(event.target.checked)} />Snap to grid</label><CadContextHelp label="Sketch navigation">{navigationMode === 'trackpad' ? 'Use two-finger scrolling to pan and pinch to zoom.' : 'Drag with the right mouse button to pan and use the wheel to zoom.'} Press F to fit the sketch. Escape finishes a line chain or cancels unfinished drawing; with nothing pending it returns to Select.</CadContextHelp>{viewControls}</CadViewTools>, [sketch.kind, pickFilter, pickLocked, planeLabel, viewLocked, grid, snap, gridStep, gridSnap, navigationMode, viewControls]);
+  const viewTools = useMemo(() => <CadViewTools label="Sketch controls">{sketch.kind === 'sketch' && <CadToolbarMenu label="Filter" menuLabel="Sketch selection filter" title="Choose what clicks, boxes and Select other take in the sketch. The model view shares this filter." icon={<SelectIcon size={14} />}
+    disabled={pickLocked} pressed={SKETCH_SELECTION_KINDS.some(({ kind }) => !cadSelectionAccepts(selectionFilter, kind))} className="cad-pattern-menu cad-selection-filter-menu"
+    items={SKETCH_SELECTION_KINDS.map(({ kind, label }) => ({ key: kind, label, checked: cadSelectionAccepts(selectionFilter, kind),
+      onSelect: () => changeSelectionFilter(setCadSelectionKind(selectionFilter, kind, !cadSelectionAccepts(selectionFilter, kind))) }))} />}<span className="cad-plane-label">{planeLabel}</span><Button aria-label={sketch.kind === 'curve' ? 'Fit curve' : 'Fit sketch'} disabled={viewLocked} onClick={() => latestFit.current()}><FitViewIcon size={14} /></Button><Button aria-label="Toggle sketch grid" disabled={viewLocked} aria-pressed={grid} onClick={() => setGrid(!grid)}><GridIcon size={14} /></Button><Button aria-label="Toggle snapping" title="Snap to endpoints, centers, midpoints and other geometry. Hold Ctrl or Cmd to temporarily disable snapping." disabled={viewLocked} aria-pressed={snap} onClick={() => setSnap(!snap)}><SnapIcon size={14} /></Button><label className="cad-grid-step">Grid <Input aria-label="Grid spacing" disabled={viewLocked} type="number" min="0.01" value={gridStep} onChange={(event) => { const value = Number(event.target.value); if (value > 0 && Number.isFinite(value)) setGridStep(value); }} /> mm</label><label className="cad-check"><Input type="checkbox" aria-label="Snap to grid" title="Catch the pointer at grid nodes it passes close to. Off, the grid is only a visual reference." disabled={viewLocked} checked={gridSnap} onChange={event => setGridSnap(event.target.checked)} />Snap to grid</label><CadContextHelp label="Sketch navigation">{navigationMode === 'trackpad' ? 'Use two-finger scrolling to pan and pinch to zoom.' : 'Drag with the right mouse button to pan and use the wheel to zoom.'} Press F to fit the sketch. Escape finishes a line chain or cancels unfinished drawing; with nothing pending it returns to Select.</CadContextHelp>{viewControls}</CadViewTools>, [sketch.kind, selectionFilter, changeSelectionFilter, pickLocked, planeLabel, viewLocked, grid, snap, gridStep, gridSnap, navigationMode, viewControls]);
   return <div className={`cad-sketch-viewport ${sketch.kind === 'curve' ? 'cad-curve-viewport' : ''}`} ref={host}>
     <svg ref={svg} className={`cad-sketch-canvas ${drawing ? 'is-drawing' : tool === 'trim' ? 'is-trimming' : ''}`} role="application" tabIndex={interactionLocked ? -1 : 0} aria-label={sketch.kind === 'curve' ? 'Curve drawing canvas' : 'Sketch drawing canvas'} aria-describedby={instructionsId} viewBox={`${-width / 2} ${-span / 2} ${width} ${span}`} preserveAspectRatio="none"
       onContextMenu={(event) => event.preventDefault()}
+      onDoubleClick={event => {
+        // A double-click on an edge selects its contour, as SOLIDWORKS selects a chain and Fusion connected curves; Alt keeps to the
+        // tangent chain and Shift adds. Dimensions and relation marks keep their own double-click.
+        if (event.button !== 0 || event.target instanceof Element && event.target.closest('.cad-sketch-graph-dimensions, .cad-sketch-relation-glyphs')) return;
+        const point = getRawPoint(event), rect = event.currentTarget.getBoundingClientRect();
+        const seed = point && rect.height ? graphPicks(point, span / rect.height).find(hit => hit.kind === 'entity') : undefined;
+        if (seed && selectChain(seed.id, event.altKey ? 'tangent' : 'contour', event.shiftKey)) event.preventDefault();
+      }}
       onPointerDownCapture={event => {
         // Another contact while an axis is held abandons the press and its trailing click; the same pointer pressing again replaces it.
         // This runs while capturing, since sketch geometry stops the press from reaching the canvas.
@@ -1427,6 +1520,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
         if (pressedClick(event.pointerId)) lastClick.current = null;
         boxSelection.cancelPointer(event); finishProfileDrag(event.pointerId); finishPan(event.pointerId); }}
       onPointerMove={(event) => {
+        lastPointer.current = { clientX: event.clientX, clientY: event.clientY };
         const press = drawingPress.current;
         if (press && event.pointerId === press.pointerId) {
           if (!(event.buttons & 1)) drawingPress.current = null;
@@ -1497,7 +1591,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
           }
         }
       }}
-      onPointerLeave={() => { setHoverHandle(null); setFixedHover(null); setTrimHover(null); setCursorInput(current => ({ ...current, point: cursor, mode: 'position' })); }}
+      onPointerLeave={() => { lastPointer.current = null; setHoverHandle(null); setFixedHover(null); setTrimHover(null); setCursorInput(current => ({ ...current, point: cursor, mode: 'position' })); }}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing) return;
         if (event.key === 'Escape') dropFixedPress();
@@ -1529,6 +1623,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
           return;
         }
         if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.key.toLowerCase() === 'n' && !event.nativeEvent.isComposing && selectOther(event.shiftKey ? -1 : 1, event.target)) { event.preventDefault(); event.stopPropagation(); return; }
         // A pick leaves focus on the geometry picked, which passes on the keys it has no use for once nothing more can be picked there. The
         // pick's Enter and its placed dimensions' Delete still belong to the canvas; every other key works only on the canvas itself.
         const onCanvas = event.target === event.currentTarget;
@@ -1628,7 +1723,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
         </g>}
         {graphControls && sourceSketch.kind === 'sketch' && sourceGraph && layerControls && <CadSketchGraphLayer controls={layerControls} sketch={sourceSketch} version={documentVersion} prepared={sourceGraph} visual={visualGraph ?? undefined}
           center={center} scaleX={width / (viewportSize.width || 800)} scaleY={span / (viewportSize.height || 600)} gridStep={gridStep} snap={snap} gridSnap={gridSnap} active={tool === 'select'}
-          filter={graphPickFilter} highlighted={graphHighlight} halo={halo} pickAt={pickGraphAt} coversDimensionLine={coversDimensionLine} coversRelationGlyph={coversRelationGlyph}
+          filter={graphPickFilter} relationsSelectable={cadSelectionAccepts(selectionFilter, 'relation')} dimensionsSelectable={cadSelectionAccepts(selectionFilter, 'dimension')} highlighted={graphHighlight} halo={halo} pickAt={pickGraphAt} coversDimensionLine={coversDimensionLine} coversRelationGlyph={coversRelationGlyph}
           locked={externalInteractionLocked || Boolean(positionPick && !geometryPick) || submission.applying || points.length > 0 || pathPending || dragPreview !== null || boxPending || overlapPending || choicePending} cancelSignal={cancelSignal} onPendingChange={publishGraphPending} onError={onError} />}
         {graphControls?.patternInteraction && sourceSketch.kind === 'sketch' && (previewSketch ?? sourceSketch).graph && <CadSketchLinearPatternPreview graph={(previewSketch ?? sourceSketch).graph!} parameters={parameters} interaction={graphControls.patternInteraction} center={center} mmPerPixel={span / (viewportSize.height || 600)} />}
         {inspection?.gear && inspectedGear?.geometry.kind === 'plugin' && <CadGearInspectionOverlay profile={inspectedGear.geometry} parameters={parameters} inputName={inspection.gear.inputName} span={span} viewCenter={center} />}

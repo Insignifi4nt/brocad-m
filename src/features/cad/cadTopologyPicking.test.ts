@@ -1,8 +1,9 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as THREE from 'three';
 import type { CadMesh } from '@/domain/cad/cadDocument';
-import { mergeTopologySelection, orthographicPixelSize, pickTopology, topologyGroupAt, validateTopologySelection } from './cadTopologyPicking';
+import { CadTangentChainReads, mergeTopologySelection, orthographicPixelSize, pickTopology, topologyGroupAt, validateTopologySelection } from './cadTopologyPicking';
+import { CadTangentContours, type CadTopologyTangentChain } from '@/domain/cad/cadTopologyAdjacency';
 import { cadLocalRenderPositions, cadRenderOrigin } from './cadRenderCoordinates';
 
 function scene(edgeHeight = 5, worldOffset = 0, scale = 1) {
@@ -28,6 +29,34 @@ function scene(edgeHeight = 5, worldOffset = 0, scale = 1) {
 }
 
 describe('CAD topology picking', () => {
+  it('shares each edge\'s tangent chain read, stores equal contours once and forgets failed, refused and overlong chains with their contours', async () => {
+    const contours = new CadTangentContours(), reads = new CadTangentChainReads(contours);
+    const chainOf = (edgeKey: string, edges: readonly string[]): CadTopologyTangentChain => ({ bodyId: 'pad', buildId: 'build-1', edgeKey, edges: [...edges], closed: true, native: true });
+    const start = vi.fn((edgeKey: string, edges: readonly string[]) => Promise.resolve(chainOf(edgeKey, edges)));
+    const a = await reads.read('a', () => start('a', ['a', 'b', 'c']));
+    expect(await reads.read('a', () => start('a', ['a']))).toBe(a); expect(start).toHaveBeenCalledOnce();
+    // Another seed of the same contour keeps its own answer, pointing to the edges stored first.
+    const b = await reads.read('b', () => start('b', ['b', 'c', 'a']));
+    expect(b).toEqual(chainOf('b', ['a', 'b', 'c'])); expect(b.edges).toBe(a.edges); expect(contours.size).toBe(1);
+    // A refused chain of its own is forgotten with its contour, however many chains are refused.
+    for (const seed of ['d', 'g', 'h']) { const read = reads.read(seed, () => start(seed, [seed, `${seed}-next`])); await read; expect(contours.size).toBe(2); reads.forget(read); }
+    expect(contours.size).toBe(1);
+    // A contour stays while another kept read holds it. Forgetting a refused read again leaves the newer read and its hold alone.
+    const refused = reads.read('a', () => start('a', ['a'])); reads.forget(refused); expect(contours.size).toBe(1);
+    const newer = reads.read('a', () => start('a', ['a', 'b', 'c'])); reads.forget(refused);
+    expect(reads.read('a', () => start('a', ['a']))).toBe(newer); expect((await newer).edges).toBe(a.edges);
+    reads.forget(reads.read('b', () => start('b', ['b']))); expect(contours.size).toBe(1);
+    reads.forget(newer); expect(contours.size).toBe(0); expect(start).toHaveBeenCalledTimes(6);
+    // A read forgotten before it answers takes no hold.
+    const early = reads.read('e', () => start('e', ['e'])); reads.forget(early); await early; expect(contours.size).toBe(0);
+    // A failed read and a chain longer than a selection holds reach their caller but are not kept, and store nothing.
+    await expect(reads.read('f', () => Promise.reject(new Error('The chain read failed.')))).rejects.toThrow('The chain read failed.');
+    expect(contours.size).toBe(0);
+    await reads.read('f', () => start('f', ['f'])); expect(start).toHaveBeenCalledTimes(8); expect(contours.size).toBe(1);
+    const long = Array.from({ length: 65 }, (_, index) => `l${index}`);
+    expect((await reads.read('l0', () => start('l0', long))).edges).toEqual(long);
+    await reads.read('l0', () => start('l0', long)); expect(start).toHaveBeenCalledTimes(10); expect(contours.size).toBe(1);
+  });
   it('picks far-origin two-millimetre faces and edges while retaining solid occlusion', () => {
     const visible = scene(5, 100000000, .05);
     try {
@@ -76,6 +105,20 @@ describe('CAD topology picking', () => {
     const maximum = { ...first, picks: Array.from({ length: 64 }, (_, index) => ({ kind: 'edge', key: String(index) } satisfies typeof first.picks[number])) };
     expect(() => mergeTopologySelection(maximum, first, true)).toThrow('at most 64');
     expect(Object.isFrozen(selected.picks)).toBe(true);
+  });
+  it('adds a chain by union, keeps faces of one body together and replaces across kinds', () => {
+    type PickSet = Parameters<typeof mergeTopologySelection>[1];
+    const edges: PickSet = { documentVersion: 'v1', buildId: 'build1', bodyId: 'body', picks: [{ kind: 'edge', key: 'a' }, { kind: 'edge', key: 'b' }] };
+    const chain: PickSet = { ...edges, picks: [{ kind: 'edge', key: 'b' }, { kind: 'edge', key: 'c' }] };
+    // A union keeps the edge both share where a toggle would drop it.
+    expect(mergeTopologySelection(edges, chain, 'union').picks.map(pick => pick.key)).toEqual(['a', 'b', 'c']);
+    expect(mergeTopologySelection(edges, chain, true).picks.map(pick => pick.key)).toEqual(['a', 'c']);
+    const faces: PickSet = { ...edges, picks: [{ kind: 'face', key: 'top' }, { kind: 'face', key: 'side' }] };
+    expect(mergeTopologySelection(null, faces, false).picks).toHaveLength(2);
+    expect(mergeTopologySelection(faces, { ...faces, picks: [{ kind: 'face', key: 'top' }] }, true).picks.map(pick => pick.key)).toEqual(['side']);
+    expect(mergeTopologySelection(edges, faces, 'union').picks.map(pick => pick.kind)).toEqual(['face', 'face']);
+    expect(() => mergeTopologySelection(null, { ...faces, picks: [...faces.picks, { kind: 'edge', key: 'a' }] }, false)).toThrow('either edges or faces');
+    expect(() => mergeTopologySelection(null, { ...edges, picks: [] }, false)).toThrow('at least one');
   });
   it('rejects a key from another build or body even when the document version is unchanged', () => {
     const data = scene();

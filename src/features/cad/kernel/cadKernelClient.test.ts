@@ -169,6 +169,19 @@ describe('CAD worker lifetime and cancellation', () => {
     transport.inspectReply(2, { ...inspectionResult, buildId: 'another-build' }); await mismatchRejected;
     expect(transport.terminated).toBe(true); client.dispose();
   });
+  it('returns a native tangent chain only for the edge, body and build asked for', async () => {
+    const chain = { bodyId: 'body', buildId: 'test-build', edgeKey: 'edge-key', edges: ['edge-key', 'next-key'], closed: false, native: true };
+    const wanted = { bodyId: 'body', expectedBuildId: 'test-build', edgeKey: 'edge-key' };
+    const transport = new TestTransport(); const client = createCadKernelClient(() => transport);
+    const answered = client.topologyTangentChain(createCadDocument(), wanted);
+    expect(transport.messages[0]).toMatchObject({ kind: 'inspect-tangent-chain', chain: wanted });
+    transport.onmessage?.(new MessageEvent('message', { data: { id: 1, kind: 'tangent-chain-inspected', result: chain } }));
+    expect(await answered).toEqual(chain);
+    // The chain of another edge in the same contour is not this edge's answer.
+    const other = client.topologyTangentChain(createCadDocument(), wanted), rejected = expect(other).rejects.toThrow('does not match');
+    transport.onmessage?.(new MessageEvent('message', { data: { id: 2, kind: 'tangent-chain-inspected', result: { ...chain, edgeKey: 'next-key' } } })); await rejected;
+    expect(transport.terminated).toBe(true); client.dispose();
+  });
   it('cancels topology resolution by terminating its worker and cannot publish a late selector', async () => {
     const transport = new TestTransport(); const client = createCadKernelClient(() => transport); const controller = new AbortController();
     const pending = client.resolveTopologyPicks(createCadDocument(), { bodyId: 'body', expectedBuildId: 'test-build', purpose: 'fillet', picks: [{ kind: 'edge', key: 'edge-key' }] }, controller.signal);

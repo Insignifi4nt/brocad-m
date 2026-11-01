@@ -17,6 +17,7 @@ import { cadViewportVisualIdentity, type CadViewportCommand, type CadWorkbenchVi
 import { preparePreviewCapture, downloadPreviewCapture, type PreviewCaptureArtifact } from '@/features/webmcp/previewCapture';
 import { createCadTopologyActions } from './cadTopologyActions';
 import type { CadTopologyInspectRequest, CadTopologyResolvePicksRequest } from '@/domain/cad/cadTopology';
+import type { CadTopologyAdjacencyRequest, CadTopologyTangentChainRequest } from '@/domain/cad/cadTopologyAdjacency';
 import { createCadFeatureInputCoordinator } from './cadFeatureInput';
 import { useOwnedDisposable } from '@/lib/useOwnedDisposable';
 import { cadBytesToBase64, cadSolidImportByteLength, isCadSolidImportResult, parseCadSolidImportSource, type CadSolidImportSource } from '@/domain/cad/cadImports';
@@ -715,6 +716,14 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     return inputToken === undefined ? topology.resolve(request, expectedVersion, signal, scope)
       : featureInputCoordinator.resolve(request, expectedVersion, signal, scope, inputToken);
   }
+  function topologyAdjacency(request: CadTopologyAdjacencyRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor', inputToken?: string) {
+    return inputToken === undefined ? topology.adjacency(request, expectedVersion, signal, scope)
+      : featureInputCoordinator.adjacency(request, expectedVersion, signal, scope, inputToken);
+  }
+  function topologyTangentChain(request: CadTopologyTangentChainRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor', inputToken?: string) {
+    return inputToken === undefined ? topology.tangentChain(request, expectedVersion, signal, scope)
+      : featureInputCoordinator.tangentChain(request, expectedVersion, signal, scope, inputToken);
+  }
   async function inspectSection(request: CadSectionRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     signal?.throwIfAborted();
@@ -820,7 +829,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   return { session, snapshot, sketchEditing, sketchWarnings, open, enter, edit, preparePreviewEdits, save, list, projectActions, plugins, installPlugin, showLibrary, library, libraryLoading, libraryDiagnostic, closeLibrary,
     openDocument, newDocument, importDocument, importDocumentValue, importSolidSource, importDxfSource, importDxfCurveSource, importFile, confirmImport, cancelImport, measureSketch, inspectSketchConstraints, inspectSketchHandles, measureCurve, inspectSketchRegions, readSketchRegionReference, inspectPlugin, inspectParameters, inspectPlane, inspectLoft, inspectSweep, exportDocument, exportSolid, exportDxf, exportCurveDxf, exportSectionDxf, inspectBuild, inspectSection, sendSectionToCam, sendToCam, back,
     setViewportControls, readViewport: (expectedVersion: string) => getViewport(expectedVersion).getState(), changeViewport, captureViewport, previewArtifact,
-    inspectTopology, resolveTopologyPicks, buildFeatureInput: featureInputCoordinator.build, releaseFeatureInput,
+    inspectTopology, resolveTopologyPicks, topologyAdjacency, topologyTangentChain, buildFeatureInput: featureInputCoordinator.build, releaseFeatureInput,
     build, buildVersion, buildState, featurePreview, previewFeature: featurePreviewCoordinator.update, errorMessage, setErrorMessage, storageBusy, isBusy, isOpen: () => current.current.open,
     undo: (expected?: string) => { editable(expected); session.undo(expected); },
     redo: (expected?: string) => { editable(expected); session.redo(expected); }

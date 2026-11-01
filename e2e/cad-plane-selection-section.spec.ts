@@ -7,9 +7,9 @@ import { prepareCadTools, callCadTool as call, cadContext as context } from './c
 
 // Three 10 mm tall blocks below the XY plane, z -30 to -20, all at negative X so the origin planes and axes are clear of them in the
 // Top, Front and Right views. Front stands at y < 0 and Back at y > 0; Bar crosses y = 0, so a cut by the XZ plane opens it.
-const block = (id: string, x: number, y: number, width: number, depth: number) => [
+const block = (id: string, x: number, y: number, width: number, depth: number, cornerRadius = 0) => [
   { id: `${id}-sketch`, name: `${id} sketch`, kind: 'sketch', suppressed: false, plane: 'XY', offset: -30, profiles: [
-    { id: `${id}-outline`, name: `${id} outline`, construction: false, geometry: { kind: 'rectangle', x, y, width, height: depth, cornerRadius: 0 } }] },
+    { id: `${id}-outline`, name: `${id} outline`, construction: false, geometry: { kind: 'rectangle', x, y, width, height: depth, cornerRadius } }] },
   { id, name: id, kind: 'extrude', suppressed: false, sketchId: `${id}-sketch`, distance: 10, symmetric: false, operation: 'new', targetId: null }
 ];
 const features = [...block('front', -40, -30, 10, 20), ...block('back', -40, 10, 10, 20), ...block('bar', -25, -5, 10, 10)];
@@ -235,6 +235,29 @@ test('cuts a section view by a picked plane, caps it, flips it, picks through th
   await expect.poll(async () => (await viewport(page)).section).toBeNull();
   await openViewControls(page); await expect(sectionButton).toHaveAttribute('aria-pressed', 'false');
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('wire-edm:cad-preferences:v1') ?? '{}').section)).toBeUndefined();
+});
+
+test('selects a loop on a double-click, a tangent chain with Alt and the tangent faces round a rounded block', async ({ page }) => {
+  await prepareCadTools(page); await call(page, 'cad_open_workspace');
+  // Bar rounded 3 mm at its corners: its top is a loop of four lines and four arcs, all tangent, and its sides one smooth run of eight faces.
+  const rounded = [...block('front', -40, -30, 10, 20), ...block('back', -40, 10, 10, 20), ...block('bar', -25, -5, 10, 10, 3)];
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: rounded.map(feature => ({ kind: 'add-feature', feature })) });
+  const document = await context(page);
+  expect((await call(page, 'cad_build', { expectedVersion: document.version })).bodies).toHaveLength(3);
+  await expect.poll(async () => (await viewport(page)).view).toMatchObject({ mode: 'solid', available: true, referenceVersion: document.version });
+  const front = await projection(page, 'Front');
+  const selected = async () => { const selection = (await viewport(page)).topologySelection; return selection ? { body: selection.bodyId, kinds: [...new Set(selection.picks.map((pick: { kind: string }) => pick.kind))], count: selection.picks.length } : null; };
+  // A pixel below Bar's top front edge, so the front face is under the pointer: a double-click selects that face's loop of four edges.
+  const edge = front([-20, -5, -20.25]);
+  await page.mouse.dblclick(edge.x, edge.y);
+  await expect.poll(selected).toEqual({ body: 'bar', kinds: ['edge'], count: 4 });
+  // With Alt, the edges continuing it without a turn: Bar's whole top outline.
+  await page.keyboard.down('Alt'); await page.mouse.dblclick(edge.x, edge.y); await page.keyboard.up('Alt');
+  await expect.poll(selected).toEqual({ body: 'bar', kinds: ['edge'], count: 8 });
+  // On the front face, the faces meeting it without a crease: all eight sides, and neither the top nor the bottom.
+  const side = front([-20, -5, -25]);
+  await page.mouse.dblclick(side.x, side.y);
+  await expect.poll(selected).toEqual({ body: 'bar', kinds: ['face'], count: 8 });
 });
 
 test('never picks an edge the section removes from just beside the cut, and picks a kept one from just past it', async ({ page }) => {

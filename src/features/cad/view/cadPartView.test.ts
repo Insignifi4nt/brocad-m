@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CAD_DEFAULT_PART_VIEW, CAD_SECTION_VIEW_VERSION, cadPartViewFor, cadShownSection, cadStoredSectionView, cadViewStateFor, parseCadStoredSectionView, reduceCadPartView
 } from './cadViewState';
-import { CAD_DEFAULT_SELECTION_FILTER, CAD_SELECTION_KINDS, cadSelectionAccepts, parseCadSelectionFilter, setCadSelectionKind } from './cadSelectionFilter';
+import { CAD_DEFAULT_SELECTION_FILTER, CAD_SELECTION_KINDS, cadSelectionAccepts, parseCadSelectionFilter, setCadSelectionKind } from '@/domain/cad/selection/cadSelectionFilter';
 
 const datum = { kind: 'datum-plane', featureId: 'mount' } as const;
 

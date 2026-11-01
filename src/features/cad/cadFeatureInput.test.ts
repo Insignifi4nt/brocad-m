@@ -23,6 +23,8 @@ function fixture() {
   const session = new CadSession(part), before = session.getSnapshot();
   let storage = createBrowserCacheAdapter(localStorage, { namespace: 'feature-input' });
   const kernel = { build: vi.fn(async (_document: CadDocument, _signal?: AbortSignal) => built()), dispose: vi.fn(),
+    topologyAdjacency: vi.fn(async () => ({ bodyId: 'pad', buildId: 'input-build', edges: [], edgeFaces: [], edgeSmooth: [], faces: [], faceLoops: [] })),
+    topologyTangentChain: vi.fn(async () => ({ bodyId: 'pad', buildId: 'input-build', edgeKey: 'e1', edges: ['e1'], closed: false, native: true })),
     inspectTopology: vi.fn(async (): Promise<CadTopologyInspectResult> => ({ bodyId: 'pad', buildId: 'input-build', descriptors: [], total: 0, nextOffset: null })),
     resolveTopologyPicks: vi.fn(async (_document: CadDocument, _request: CadTopologyResolvePicksRequest, _signal?: AbortSignal): Promise<CadTopologyResolvePicksResult> => ({ bodyId: 'pad', buildId: 'input-build', purpose: 'fillet', selection: {
       expectedCount: 1, queries: [{ kind: 'edges', expectedCount: 1, predicates: [{ kind: 'line-endpoints', start: [0, 0, 0], end: [20, 0, 0] }] }],
@@ -50,6 +52,10 @@ it('builds only the exact edited input with pending parameters, then inspects an
   const request = { bodyId: 'pad', expectedBuildId: snapshot.result.buildId, selection: { kind: 'page' as const, topology: 'edge' as const, offset: 0, limit: 10 } };
   await h.input.inspect(request, h.before.version, undefined, undefined, snapshot.inputToken);
   expect(h.kernel.inspectTopology).toHaveBeenCalledWith(snapshot.document, request, h.kernel.build.mock.calls[0][1]);
+  // A native tangent chain is read from the same snapshot, on the input's own worker.
+  const chain = { bodyId: 'pad', expectedBuildId: snapshot.result.buildId, edgeKey: 'e1' };
+  await expect(h.input.tangentChain(chain, h.before.version, undefined, undefined, snapshot.inputToken)).resolves.toMatchObject({ edgeKey: 'e1', edges: ['e1'], native: true });
+  expect(h.kernel.topologyTangentChain).toHaveBeenCalledWith(snapshot.document, chain, h.kernel.build.mock.calls[0][1]);
   const resolved = await h.input.resolve({ bodyId: 'pad', expectedBuildId: snapshot.result.buildId, purpose: 'fillet', picks: [{ kind: 'edge', key: 'edge_1' }] }, h.before.version, undefined, undefined, snapshot.inputToken);
   expect(resolved).toMatchObject({ purpose: 'fillet', selection: { expectedCount: 1 } });
   expect(h.session.getSnapshot()).toBe(h.before);

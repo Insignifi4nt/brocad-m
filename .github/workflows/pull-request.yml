@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its superseded run, so fix commits to drafts in review
+# don't hold hosted runners on results nobody will read.
+concurrency:
+  group: review-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   naming:
     name: Branch and title naming
@@ -46,35 +52,9 @@ jobs:
       - run: npm run post:conformance -- tests/fixtures/machine-packages/robofil-100-v2/cristian-robofil-100-v2.wireedm-post.json
       - run: npm run machine-package:validate -- tests/fixtures/machine-packages/robofil-100-v2/cristian-robofil-100-v2.wireedm-package
 
-  unit:
-    name: Unit tests (${{ matrix.shard }}/2)
+  build:
+    name: Production build
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: .node-version
-          cache: npm
-      - run: npm ci
-      # Keep simultaneous jsdom/native-kernel suites within the hosted runner's CPU budget.
-      - run: npm test -- --run --maxWorkers=2 --shard=${{ matrix.shard }}/2
-
-  build-and-browser:
-    name: Production build and browser journeys (${{ matrix.shard }}/12)
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        # Playwright splits the ~190 journeys by count and the slower CAD ones sort first.
-        # Twelve shards keep each near 2 minutes and, with the other jobs, stay under the
-        # free hosted-runner limit of 20 concurrent jobs. Keep /12 in the name and command in step.
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -87,12 +67,83 @@ jobs:
         with:
           path: .cache/third-party-sources
           key: third-party-sources-${{ hashFiles('docs/thirdparty/*-sources.json') }}
+      # Type checks every project, then bundles, builds and checks the documentation and third-party sources.
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+
+  unit:
+    name: Unit tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      # Keep simultaneous jsdom/native-kernel suites within the hosted runner's CPU budget. The shards split the files
+      # by the measured times in scripts/unit-test-shard-weights.json; the JSON report refreshes them.
+      - run: npm test -- --run --maxWorkers=2 --shard=${{ matrix.shard }}/4 --reporter=default --reporter=json --outputFile.json=test-results/unit-shard-${{ matrix.shard }}.json
+      - name: Keep the shard's file timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-timings-${{ matrix.shard }}
+          path: test-results/unit-shard-${{ matrix.shard }}.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser:
+    name: Browser journeys (${{ matrix.shard }}/11)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # With the other jobs, eleven shards stay under the free hosted-runner limit of 20 concurrent jobs.
+        # Keep /11 in the name and command, and one weight per shard, in step.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - name: Cache pinned third-party source archives
+        uses: actions/cache@v4
+        with:
+          path: .cache/third-party-sources
+          key: third-party-sources-${{ hashFiles('docs/thirdparty/*-sources.json') }}
+      - id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Chromium headless shell
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-headless-shell
+      # The Production build job type-checks; here the browser and its system fonts install while the app bundles.
+      - name: Install Chromium's headless shell while bundling the app
+        run: |
+          npx playwright install --with-deps --only-shell chromium > "$RUNNER_TEMP/playwright-install.log" 2>&1 &
+          install=$!
+          npm run build:bundle
+          status=0
+          wait "$install" || status=$?
+          cat "$RUNNER_TEMP/playwright-install.log"
+          exit "$status"
       # A broken change stops each shard after a few failures instead of retrying every journey to its timeout.
-      - run: npm run test:e2e -- --workers=2 --max-failures=5 --shard=${{ matrix.shard }}/12
+      # Each weight is that shard's share of the journeys in Playwright's order, fitted to measured run times.
+      # Shard 10 ends with the large indexeddb-workbench job, as shard 11 of 12 did before, so it finishes with the other
+      # worker idle: beside export-heavy journeys it can miss the post runtime's 1 s deadline.
+      - run: npm run test:e2e -- --workers=2 --max-failures=5 --shard=${{ matrix.shard }}/11
         env:
           PLAYWRIGHT_USE_EXISTING_BUILD: 'true'
+          PWTEST_SHARD_WEIGHTS: '16:15:19:17:24:15:25:24:34:28:19'
       - name: Preserve browser failure reports
         if: failure()
         uses: actions/upload-artifact@v7
@@ -119,8 +170,22 @@ jobs:
         with:
           path: .cache/third-party-sources
           key: third-party-sources-${{ hashFiles('docs/thirdparty/*-sources.json') }}
-      - run: npm run build
-      - run: npx playwright install --with-deps firefox
+      - id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Firefox
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-firefox
+      - name: Install Firefox while bundling the app
+        run: |
+          npx playwright install --with-deps firefox > "$RUNNER_TEMP/playwright-install.log" 2>&1 &
+          install=$!
+          npm run build:bundle
+          status=0
+          wait "$install" || status=$?
+          cat "$RUNNER_TEMP/playwright-install.log"
+          exit "$status"
       - run: npx playwright test --config=playwright.storage.config.ts --workers=1 --max-failures=3
         env:
           PLAYWRIGHT_USE_EXISTING_BUILD: 'true'
@@ -151,7 +216,7 @@ jobs:
       - run: npm run solver:check
 
   verify:
-    needs: [naming, contracts, unit, native-solver, build-and-browser, storage-firefox]
+    needs: [naming, contracts, build, unit, native-solver, browser, storage-firefox]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -159,13 +224,15 @@ jobs:
         env:
           NAMING_RESULT: ${{ needs.naming.result }}
           CONTRACTS_RESULT: ${{ needs.contracts.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           NATIVE_SOLVER_RESULT: ${{ needs.native-solver.result }}
-          BROWSER_RESULT: ${{ needs.build-and-browser.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
           FIREFOX_RESULT: ${{ needs.storage-firefox.result }}
         run: |
           test "$NAMING_RESULT" = success
           test "$CONTRACTS_RESULT" = success
+          test "$BUILD_RESULT" = success
           test "$UNIT_RESULT" = success
           test "$NATIVE_SOLVER_RESULT" = success
           test "$BROWSER_RESULT" = success

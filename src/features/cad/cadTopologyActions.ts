@@ -2,11 +2,15 @@ import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { isCadTopologyInspectResult, isCadTopologyResolvePicksResult, parseCadTopologyInspectRequest, parseCadTopologyResolvePicksRequest,
   type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '@/domain/cad/cadTopology';
+import { isCadTopologyAdjacency, isCadTopologyTangentChain, parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest, type CadTopologyAdjacency,
+  type CadTopologyAdjacencyRequest, type CadTopologyTangentChain, type CadTopologyTangentChainRequest } from '@/domain/cad/cadTopologyAdjacency';
 import { ToolError } from '@/features/webmcp/siteTools';
 
 interface TopologyKernel {
   inspectTopology(document: CadDocument, request: CadTopologyInspectRequest, signal?: AbortSignal): Promise<CadTopologyInspectResult>;
   resolveTopologyPicks(document: CadDocument, request: CadTopologyResolvePicksRequest, signal?: AbortSignal): Promise<CadTopologyResolvePicksResult>;
+  topologyAdjacency(document: CadDocument, request: CadTopologyAdjacencyRequest, signal?: AbortSignal): Promise<CadTopologyAdjacency>;
+  topologyTangentChain(document: CadDocument, request: CadTopologyTangentChainRequest, signal?: AbortSignal): Promise<CadTopologyTangentChain>;
 }
 interface Bindings {
   assertReadable(expectedVersion: string, scope?: 'editor'): void;
@@ -59,6 +63,21 @@ export function createCadTopologyActions(bindings: Bindings) {
           || result.descriptors.some(descriptor => !picks.delete(`${descriptor.kind}:${descriptor.key}`)) || picks.size) invalidResult();
       }
       return result;
+    },
+    /** How one body's edges and faces meet in the exact visible build, for chains of edges and faces. */
+    async adjacency(request: CadTopologyAdjacencyRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor') {
+      const reviewed = parseCadTopologyAdjacencyRequest(request);
+      const { documentId: _documentId, version: _version, ...result } = await execute(reviewed, expectedVersion, signal, scope,
+        (kernel, document) => kernel.topologyAdjacency(document, reviewed, signal), isCadTopologyAdjacency);
+      return result as CadTopologyAdjacency;
+    },
+    /** The edges native fillet and chamfer treat when they follow tangents from one edge of the exact visible build. */
+    async tangentChain(request: CadTopologyTangentChainRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor') {
+      const reviewed = parseCadTopologyTangentChainRequest(request);
+      const { documentId: _documentId, version: _version, ...result } = await execute(reviewed, expectedVersion, signal, scope,
+        (kernel, document) => kernel.topologyTangentChain(document, reviewed, signal), isCadTopologyTangentChain);
+      if (result.edgeKey !== reviewed.edgeKey) invalidResult();
+      return result as CadTopologyTangentChain;
     },
     async resolve(request: CadTopologyResolvePicksRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor') {
       const reviewed = parseCadTopologyResolvePicksRequest(request);

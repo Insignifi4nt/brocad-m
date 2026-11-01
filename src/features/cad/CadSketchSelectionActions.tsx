@@ -141,7 +141,7 @@ export function cadSketchSelectionCoveredBy(prepared: Pick<CadSketchGraphInterac
     if (!picked.size || !view.pixelWidth || !view.pixelHeight) return false;
     const bounds = { minX: view.center[0] + (box.left - GEOMETRY_CLEARANCE - view.pixelWidth / 2) * mmX, maxX: view.center[0] + (box.right + GEOMETRY_CLEARANCE - view.pixelWidth / 2) * mmX,
       minY: view.center[1] - (box.bottom + GEOMETRY_CLEARANCE - view.pixelHeight / 2) * mmY, maxY: view.center[1] - (box.top - GEOMETRY_CLEARANCE - view.pixelHeight / 2) * mmY };
-    return prepared.pickBox({ bounds, mode: 'cross' }).some(hit => picked.has(`${hit.kind}:${hit.id}`));
+    return prepared.pickBox({ bounds, mode: 'crossing' }).some(hit => picked.has(`${hit.kind}:${hit.id}`));
   };
 }
 

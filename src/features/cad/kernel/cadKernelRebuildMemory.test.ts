@@ -96,6 +96,13 @@ it.each(['revolve-mirror-transform', 'datum-pad-revolve', 'loft-sweep-pocket', '
     try { build(part(id)); expect(objects.made()).toBeGreaterThan(0); expect(objects.outstanding()).toEqual({}); }
     finally { objects.restore(); }
   });
+// Each tangent chain comes from a native fillet builder for its edge. The rims make closed contours; the bore's seam makes none and
+// falls back to the edge alone. Reading every chain twice also reads them from the build's cache.
+function readChains(model: CadKernelModel) {
+  const request = { bodyId: 'box', expectedBuildId: model.result.buildId }, adjacency = model.topologyAdjacency(request);
+  const chains = [...adjacency.edges, ...adjacency.edges].map(edgeKey => model.topologyTangentChain({ ...request, edgeKey }));
+  expect(chains.some(chain => chain.native && chain.closed)).toBe(true); expect(chains.some(chain => !chain.native)).toBe(true);
+}
 
 // Slot profiles are rotated and translated. Topology descriptors and sections read curve points, tangents, circles,
 // planes, cylinders and face normals; selected-edge fillets and chamfers resolve their edges through the same descriptors.
@@ -103,6 +110,7 @@ const queries: readonly { name: string; document: () => CadDocument; after?: (mo
   { name: 'builds a box with an angled slot', document: () => slottedBox },
   { name: 'inspects every edge and face of a holed box', document: () => holedBox, after: inspectAll },
   { name: 'inspects every edge and face of the heavy pattern', document: () => part('pattern-heavy'), after: inspectAll },
+  { name: 'reads the adjacency and every edge\'s tangent chain of a holed box', document: () => holedBox, after: readChains },
   { name: 'sections a holed box across XY', document: () => holedBox, after: model => { expect(model.section({ bodyId: 'box', plane: 'XY', offset: 2.5 }).contourCount).toBe(2); } },
   { name: 'sections a holed box across XZ through the hole', document: () => holedBox, after: model => { expect(model.section({ bodyId: 'box', plane: 'XZ', offset: -5 }).contourCount).toBe(2); } },
   { name: 'fillets a selected straight edge', document: () => withFeature({ ...base('round'), kind: 'fillet', targetId: 'box', radius: 0.5, selection: lineEdge }) },

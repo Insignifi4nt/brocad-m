@@ -158,10 +158,14 @@ function WorkbenchApp({ services }: AppProps) {
             onViewportControlsReady={cad.setViewportControls}
             onInspectTopology={(request, version, signal) => cad.inspectTopology(request, version, signal, 'editor')}
             onResolveSelection={(request, version, signal) => cad.resolveTopologyPicks(request, version, signal, 'editor')}
+            onTopologyAdjacency={(request, version, signal) => cad.topologyAdjacency(request, version, signal, 'editor')}
+            onTopologyTangentChain={(request, version, signal) => cad.topologyTangentChain(request, version, signal, 'editor')}
             featureInputPicking={{
               build: (request, version, signal) => cad.buildFeatureInput(request, version, signal, 'editor'),
               inspect: (token, request, version, signal) => cad.inspectTopology(request, version, signal, 'editor', token),
               resolve: (token, request, version, signal) => cad.resolveTopologyPicks(request, version, signal, 'editor', token),
+              adjacency: (token, request, version, signal) => cad.topologyAdjacency(request, version, signal, 'editor', token),
+              tangentChain: (token, request, version, signal) => cad.topologyTangentChain(request, version, signal, 'editor', token),
               release: cad.releaseFeatureInput,
             }}
             onCaptureViewport={async () => { await cad.captureViewport(cad.snapshot.version, true); }}

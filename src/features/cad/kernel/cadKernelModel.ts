@@ -9,6 +9,8 @@ import { resolveCadExtrudeRevolvePlacement, resolveCadWorldDatum, type CadDatumF
 import { cadKernelProfileDrawing, cadKernelSketchFace, cadKernelSketchOnPlane } from './cadKernelSketch';
 import { sectionCadKernelShape } from './cadKernelSection';
 import { CadKernelTopology } from './cadKernelTopology';
+import { parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest, type CadTopologyAdjacency, type CadTopologyAdjacencyRequest,
+  type CadTopologyTangentChain, type CadTopologyTangentChainRequest } from '../../../domain/cad/cadTopologyAdjacency';
 import { applyCadEdgeOperation, applyCadShell } from './cadKernelOperations';
 import { loadCadSolidImport } from './cadKernelImport';
 import { MAX_CAD_PATTERN_INSTANCES, resolveCadCircularPattern } from '../../../domain/cad/cadPatterns';
@@ -39,6 +41,9 @@ export interface CadKernelModel {
   section(request: CadSectionRequest, parameters?: CadDocument['parameters']): CadSectionResult;
   inspectTopology(request: CadTopologyInspectRequest): CadTopologyInspectResult;
   resolveTopologyPicks(request: CadTopologyResolvePicksRequest, parameters?: CadDocument['parameters']): CadTopologyResolvePicksResult;
+  topologyAdjacency(request: CadTopologyAdjacencyRequest): CadTopologyAdjacency;
+  /** The edges native fillet and chamfer treat when they follow tangents from one edge of a body. */
+  topologyTangentChain(request: CadTopologyTangentChainRequest): CadTopologyTangentChain;
   dispose(): void;
 }
 
@@ -391,6 +396,21 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       const topology = entryOf(parsed.bodyId)?.topology;
       if (!topology) throw new CadError('missing-body', 'The topology body is unavailable.');
       return topology.inspect(parsed, buildId);
+    },
+    topologyAdjacency(request) {
+      const parsed = parseCadTopologyAdjacencyRequest(request);
+      if (disposed || parsed.expectedBuildId !== buildId) throw new CadError('STALE_BUILD', 'The topology snapshot is stale. Rebuild the current document and select again.');
+      body(parsed.bodyId);
+      const topology = entryOf(parsed.bodyId)?.topology;
+      if (!topology) throw new CadError('missing-body', 'The topology body is unavailable.');
+      return topology.adjacency(parsed.bodyId, buildId);
+    },
+    topologyTangentChain(request) {
+      const parsed = parseCadTopologyTangentChainRequest(request);
+      if (disposed || parsed.expectedBuildId !== buildId) throw new CadError('STALE_BUILD', 'The topology snapshot is stale. Rebuild the current document and select again.');
+      const shape = body(parsed.bodyId), topology = entryOf(parsed.bodyId)?.topology;
+      if (!topology) throw new CadError('missing-body', 'The topology body is unavailable.');
+      return topology.tangentChain(shape, parsed.bodyId, buildId, parsed.edgeKey);
     },
     resolveTopologyPicks(request, parameters = document.parameters) {
       const parsed = parseCadTopologyResolvePicksRequest(request);

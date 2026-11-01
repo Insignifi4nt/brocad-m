@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { CAD_DEFAULT_SKETCH_VIEW, cadPartViewFor, parseCadSketchViewChoices, parseCadStoredSectionView, type CadPartView, type CadSketchViewChoices,
   type CadStoredSectionView } from './view/cadViewState';
-import { parseCadSelectionFilter, type CadSelectionFilter } from './view/cadSelectionFilter';
+import { parseCadSelectionFilter, type CadSelectionFilter } from '@/domain/cad/selection/cadSelectionFilter';
 
 export type CadNavigationMode = 'mouse' | 'trackpad';
 export interface CadPreferences { readonly navigationMode: CadNavigationMode; readonly showOnPartDimensions: boolean; readonly showDepthHandles?: boolean; readonly showRelations?: boolean;

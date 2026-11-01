@@ -3,6 +3,7 @@ import { cadFeatureActive } from '../../../domain/cad/features/cadFeatureActivit
 import { cadFeatureProducesBody, parseCadDocument } from '../../../domain/cad/cadSchema';
 import { parseCadSectionRequest } from '../../../domain/cad/cadSection';
 import { parseCadTopologyInspectRequest, parseCadTopologyResolvePicksRequest } from '../../../domain/cad/cadTopology';
+import { parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest } from '../../../domain/cad/cadTopologyAdjacency';
 import { buildCadKernelModel, type CadKernelModel } from './cadKernelModel';
 import type { CadKernelReply } from './cadKernelProtocol';
 import { parseCadSolidImportSource } from '../../../domain/cad/cadImports';
@@ -18,7 +19,7 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
   return {
     async evaluate(request: Record<string, unknown> & { id: number; kind: string }): Promise<CadKernelReply> {
       try {
-        if (!['build', 'export', 'section', 'inspect-topology', 'resolve-topology-picks', 'import-solid', 'import-dxf', 'import-dxf-curve'].includes(request.kind)) throw new CadError('unsupported-operation', 'Unsupported CAD worker operation.');
+        if (!['build', 'export', 'section', 'inspect-topology', 'resolve-topology-picks', 'inspect-adjacency', 'inspect-tangent-chain', 'import-solid', 'import-dxf', 'import-dxf-curve'].includes(request.kind)) throw new CadError('unsupported-operation', 'Unsupported CAD worker operation.');
         if (request.kind === 'import-dxf') return { id: request.id, kind: 'dxf-imported', result: importCadDxfSketch(parseCadDxfImportInput(request.input)) };
         if (request.kind === 'import-dxf-curve') return { id: request.id, kind: 'dxf-curve-imported', result: importCadDxfCurve(parseCadDxfCurveImportInput(request.input)) };
         if (request.kind === 'import-solid') {
@@ -34,6 +35,16 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
           const inspection = parseCadTopologyInspectRequest(request.inspection);
           if (!cached || cached.key !== key || cached.model.result.buildId !== inspection.expectedBuildId) throw new CadError('STALE_BUILD', 'The displayed exact model is no longer cached. Rebuild and select again.');
           return { id: request.id, kind: 'topology-inspected', result: cached.model.inspectTopology(inspection) };
+        }
+        if (request.kind === 'inspect-adjacency') {
+          const adjacency = parseCadTopologyAdjacencyRequest(request.adjacency);
+          if (!cached || cached.key !== key || cached.model.result.buildId !== adjacency.expectedBuildId) throw new CadError('STALE_BUILD', 'The displayed exact model is no longer cached. Rebuild and select again.');
+          return { id: request.id, kind: 'adjacency-inspected', result: cached.model.topologyAdjacency(adjacency) };
+        }
+        if (request.kind === 'inspect-tangent-chain') {
+          const chain = parseCadTopologyTangentChainRequest(request.chain);
+          if (!cached || cached.key !== key || cached.model.result.buildId !== chain.expectedBuildId) throw new CadError('STALE_BUILD', 'The displayed exact model is no longer cached. Rebuild and select again.');
+          return { id: request.id, kind: 'tangent-chain-inspected', result: cached.model.topologyTangentChain(chain) };
         }
         if (request.kind === 'resolve-topology-picks') {
           const selection = parseCadTopologyResolvePicksRequest(request.selection);

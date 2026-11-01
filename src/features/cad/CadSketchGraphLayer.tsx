@@ -18,7 +18,7 @@ import { CadSketchRelationGlyphs, type CadSketchRelationGlyphFocus } from './Cad
 import type { CadSketchDimensionRelation } from './cadSketchGraphDimensionLayout';
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
 import { useCadContinuousPreview, type CadPrepareEdits } from './useCadPreparedPreview';
-import { cadSketchGeometryPickAllows, type CadSketchGeometryPick, type CadSketchGraphPickFilter } from './cadSketchGraphSelection';
+import { cadSketchGeometryPickAllows, cadSketchPickScopeHasEdges, cadSketchPickScopeHasPoints, type CadSketchGeometryPick, type CadSketchGraphPickScope } from './cadSketchGraphSelection';
 import { cadSketchSnapTargetLabel, type CadSketchSnapCandidate } from './cadSketchGeometrySnaps';
 import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
 import { CadSketchSnapHint } from './CadSketchSnapHint';
@@ -186,11 +186,14 @@ const GraphPointRow = memo(function GraphPointRow({ point, original, graph, degr
  * Point and size handles share one gesture owner; solved previews never become accepted geometry. The layer is memoized,
  * so drawing-cursor moves in the canvas do not render every edge and point again; callers pass stable props.
  */
-export const CadSketchGraphLayer = memo(function CadSketchGraphLayer({ controls, sketch, version, prepared, visual, center, scaleX, scaleY, gridStep, snap, gridSnap = false, active, locked, cancelSignal, onPendingChange, onError, filter = 'auto', pickAt, coversDimensionLine, coversRelationGlyph, highlighted, halo = 0 }: {
+export const CadSketchGraphLayer = memo(function CadSketchGraphLayer({ controls, sketch, version, prepared, visual, center, scaleX, scaleY, gridStep, snap, gridSnap = false, active, locked, cancelSignal, onPendingChange, onError, filter = 'auto', relationsSelectable = true, dimensionsSelectable = true, pickAt, coversDimensionLine, coversRelationGlyph, highlighted, halo = 0 }: {
   controls: CadSketchGraphControls; sketch: CadSketchFeature; version?: string; prepared: Prepared; visual?: Prepared;
   center: SketchPoint; scaleX: number; scaleY: number; gridStep: number; snap: boolean; gridSnap?: boolean; active: boolean; locked: boolean; cancelSignal: number;
   onPendingChange(pending: boolean): void; onError(message: string): void;
-  filter?: CadSketchGraphPickFilter;
+  filter?: CadSketchGraphPickScope;
+  /** Whether the selection filter lets clicks take relation marks and dimension labels. */
+  relationsSelectable?: boolean;
+  dimensionsSelectable?: boolean;
   pickAt?(event: { clientX: number; clientY: number }): CadSketchGraphSelection | null;
   /** Whether the origin or an axis, a profile grip or a profile edge under the pointer keeps the pick from a dimension line or arrow. */
   coversDimensionLine?(event: GlyphEvent): boolean;
@@ -397,7 +400,7 @@ export const CadSketchGraphLayer = memo(function CadSketchGraphLayer({ controls,
     <= cadPathClosureTolerance([{ x: solvedPoint.position[0], y: solvedPoint.position[1] }, { x: snapCandidate.point[0], y: snapCandidate.point[1] }]));
   const limited = Boolean(snapCandidate && !preview.stale && (preview.kind === 'error' || preview.kind === 'ready' && !attained));
   const snapLabel = snapCandidate ? `${cadSketchSnapTargetLabel(snapCandidate.target)} · ${limited ? 'Constraints limit movement' : 'No relation'}` : '';
-  const edgesInteractive = interactive && filter !== 'points', pointsInteractive = interactive && filter !== 'edges';
+  const edgesInteractive = interactive && cadSketchPickScopeHasEdges(filter), pointsInteractive = interactive && cadSketchPickScopeHasPoints(filter);
   const singleEntity = controls.selection.length === 1 && controls.selection[0].kind === 'entity' ? entities.get(controls.selection[0].id) : null;
   const circle = singleEntity?.kind === 'circle' ? cadSketchGraphCircleControl(prepared.graph, prepared.parameters, singleEntity.id) : null;
   const shownCircle = circle && displayed.graph.entities.some(entity => entity.id === circle.entityId && entity.kind === 'circle')
@@ -511,7 +514,7 @@ export const CadSketchGraphLayer = memo(function CadSketchGraphLayer({ controls,
     {controls.showRelations !== false && <CadSketchRelationGlyphs graph={displayed.graph} topology={(visual ?? prepared).graph} parameters={displayed.parameters} topologyParameters={(visual ?? prepared).parameters} center={center} mmPerPixel={scaleY}
       selectedIds={controls.dimensionSelection ?? NO_SKETCH_DIMENSION_IDS} inspectedRelationId={controls.relation?.id ?? null} focus={glyphFocus} limit={CAD_SKETCH_RELATION_GLYPH_LIMIT}
       focusable={active && !locked && !controls.geometryPick && Boolean(controls.onSelectRelations)}
-      interactive={interactive && !controls.geometryPick && !drag.current && Boolean(controls.onSelectRelations)} highlight={highlightStore} covered={coversRelationGlyph}
+      interactive={interactive && relationsSelectable && !controls.geometryPick && !drag.current && Boolean(controls.onSelectRelations)} highlight={highlightStore} covered={coversRelationGlyph}
       onSelect={glyphCommands.select} onOpen={glyphCommands.open} onDelete={glyphCommands.remove} onMenu={glyphCommands.menu} />}
     {/* Dimension lines and arrows take the pointer beneath the points and edges, so the geometry they end on or cross keeps its picks. */}
     <g ref={setDimensionHits} className="cad-sketch-graph-dimension-hits" />
@@ -565,7 +568,7 @@ export const CadSketchGraphLayer = memo(function CadSketchGraphLayer({ controls,
     <CadSketchHighlightOverlay store={highlightStore} prepared={displayed} center={center} mmPerPixel={scaleY} selectedRelationIds={controls.dimensionSelection ?? NO_SKETCH_DIMENSION_IDS} />
     {active && controls.showDimensions !== false && <CadSketchGraphDimensions graph={displayed.graph} parameters={displayed.parameters} center={center} mmPerPixel={scaleY}
       selectedRelationId={controls.relation?.id} selectedIds={controls.dimensionSelection} highlight={highlightStore} hitLayer={dimensionHits} covered={coversDimensionLine}
-      interactive={interactive && (!controls.geometryPick || controls.geometryPick.dimensionsInteractive === true) && !drag.current && Boolean(controls.onConfigureRelation)} onConfigure={relation => controls.onConfigureRelation?.(relation)}
+      interactive={interactive && dimensionsSelectable && (!controls.geometryPick || controls.geometryPick.dimensionsInteractive === true) && !drag.current && Boolean(controls.onConfigureRelation)} onConfigure={relation => controls.onConfigureRelation?.(relation)}
       onSelect={(dimension, additive) => controls.onSelectDimension?.(dimension, additive)} onDelete={(dimension, key) => controls.onDeleteDimension?.(dimension, key)}
       onMenu={(dimension, at) => controls.onDimensionMenu?.(dimension, at)} onMove={controls.geometryPick ? undefined : moveDimension} />}
     {intent && drag.current?.moved && <circle className={`cad-sketch-drag-target${rejection !== null || candidate.issue ? ' is-invalid' : ''}`}

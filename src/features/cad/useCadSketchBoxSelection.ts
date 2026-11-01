@@ -1,15 +1,16 @@
 import { userFacingMessage } from '@/lib/userMessage';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from 'react';
-import { cadSketchGraphSelectionSet, isCadSketchGraphSelected, type CadSketchGraphSelection, type CadSketchGraphPickFilter } from './cadSketchGraphSelection';
+import { cadSketchGraphSelectionSet, isCadSketchGraphSelected, type CadSketchGraphSelection, type CadSketchGraphPickScope } from './cadSketchGraphSelection';
+import { cadBoxModeFor, type CadBoxMode } from '@/domain/cad/selection/cadSelectionBox';
 import type { prepareCadSketchGraphInteraction } from './cadSketchGraphInteraction';
 import type { SketchPoint } from './cadSketchInteraction';
 
 type Prepared = ReturnType<typeof prepareCadSketchGraphInteraction>;
 type Projection = { point: SketchPoint; frame: string };
-type Box = { readonly start: SketchPoint; readonly end: SketchPoint; readonly mode: 'contain' | 'cross'; readonly selections: readonly CadSketchGraphSelection[] };
+type Box = { readonly start: SketchPoint; readonly end: SketchPoint; readonly mode: CadBoxMode; readonly selections: readonly CadSketchGraphSelection[] };
 interface Options {
   prepared: Prepared | null; enabled: boolean; locked: boolean; version?: string; cancelSignal: number; frameKey: string;
-  filter: CadSketchGraphPickFilter; selection: readonly CadSketchGraphSelection[];
+  filter: CadSketchGraphPickScope; selection: readonly CadSketchGraphSelection[];
   project(event: { clientX: number; clientY: number }): Projection | null;
   /** `additive` marks a Shift box, which adds to the selection rather than replacing it. */
   onSelectSet?(selection: readonly CadSketchGraphSelection[], additive?: boolean): void;
@@ -48,7 +49,8 @@ export function useCadSketchBoxSelection(options: Options) {
     return { active, current, point: projected.point };
   };
   const query = (active: Owner, current: Options, point: SketchPoint, clientX: number): Box => {
-    const mode = clientX >= active.clientX ? 'contain' : 'cross';
+    // Dragged rightwards the box is a window, leftwards a crossing box, by screen direction as CATIA, SOLIDWORKS and AutoCAD decide it.
+    const mode = cadBoxModeFor({ x: active.clientX, y: active.clientY }, { x: clientX, y: 0 });
     const hits = current.prepared?.pickBox({ mode, filter: current.filter, bounds: {
       minX: Math.min(active.start[0], point[0]), minY: Math.min(active.start[1], point[1]),
       maxX: Math.max(active.start[0], point[0]), maxY: Math.max(active.start[1], point[1]),
@@ -66,7 +68,7 @@ export function useCadSketchBoxSelection(options: Options) {
       const active: Owner = { pointerId: event.pointerId, element: event.currentTarget, clientX: event.clientX, clientY: event.clientY,
         start: projected.point, frame: projected.frame, base: current.selection, toggle: event.shiftKey, moved: false };
       owner.current = active;
-      setBox({ start: active.start, end: active.start, mode: 'contain', selections: active.base }); current.onPendingChange(true);
+      setBox({ start: active.start, end: active.start, mode: 'window', selections: active.base }); current.onPendingChange(true);
       try { active.element.setPointerCapture(active.pointerId); } catch { cancel(); }
       return true;
     },
@@ -77,7 +79,7 @@ export function useCadSketchBoxSelection(options: Options) {
       if (!next.active.moved && Math.hypot(event.clientX - next.active.clientX, event.clientY - next.active.clientY) <= 4) return;
       next.active.moved = true;
       try { setBox(query(next.active, next.current, next.point, event.clientX)); }
-      catch { setBox({ start: next.active.start, end: next.point, mode: event.clientX >= next.active.clientX ? 'contain' : 'cross', selections: next.active.base }); }
+      catch { setBox({ start: next.active.start, end: next.point, mode: cadBoxModeFor({ x: next.active.clientX, y: 0 }, { x: event.clientX, y: 0 }), selections: next.active.base }); }
     },
     end(event: PointerEvent<SVGSVGElement>) {
       const next = read(event); if (!next) return false;

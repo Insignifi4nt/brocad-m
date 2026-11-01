@@ -1,0 +1,24 @@
+{
+  "version": "0.0.798",
+  "previousVersion": "0.0.797",
+  "postCompatibility": "preserved-posts-with-agent-delivery-workflow",
+  "summary": "Documentation: a maintainer page, docs/maintainers/agent-delivery.md, records how agent-built changes are planned, briefed, implemented, reviewed and merged here. It names the coordinator, implementer, reviewer and planner roles with their current default models, the loop for one change (a brief, a local implementation with a self-check, a draft pull request so hosted CI runs the full unit and browser suites while an independent read-only review runs, review rounds in which the first reports every finding, and ready and merge only when nothing blocks and CI is green), what a brief and a review brief contain, which checks run locally and which in CI, the timing rules (once, at the end, on a quiet machine, in alternating pairs), the self-check list built from recurring review findings, versioning and merging, and the local machine rules (port 3777, single Playwright specs on a free port 3107, no installs in worktrees, link farms). A small helper, scripts/worktree-modules.mjs, gives a linked worktree a node_modules of links into the main checkout's install (workspace packages linked to the worktree's own packages) and removes those links again before the worktree is deleted, so no worktree installs or writes to the shared install. The page requires that a merge is pinned to the head the review covered and CI passed, with any later commit reassessed first. AGENTS.md links to it from its subagent and testing section.",
+  "warning": "Not breaking. Documentation and a maintainer helper script only: no app code, schema, output, storage or agent tool change.",
+  "checklist": {
+    "schema": "No schema change. UPID, post schema, engine API, CAD document and save envelope are unchanged.",
+    "events": "No execution event, input-version or cancellation change.",
+    "capabilities": "No post or machine capability change. WebMCP tools, their arguments, results and discovery are unchanged.",
+    "auditAndOutput": "No generation, audit, numbering, encoding, line ending, feed or controller-file change.",
+    "installationAndStorage": "No installed package, revision, browser-cache or folder storage change. Nothing is migrated or rewritten.",
+    "verification": "Documentation and a maintainer script. check-release passes; the pull request naming check passes; the page's relative links and anchors resolve; lint passes. The helper was run in a fresh worktree: link made 178 links with @wire-edm/icons-react pointing at the worktree's own package, status listed them, unlink removed all 178 with 0 left, and the shared install kept the same 119 entries."
+  },
+  "testedPosts": [],
+  "publicNotes": {
+    "summary": "Maintainer documentation describes how contributions are planned, reviewed and merged.",
+    "changes": [
+      "A maintainer page describes the review workflow every change goes through before it is released."
+    ],
+    "compatibility": "Installed machine packages, posts, saved revisions, controller output, CAD files and agent tools are unchanged.",
+    "action": "No action needed."
+  }
+}

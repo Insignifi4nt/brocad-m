@@ -8,7 +8,7 @@ import { CadWorkbench } from './CadWorkbench';
 import type { CadWorkbenchViewportControls } from './cadViewportControls';
 import { CAD_PREFERENCES_KEY, getCadPreferences, setCadPreferences } from './cadPreferences';
 import type { CadOriginSelection, CadViewportSection } from './CadViewport';
-import type { CadSelectionFilter } from './view/cadSelectionFilter';
+import type { CadSelectionFilter } from '@/domain/cad/selection/cadSelectionFilter';
 
 interface ShownViewport {
   references: readonly { referenceId: string; featureKind: string; name: string; plane?: CadSketchPlane }[];
@@ -85,7 +85,7 @@ describe('reference geometry in the model view', () => {
     await mount();
     await click('Filter');
     const rows = [...document.querySelectorAll('[role="menuitemcheckbox"]')].map(row => [row.textContent?.trim(), row.getAttribute('aria-checked')]);
-    expect(rows).toEqual([['Bodies', 'true'], ['Faces', 'true'], ['Edges', 'true'], ['Planes', 'true'], ['Axes', 'true'], ['Origin point', 'true']]);
+    expect(rows).toEqual([['Bodies', 'true'], ['Faces', 'true'], ['Edges', 'true'], ['Planes', 'true'], ['Axes', 'true'], ['Points', 'true']]);
     await act(async () => (document.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]'))!.click());
     expect(shown().selectionFilter).toEqual({ excluded: ['body'] }); expect(stored()).toMatchObject({ selectionFilter: { excluded: ['body'] } });
     await act(async () => root.unmount()); root = createRoot(container); await mount();

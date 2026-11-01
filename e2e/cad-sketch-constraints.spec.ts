@@ -1098,17 +1098,25 @@ test('selects analytic boxes and overlapping sketch operands through shared filt
       const p = new DOMPoint(x - center[0], center[1] - y).matrixTransform(matrix); return { x: p.x, y: p.y };
     }, { x, y, center: view.centerMm });
   };
+  /** Drags a box and returns how it was drawn: a window rightwards, a crossing leftwards. */
   const box = async (start: [number, number], end: [number, number]) => {
     const a = await project(...start), b = await project(...end);
-    await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(b.x, b.y, { steps: 3 }); await page.mouse.up();
+    await page.mouse.move(a.x, a.y); await page.mouse.down(); await page.mouse.move(b.x, b.y, { steps: 3 });
+    const drawn = page.locator('.cad-sketch-selection-box'), dashed = await drawn.evaluate(element => getComputedStyle(element).strokeDasharray);
+    const mode = await drawn.getAttribute('class'); await page.mouse.up();
+    return { mode: mode?.match(/is-(window|crossing)/)?.[1], dashed: dashed !== 'none' };
   };
   await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'set-sketch-pick-filter', filter: 'points' } });
-  await box([-2, -2], [22, 2]);
+  expect(await box([-2, -2], [22, 2])).toEqual({ mode: 'window', dashed: false });
   expect((await call(page, 'cad_get_viewport', { expectedVersion: current.version })).selectedSketchGeometrySet).toEqual([{ kind: 'point', id: 'a' }, { kind: 'point', id: 'b' }]);
   expect(await context(page)).toMatchObject({ version: current.version, workflowOpen: false });
   await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'set-sketch-pick-filter', filter: 'edges' } });
-  await box([22, 4], [-2, -2]);
+  expect(await box([22, 4], [-2, -2])).toEqual({ mode: 'crossing', dashed: true });
   expect((await call(page, 'cad_get_viewport', { expectedVersion: current.version })).selectedSketchGeometrySet).toEqual([{ kind: 'entity', id: 'ab' }, { kind: 'entity', id: 'bc' }]);
+  // Drawn rightwards over the same span the window holds only the line wholly inside it.
+  await canvas.press('Escape');
+  expect(await box([-2, -2], [22, 4])).toEqual({ mode: 'window', dashed: false });
+  expect((await call(page, 'cad_get_viewport', { expectedVersion: current.version })).selectedSketchGeometrySet).toEqual([{ kind: 'entity', id: 'ab' }]);
   await canvas.press('Escape');
   await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'set-sketch-pick-filter', filter: 'auto' } });
   const at = await project(20, 0); await page.mouse.click(at.x, at.y, { button: 'right' });
@@ -1130,6 +1138,26 @@ test('selects analytic boxes and overlapping sketch operands through shared filt
   await expect(page.getByRole('button', { name: 'Point 2 in Spatial sketch', exact: true })).toBeFocused();
   await page.keyboard.press('Enter');
   expect((await call(page, 'cad_get_viewport', { expectedVersion: current.version })).selectedSketchGeometrySet).toEqual([{ kind: 'point', id: 'b' }]);
+  // A double-click on an edge selects its contour, both lines through their shared corner; with Alt its tangent chain, which that corner ends.
+  const selected = async () => ((await call(page, 'cad_get_viewport', { expectedVersion: current.version })).selectedSketchGeometrySet as { kind: string; id: string }[])
+    .map(atom => `${atom.kind}:${atom.id}`).sort().join(' ');
+  await canvas.press('Escape');
+  const onLine = await project(30, 10);
+  await page.mouse.dblclick(onLine.x, onLine.y);
+  await expect.poll(selected).toBe('entity:ab entity:bc');
+  await expect(page.locator('.cad-sketch-context')).toContainText('Contour · 2 edges');
+  await page.keyboard.down('Alt'); await page.mouse.dblclick(onLine.x, onLine.y); await page.keyboard.up('Alt');
+  await expect.poll(selected).toBe('entity:bc');
+  // From an empty selection N steps through everything under the pointer at the corner: the point, both lines, then the axis the corner lies on,
+  // and round again. With something under the pointer already selected, it steps on from that.
+  await canvas.press('Escape'); await expect.poll(selected).toBe('');
+  const corner = await project(20, 0); await page.mouse.move(corner.x, corner.y);
+  let last = await selected();
+  const step = async (key: string) => { await page.keyboard.press(key); await expect.poll(selected).not.toBe(last); last = await selected(); return last; };
+  const seen = [await step('n'), await step('n'), await step('n'), await step('n')];
+  expect(seen[0]).toBe('point:b'); expect(new Set(seen.slice(1, 3))).toEqual(new Set(['entity:ab', 'entity:bc'])); expect(seen[3]).not.toMatch(/point:|entity:(ab|bc)/);
+  expect(await step('n')).toBe('point:b');
+  expect(await step('Shift+N')).toBe(seen[3]);
   expect((await call(page, 'cad_get_feature', { expectedVersion: current.version, featureId: feature.id })).feature).toEqual(feature);
   expect(await context(page)).toMatchObject({ version: current.version, workflowOpen: false });
 });

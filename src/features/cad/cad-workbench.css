@@ -276,7 +276,7 @@
 .cad-sketch-drag-target { fill: none; stroke: var(--primary); stroke-width: 1px; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; pointer-events: none; }
 .cad-sketch-drag-target.is-invalid { stroke: var(--destructive); }
 .cad-sketch-selection-box { fill: color-mix(in srgb, var(--primary) 12%, transparent); stroke: var(--primary); stroke-width: 1px; vector-effect: non-scaling-stroke; }
-.cad-sketch-selection-box.is-cross { stroke-dasharray: 5 3; }
+.cad-sketch-selection-box.is-crossing { stroke-dasharray: 5 3; }
 .cad-sketch-entity.is-relation-highlighted { stroke: var(--warning, #f0bf71); }
 .cad-sketch-graph-point.is-relation-highlighted .cad-sketch-point-mark { fill: var(--warning, #f0bf71); stroke: var(--foreground); }
 .cad-sketch-entity.is-pick-highlighted { stroke: var(--foreground); }

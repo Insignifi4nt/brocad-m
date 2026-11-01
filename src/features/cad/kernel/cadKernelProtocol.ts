@@ -3,6 +3,8 @@ import { cadBodyFeatureId, isCadBodyIssue, isCadBodyKey, isCadBodyState, MAX_CAD
 import { isCadSectionResult, type CadSectionRequest, type CadSectionResult } from '../../../domain/cad/cadSection';
 import { isCadTopologyInspectResult, isCadTopologyResolvePicksResult, type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '../../../domain/cad/cadTopology';
+import { isCadTopologyAdjacency, isCadTopologyTangentChain, type CadTopologyAdjacency, type CadTopologyAdjacencyRequest,
+  type CadTopologyTangentChain, type CadTopologyTangentChainRequest } from '../../../domain/cad/cadTopologyAdjacency';
 import { isCadSolidImportResult, type CadSolidImportSource, type CadSolidImportResult } from '../../../domain/cad/cadImports';
 import { isCadDxfImportResult, type CadDxfImportInput, type CadDxfImportResult } from '../../../domain/cad/cadDxfImport';
 import { isCadDxfCurveImportResult, type CadDxfCurveImportInput, type CadDxfCurveImportResult } from '../../../domain/cad/cadCurveDxf';
@@ -12,6 +14,8 @@ export type CadKernelRequest = { readonly id: number; readonly kind: 'build'; re
   | { readonly id: number; readonly kind: 'section'; readonly document: CadDocument; readonly section: CadSectionRequest }
   | { readonly id: number; readonly kind: 'inspect-topology'; readonly document: CadDocument; readonly inspection: CadTopologyInspectRequest }
   | { readonly id: number; readonly kind: 'resolve-topology-picks'; readonly document: CadDocument; readonly selection: CadTopologyResolvePicksRequest }
+  | { readonly id: number; readonly kind: 'inspect-adjacency'; readonly document: CadDocument; readonly adjacency: CadTopologyAdjacencyRequest }
+  | { readonly id: number; readonly kind: 'inspect-tangent-chain'; readonly document: CadDocument; readonly chain: CadTopologyTangentChainRequest }
   | { readonly id: number; readonly kind: 'import-solid'; readonly source: CadSolidImportSource }
   | { readonly id: number; readonly kind: 'import-dxf'; readonly input: CadDxfImportInput }
   | { readonly id: number; readonly kind: 'import-dxf-curve'; readonly input: CadDxfCurveImportInput };
@@ -20,6 +24,8 @@ export type CadKernelReply = { readonly id: number; readonly kind: 'built'; read
   | { readonly id: number; readonly kind: 'sectioned'; readonly result: CadSectionResult }
   | { readonly id: number; readonly kind: 'topology-inspected'; readonly result: CadTopologyInspectResult }
   | { readonly id: number; readonly kind: 'topology-resolved'; readonly result: CadTopologyResolvePicksResult }
+  | { readonly id: number; readonly kind: 'adjacency-inspected'; readonly result: CadTopologyAdjacency }
+  | { readonly id: number; readonly kind: 'tangent-chain-inspected'; readonly result: CadTopologyTangentChain }
   | { readonly id: number; readonly kind: 'solid-imported'; readonly result: CadSolidImportResult }
   | { readonly id: number; readonly kind: 'dxf-imported'; readonly result: CadDxfImportResult }
   | { readonly id: number; readonly kind: 'dxf-curve-imported'; readonly result: CadDxfCurveImportResult }
@@ -39,6 +45,8 @@ export function isCadKernelReply(value: unknown): value is CadKernelReply {
   if (value.kind === 'sectioned') return isCadSectionResult(value.result);
   if (value.kind === 'topology-inspected') return isCadTopologyInspectResult(value.result);
   if (value.kind === 'topology-resolved') return isCadTopologyResolvePicksResult(value.result);
+  if (value.kind === 'adjacency-inspected') return isCadTopologyAdjacency(value.result);
+  if (value.kind === 'tangent-chain-inspected') return isCadTopologyTangentChain(value.result);
   if (value.kind === 'solid-imported') return isCadSolidImportResult(value.result);
   if (value.kind === 'dxf-imported') return isCadDxfImportResult(value.result);
   if (value.kind === 'dxf-curve-imported') return isCadDxfCurveImportResult(value.result);

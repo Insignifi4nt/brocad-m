@@ -58,9 +58,10 @@ describe('precision literal scanner', () => {
     expect(scan(source)).toEqual([]);
   });
 
+  // Parses every source file, so its time grows with the repository and the runner's load.
   it('passes on the repository with every allowance used exactly', async () => {
     const result = await checkPrecisionLiterals();
     expect(result.problems).toEqual([]);
     expect(result.checked).toBeGreaterThan(500);
-  });
+  }, 30_000);
 });

@@ -65,7 +65,9 @@ import { CadFeatureTree } from './CadFeatureTree';
 import { CadCommandDock } from './CadCommandDock';
 import type { CadBuildResult, CadCurveFeature, CadDocument, CadFeature, CadPathSegment, CadPlane, CadSketchPlane, CadProfile, CadSketchFeature, CadSketchProfile } from '@/domain/cad/cadDocument';
 import { cadEditsOnlyPlaceDimensions, type CadEdit } from '@/domain/cad/cadOperations';
-import type { CadTopologyPickSet, CadTopologyResolvePicksRequest, CadTopologyResolvePicksResult } from '@/domain/cad/cadTopology';
+import type { CadTopologyPick, CadTopologyPickSet, CadTopologyResolvePicksRequest, CadTopologyResolvePicksResult } from '@/domain/cad/cadTopology';
+import { cadTopologyChainPicks, type CadTopologyChainGesture, type CadTopologyChainPicks } from '@/domain/cad/selection/cadTopologySelection';
+import type { CadTopologyAdjacency, CadTopologyAdjacencyRequest, CadTopologyTangentChain, CadTopologyTangentChainRequest } from '@/domain/cad/cadTopologyAdjacency';
 import { cadDocumentsPlacedAlike, cadFeatureDependencies, cadFeatureProducesBody } from '@/domain/cad/cadSchema';
 import { cadBodyFeatureId, cadBodyLineage, cadSelectedBody, type CadBodyLineage } from '@/domain/cad/cadBodies';
 import { CadFeatureEditor, CadProfileEditor, featureLabels } from './CadFeatureEditor';
@@ -80,12 +82,12 @@ import { prepareCadDatumFrames, resolveCadSketchPlacement } from '@/domain/cad/c
 import { CAD_SKETCH_BACKGROUNDS, cadShownSection, cadStoredSectionView, cadViewStateFor, reduceCadPartView, reduceCadViewState, type CadPartViewAction, type CadSectionPlane, type CadViewAction } from './view/cadViewState';
 import { cadSectionPlaneAvailable, resolveCadSectionFrame, sameCadSectionFrame } from './view/cadSectionView';
 import { cadFeatureWithReference, cadReferenceSelectionName, type CadReferenceSelection } from './view/cadReferenceSelection';
-import { cadSelectionAccepts, type CadSelectionKind } from './view/cadSelectionFilter';
+import { cadSelectionAccepts, type CadSelectionFilter, type CadSelectionKind } from '@/domain/cad/selection/cadSelectionFilter';
 import { createCadSketchCameraLink, sameCadSketchPlacementFrame, type CadSketchCameraView, type CadSketchPlacementFrame } from './view/cadSketchCamera';
 import { cadSketchBackgroundReferences } from './view/cadSketchBackgroundStyle';
 import { CadContextMenu, type CadContextMenuItem } from './CadContextMenu';
 import { CadTopologyInspector, type CadInspectTopology } from './CadTopologyInspector';
-import { mergeTopologySelection, validateTopologySelection, type CadPickMode, type CadTopologyHit } from './cadTopologyPicking';
+import { CadTangentChainReads, mergeTopologySelection, sharedCadTopologyRead, validateTopologySelection, type CadPickMode, type CadTopologyHit } from './cadTopologyPicking';
 import type { SketchTool } from './cadSketchInteraction';
 import { CAD_KERNEL_THIRD_PARTY } from './kernel/cadKernelNotices';
 import { ToolError } from '@/features/webmcp/siteTools';
@@ -204,6 +206,10 @@ export interface CadWorkbenchProps extends CadPluginCommands {
   onCaptureViewport?(): Promise<void>;
   onInspectTopology?: CadInspectTopology;
   onResolveSelection?(request: CadTopologyResolvePicksRequest, expectedVersion: string, signal: AbortSignal): Promise<CadTopologyResolvePicksResult>;
+  /** How one body's edges and faces meet in the visible build; without it or the tangent chain read, chains are unavailable and single picks still work. */
+  onTopologyAdjacency?(request: CadTopologyAdjacencyRequest, expectedVersion: string, signal: AbortSignal): Promise<CadTopologyAdjacency>;
+  /** The edges native fillet and chamfer treat when they follow tangents from one edge of the visible build. */
+  onTopologyTangentChain?(request: CadTopologyTangentChainRequest, expectedVersion: string, signal: AbortSignal): Promise<CadTopologyTangentChain>;
   featureInputPicking?: CadFeatureInputPicking;
   featurePreview?: CadFeaturePreviewState;
   onFeaturePreview?(command: CadFeaturePreviewCommand): void;
@@ -233,7 +239,7 @@ function shownSketchAnalysis(state: SketchAnalysisState | null, document: CadDoc
 /** The kinds the model view's selection filter offers. Vertices are not picked in 3D, so that kind is left to the sketch canvas. */
 const PART_SELECTION_KINDS: readonly { readonly kind: CadSelectionKind; readonly label: string }[] = Object.freeze([
   { kind: 'body', label: 'Bodies' }, { kind: 'face', label: 'Faces' }, { kind: 'edge', label: 'Edges' },
-  { kind: 'plane', label: 'Planes' }, { kind: 'axis', label: 'Axes' }, { kind: 'point', label: 'Origin point' }]);
+  { kind: 'plane', label: 'Planes' }, { kind: 'axis', label: 'Axes' }, { kind: 'point', label: 'Points' }]);
 
 function featureDraft(kind: CadFeature['kind'], document: CadDocument, selected: CadFeature | undefined, bodyIds: readonly string[], lineage: CadBodyLineage, plane: CadSketchPlane = selected?.kind === 'datum-plane' && cadFeatureActive(selected, document) ? Object.freeze({ kind: 'datum-plane', featureId: selected.id }) : 'XY'): CadFeature {
   const id = crypto.randomUUID();
@@ -411,7 +417,10 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     return () => publishHeader(null);
   }, [publishHeader, portalHost]);
   const [pickMode, setPickMode] = useState<CadPickMode>('auto');
-  const [pickedTopology, setPickedTopology] = useState<CadTopologyPickSet | null>(null);
+  const [pickedTopology, setPickedTopologyState] = useState<CadTopologyPickSet | null>(null);
+  // Each change to the topology selection, and each chain request, takes the next number; a chain answered after either is dropped.
+  const topologyRequest = useRef(0);
+  const setPickedTopology = useCallback((next: CadTopologyPickSet | null) => { topologyRequest.current++; setPickedTopologyState(next); }, []);
   const [resolvingTopology, setResolvingTopology] = useState<'fillet' | 'chamfer' | 'shell' | null>(null);
   const topologyResolution = useRef<{ controller: AbortController; source: CadTopologyPickSet } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -786,6 +795,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (next.selectionFilter.excluded.length) written.selectionFilter = next.selectionFilter;
     setCadPreferences(written);
   }, [document.id]);
+  const changeSelectionFilter = useCallback((filter: CadSelectionFilter) => changePartView({ kind: 'set-selection-filter', filter }), [changePartView]);
   // A section by a datum plane that is deleted or suppressed turns off; undoing that does not bring the section back.
   const sectionAvailable = !partView.section || cadSectionPlaneAvailable(partView.section.plane, document);
   useLayoutEffect(() => { if (!sectionAvailable) changePartView({ kind: 'clear-section' }); }, [sectionAvailable, changePartView]);
@@ -905,6 +915,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const inspectorVisible = Boolean(profileCopyCommand || featureEditorOpen || sketch || curve || newFeature || resolvingTopology || currentProperties);
   const floatingPluginInspector = profile?.geometry.kind === 'plugin';
 
+  const chainsAvailable = Boolean(props.onTopologyAdjacency && props.onTopologyTangentChain);
   const topologySource = useRef({ documentVersion: props.documentVersion, buildId: build?.buildId ?? null, ready: topologyReady });
   topologySource.current = { documentVersion: props.documentVersion, buildId: build?.buildId ?? null, ready: topologyReady };
   useLayoutEffect(() => {
@@ -1077,6 +1088,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const startTopologyFeature = async (purpose: 'fillet' | 'chamfer' | 'shell', explicitSelection?: CadTopologyPickSet) => {
     const source = explicitSelection ?? topologySelection;
     if (!source || !props.onResolveSelection) throw new Error(purpose === 'shell' ? 'Pick one planar face before starting an inward shell.' : 'Pick edges before starting this operation.');
+    if (purpose === 'shell' && source.picks.length !== 1) throw new Error('Shell opens one face. Select a single planar face before starting an inward shell.');
     validateTopologySelection(source, { documentVersion: props.documentVersion, buildId: build?.buildId ?? null, meshes: build?.meshes ?? [], ready: topologyReady });
     const controller = new AbortController();
     topologyResolution.current = { controller, source }; setResolvingTopology(purpose); props.onWorkflowChange(true);
@@ -1188,7 +1200,9 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   }, [profileCopyAccepted, profileCopyCommand, pending, document, storageBusy, externalWorkflowOpen]);
   const editCurve = (feature: CadCurveFeature) => { if (interactionState.current.locked || !cadFeatureActive(feature, interactionState.current.document)) return; setPickedTopology(null); setSketchId(null); setCurveId(feature.id); setSelectedId(feature.id); setProfileId(null); setTool('select'); setProperties(null); };
   const openSolidMenu = (request: CadViewportContextMenuRequest) => {
-    if (interactionState.current.locked || !request.target) return;
+    // Over planes alone there is no target, and Select other is the one command.
+    if (interactionState.current.locked || !request.target && !request.selectOther) return;
+    if (!request.target) { setCanvasMenu({ kind: 'solid', document, version: props.documentVersion, buildId: build?.buildId ?? null, request }); return; }
     if (request.target.kind === 'topology') {
       try { validateTopologySelection({ documentVersion: props.documentVersion, buildId: build?.buildId ?? '', bodyId: request.target.hit.bodyId, picks: [request.target.hit.pick] },
         { documentVersion: props.documentVersion, buildId: build?.buildId ?? null, meshes: build?.meshes ?? [], ready: topologyReady }); }
@@ -1220,6 +1234,11 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     const target = currentCanvasMenu.request.target;
     const id = target?.kind === 'topology' ? target.hit.bodyId : target?.kind === 'feature' ? target.featureId : null;
     const feature = document.features.find(feature => feature.id === id);
+    // Select other steps through whatever lies under the pointer, planes included, so it does not need a body.
+    const selectOther = currentCanvasMenu.request.selectOther;
+    const selectOtherItem: CadContextMenuItem | null = selectOther
+      ? { label: 'Select other', help: 'The next candidate under the pointer, faces behind included. N does the same, and Shift + N goes back.', onSelect: () => run(() => selectOther()) } : null;
+    if (!feature && selectOtherItem) { canvasMenuTitle = 'Selection'; canvasMenuItems.push(selectOtherItem); }
     if (feature) {
       canvasMenuTitle = feature.name;
       if (feature.kind !== 'sketch') canvasMenuItems.push({ label: 'Edit feature', onSelect: () => openFeatureEditor(feature) });
@@ -1229,6 +1248,14 @@ export function CadWorkbench(props: CadWorkbenchProps) {
         { label: 'Revolve sketch', disabled: cadSketchSourceIssue(feature, 'revolve', document.parameters) !== null, onSelect: () => startFeature('revolve', undefined, feature) });
       else if (feature.kind === 'curve') canvasMenuItems.push({ label: 'Edit curve', onSelect: () => editCurve(feature) });
       if (currentBodyIds.includes(feature.id)) {
+        if (target?.kind === 'topology' && chainsAvailable) {
+          const { hit } = target, faceKey = target.faceKey ?? null;
+          if (hit.pick.kind === 'edge') canvasMenuItems.push(
+            { label: 'Select loop', help: 'The edges around the face under the pointer that hold this one. Double-click an edge for the same.', onSelect: () => chainTopology(hit, 'loop', false, faceKey) },
+            { label: 'Select tangent chain', help: 'The edges Fillet and Chamfer treat with this one when they follow tangent edges. Alt + double-click an edge for the same.', onSelect: () => chainTopology(hit, 'tangent', false, faceKey) });
+          else canvasMenuItems.push({ label: 'Select tangent faces', help: 'The faces meeting this one without a crease. Double-click a face for the same.', onSelect: () => chainTopology(hit, 'tangent', false, null) });
+        }
+        if (selectOtherItem) canvasMenuItems.push(selectOtherItem);
         if (target?.kind === 'topology' && props.onResolveSelection) {
           const picks: CadTopologyPickSet = { bodyId: feature.id, buildId: build?.buildId ?? '', documentVersion: props.documentVersion, picks: [target.hit.pick] };
           if (target.hit.pick.kind === 'face') canvasMenuItems.push({ label: 'Shell from face', onSelect: () => run(() => startTopologyFeature('shell', picks)) });
@@ -1236,7 +1263,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
         }
         canvasMenuItems.push({ kind: 'separator' }, ...(['transform', 'linear-pattern', 'circular-pattern', 'mirror'] as const).map(kind => ({ label: featureLabels[kind], onSelect: () => startFeature(kind, undefined, feature) })));
         if (props.onSectionForCam) canvasMenuItems.push({ label: 'Section for CAM', onSelect: () => run(() => props.onSectionForCam?.(feature.id)) });
-      }
+      } else if (selectOtherItem) canvasMenuItems.push(selectOtherItem);
       canvasMenuItems.push({ kind: 'separator' }, { label: 'Properties', onSelect: () => openProperties({ kind: 'feature', featureId: feature.id }) }, { label: 'Suppress feature', onSelect: () => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...feature, suppressed: true } }, signal)) },
         { label: 'Delete feature', danger: true, onSelect: () => { setSelectedId(feature.id); setProfileId(null); setDeleteFeature(feature); } });
     }
@@ -1310,7 +1337,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     }
   }
   const hasMaterial = (feature: CadSketchFeature) => cadSketchSourceIssue(feature, 'extrude', document.parameters) === null;
-  const selectTopology = (incoming: CadTopologyPickSet | null, additive: boolean) => {
+  const selectTopology = (incoming: CadTopologyPickSet | null, additive: boolean | 'union') => {
     if (locked) return;
     if (!incoming) { setPickedTopology(null); return; }
     validateTopologySelection(incoming, { documentVersion: props.documentVersion, buildId: build?.buildId ?? null, meshes: build?.meshes ?? [], ready: topologyReady });
@@ -1320,6 +1347,46 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     setSketchId(null); setCurveId(null); setProfileId(null);  setError(null);
   };
   const changePickMode = (mode: CadPickMode) => { if (locked) return; if (mode !== pickMode) setPickedTopology(null); setPickMode(mode); };
+  const latestSelectTopology = useRef(selectTopology); latestSelectTopology.current = selectTopology;
+  /** Replaces the topology selection with edges or faces a box or Select other chose. */
+  const setTopology = (bodyId: string, picks: readonly CadTopologyPick[]) => run(() => {
+    selectTopology({ documentVersion: props.documentVersion, buildId: build?.buildId ?? '', bodyId, picks }, false);
+  });
+  // Each body's adjacency and each edge's tangent chain for the shown version and build, read on first use and dropped as soon as the
+  // shown build or version changes or stops being ready.
+  const chainReads = useRef<{ readonly key: string; readonly adjacency: Map<string, Promise<CadTopologyAdjacency>>; readonly chains: CadTangentChainReads } | null>(null);
+  const chainSource = topologyReady && build?.buildId ? `${props.documentVersion}\u0000${build.buildId}` : null;
+  useEffect(() => { if (chainReads.current?.key !== chainSource) chainReads.current = null; }, [chainSource]);
+  /** Selects the loop or tangent chain through an edge, or the tangent faces of a face; `additive` adds them without removing any. */
+  const chainTopology = (hit: CadTopologyHit, gesture: CadTopologyChainGesture, additive: boolean, faceKey: string | null) => run(async () => {
+    // A menu command runs after its menu closes, so the lock and build are read now, not from the render that opened the menu.
+    const readAdjacency = props.onTopologyAdjacency, readChain = props.onTopologyTangentChain, report = props.onStatusMessage;
+    const { buildId, documentVersion: version, ready } = topologySource.current, cancel = interactionState.current.cancel;
+    if (interactionState.current.locked || !readAdjacency || !readChain || !buildId || !ready) return;
+    const ticket = ++topologyRequest.current, key = `${version}\u0000${buildId}`, signal = new AbortController().signal;
+    if (chainReads.current?.key !== key) chainReads.current = { key, adjacency: new Map(), chains: new CadTangentChainReads() };
+    const reads = chainReads.current;
+    let chainRead: Promise<CadTopologyTangentChain> | null = null;
+    const readers = {
+      adjacency: () => sharedCadTopologyRead(reads.adjacency, hit.bodyId, () => readAdjacency({ bodyId: hit.bodyId, expectedBuildId: buildId }, version, signal)),
+      tangentChain: (edgeKey: string) => (chainRead = reads.chains.read(`${hit.bodyId}\u0000${edgeKey}`,
+        () => readChain({ bodyId: hit.bodyId, expectedBuildId: buildId, edgeKey }, version, signal))),
+    };
+    // A later pick, clear or chain, a cancellation, a newer build or version, or a workflow begun since makes the chain stale: it is
+    // dropped, and so is its failure, rather than applied over newer work.
+    const stale = () => {
+      const now = topologySource.current, state = interactionState.current;
+      return topologyRequest.current !== ticket || state.locked || state.cancel !== cancel || !now.ready || now.buildId !== buildId || now.documentVersion !== version;
+    };
+    let found: CadTopologyChainPicks | null;
+    try { found = await cadTopologyChainPicks(readers, hit.pick, gesture, faceKey); } catch (cause) { if (stale()) return; throw cause; }
+    if (stale() || !found) return;
+    const { kind, keys, note } = found;
+    // A chain the selection refuses is not kept: the next gesture reads it again.
+    try { latestSelectTopology.current({ documentVersion: version, buildId, bodyId: hit.bodyId, picks: keys.map(item => ({ kind, key: item })) }, additive ? 'union' : false); }
+    catch (cause) { if (chainRead) reads.chains.forget(chainRead); throw cause; }
+    if (note) report?.(note, 'info');
+  });
   const pickTopology = (hit: CadTopologyHit | null, additive: boolean) => run(() => {
     // A click on empty space clears the part selection like it does in body picking; an open editor keeps its feature.
     if (!hit) { selectTopology(null, false); if (!featureEditorOpen && !newFeature) { setSelectedId(null); setPlaneSelection(null); setProperties(current => current?.kind === 'selection' ? null : current); } return; }
@@ -2066,7 +2133,9 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     {publishHeader ? headerHost && createPortal(header, headerHost) : header}
     <div className="cad-body" inert={deleteFeature || pluginsOpen || externalWorkflowOpen || currentCanvasMenu || treeMenuOpen ? true : undefined}>
       <section ref={modelingArea} className={`cad-center${sketchSurface && sketchBackgroundView ? ' has-sketch-background' : ''}${sketchHeader ? ' has-sketch-header' : ''}`} aria-label="Modeling area"><CadCommandDock toolbar={toolbar}><CadViewport hidden={sketchSurface} sketchView={sketchSurface ? sketchBackgroundView : null} key={document.id} depthControl={currentDepthControl} busyInputLocked={storageBusy} regionSelection={currentRegionPick} sourceReferencePickIds={currentRegionPick ? regionReferenceIds : currentReferencePick?.eligibleIds} getFitArea={getFitArea} onContextMenu={currentOwnedPick || currentSketchPlaneRequest ? undefined : openSolidMenu} navigationMode={preferences.navigationMode} navigationLocked={navigationLocked} meshes={currentAreaRepair && currentRegionPick ? NO_MESHES : displayedMeshes} references={sketchSurface && sketchBackgroundView && sketchBackgroundReferences ? sketchBackgroundReferences : references} referenceVersion={currentTopologyPick ? inputPicker.source?.inputToken ?? null : candidatePreview?.candidateId ?? props.documentVersion} selectedId={currentTopologyPick ? currentTopologyPick.request.bodyId : newFeature?.id ?? selectedId} selectedReferencePlane={selectedReferencePlane} hoveredReferencePlane={hoveredReferencePlane} onHoverPlane={hoverReferencePlane} onSelect={choose} onSelectPlane={selectReferencePlane}
-        selectedOrigin={selectedOrigin} onSelectOrigin={selectOriginReference} section={viewportSection} selectionFilter={partView.selectionFilter} viewControls={partViewControls} planePickingOnly={Boolean(currentSketchPlaneRequest)} interactionLocked={currentTopologyPick ? inputPicker.busy : locked && !currentOwnedPick && !currentSketchPlaneRequest} onControlsReady={publishRenderedControls} pickMode={currentTopologyPick ? inputPicker.mode : currentOwnedPick || currentSketchPlaneRequest ? 'body' : pickMode} topologySelection={currentTopologyPick ? inputPicker.selection : candidatePreview || currentOwnedPick ? null : topologySelection} pickingEnabled={currentTopologyPick ? Boolean(inputPicker.source) && !inputPicker.busy : Boolean(currentOwnedPick) || topologyReady && !candidatePreview} onTopologyPick={currentTopologyPick ? inputPicker.pick : currentOwnedPick || currentSketchPlaneRequest ? undefined : pickTopology} />{currentSketchReferencePick?.source ? <CadSketchCanvas outlined={sketchOutlined}
+        selectedOrigin={selectedOrigin} onSelectOrigin={selectOriginReference} section={viewportSection} selectionFilter={partView.selectionFilter} viewControls={partViewControls} planePickingOnly={Boolean(currentSketchPlaneRequest)} interactionLocked={currentTopologyPick ? inputPicker.busy : locked && !currentOwnedPick && !currentSketchPlaneRequest} onControlsReady={publishRenderedControls} pickMode={currentTopologyPick ? inputPicker.mode : currentOwnedPick || currentSketchPlaneRequest ? 'body' : pickMode} topologySelection={currentTopologyPick ? inputPicker.selection : candidatePreview || currentOwnedPick ? null : topologySelection} pickingEnabled={currentTopologyPick ? Boolean(inputPicker.source) && !inputPicker.busy : Boolean(currentOwnedPick) || topologyReady && !candidatePreview} onTopologyPick={currentTopologyPick ? inputPicker.pick : currentOwnedPick || currentSketchPlaneRequest ? undefined : pickTopology}
+        onTopologyChain={currentTopologyPick ? inputPicker.chain : currentOwnedPick || currentSketchPlaneRequest || !chainsAvailable ? undefined : chainTopology}
+        onTopologySet={currentTopologyPick ? inputPicker.set : currentOwnedPick || currentSketchPlaneRequest ? undefined : setTopology} />{currentSketchReferencePick?.source ? <CadSketchCanvas outlined={sketchOutlined}
           key={`use-source/${currentSketchReferencePick.source.id}`} sketch={currentSketchReferencePick.source} parameters={document.parameters} documentVersion={props.documentVersion}
           placementLabel={cadPlacementLabel(currentSketchReferencePick.source.plane, document.features)} tool="select" selectedProfileId={null}
           onSelectProfile={() => undefined} onAddProfile={addProfile} onPendingChange={setDrawingPending} onError={setError}
@@ -2077,7 +2146,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
           placementLabel={cadPlacementLabel(copiedPreview.plane, profileCopyPreview.features)} tool="select" selectedProfileId={null}
           onSelectProfile={selectProfile} onAddProfile={addProfile} onPendingChange={setDrawingPending} onError={setError}
           cancelSignal={cancelSignal} interactionLocked onControlsReady={publishRenderedControls} getFitArea={getFitArea} navigationMode={preferences.navigationMode}
-          graphControls={{ document: profileCopyPreview, selection: [], onSelect: selectGraph, onEditMany: props.onEditMany }} /> : canvasReference && !currentRegionPick ? <CadSketchCanvas outlined={sketchOutlined} getFitArea={getFitArea} graphContextMenu={graphContextMenu} onContextMenu={openSketchMenu} navigationMode={preferences.navigationMode} dimensionControls={preferences.showOnPartDimensions ? { document, onEditMany: props.onEditMany, onPendingChange: setDimensionPending, interactionLocked: Boolean(currentDimensionPicks) || commandSubmission.applying || externalWorkflowOpen || pluginsOpen || editorPending || parameterPending || namePending || treeRenamePending || newFeature !== null || deleteFeature !== null || resolvingTopology !== null || storageBusy, onInspectInput: inspectInput, onConfigure: name => { setInspectorCollapsed(false); inspectInput(name); } } : undefined} previewProfile={profilePreview} previewSketch={preparedSketch} graphControls={sketch ? { document, selection: graphSelections, patternInteraction: currentPattern ? patternInteraction ?? undefined : undefined, onEditPattern: editSketchPattern, geometryPick: currentPlacement ? placementInteraction?.geometryPick : mirrorAxisPick ?? dimensionGeometryPick ?? constraintGeometryPick, positionPick: placementPositionPick, placement: currentPlacement ? placementInteraction?.placement : undefined, relation: inspectedRelation, inspection: currentMirror && mirrorInteraction?.kind === 'preview' ? { pointIds: [], entityIds: [mirrorInteraction.axisLineId] } : currentOffset?.source.kind === 'graph-cycle' ? { pointIds: [], entityIds: currentOffset.source.sourceRefs.map(ref => ref.entityId) } : diagnosticHighlight, degreesOfFreedom: graphFreedom, definition: shownAnalysis.definition, definitionLocked: shownAnalysis.locks, diagnosis: previewMarks ?? shownAnalysis.diagnosis, showDimensions: preferences.showOnPartDimensions, showRelations: relationsShown, selectionActions, onSelect: selectGraph, onSelectSet: selectGraphSet, onDelete: (selection, focused) => focused ? deleteFromFocus({ geometry: selection }, 'Delete') : deleteSketchGeometry(selection), onConfigureRelation: configureGraphRelation, dimensionSelection: graphDimensions, onSelectDimension: selectGraphDimension, onDeleteDimension: (dimension, key) => dimension ? deleteFromFocus({ annotations: [dimension] }, key ?? 'Delete') : deleteSketchAnnotations(), onDimensionMenu: (dimension, at) => openAnnotationMenu([dimension], at), onSelectRelations: selectGraphAnnotations, onOpenRelation: openGraphRelation, onDeleteRelations: (relations, key) => deleteFromFocus({ annotations: relations }, key), onRelationMenu: openAnnotationMenu, highlight: sketchHighlight, onEditMany: applyCanvasEdits, onPrepareEdits: props.onPrepareEdits, onPreviewDocument: publishSketchPreview } : undefined} inspection={sketchInspection} key={`${document.id}/${canvasReference.id}`} sketch={canvasReference} documentVersion={props.documentVersion} parameters={preparedSketchDocument?.parameters ?? previewParameters ?? document.parameters} placementLabel={cadPlacementLabel(canvasReference.plane, document.features)} tool={tool} selectedProfileId={profileId} onSelectProfile={canvasReference.kind === 'curve' ? () => undefined : selectProfile} onAddProfile={addProfile} onAddFreshSketch={addFreshSketch} onAddPath={addPath} onTranslateProfile={(id, translation, signal) => { if (!sketch) return; return applyCanvasEdits([{ kind: 'translate-sketch-profiles', sketchId: sketch.id, profileIds: [id], translation }], signal); }} onMoveHandle={(id, handle, translation, signal) => { if (!sketch) return; return applyCanvasEdits([{ kind: 'move-sketch-handle', sketchId: sketch.id, profileId: id, handle, translation }], signal); }} onAddCurve={addCurve} onCancelCurve={cancel} curveCreation={Boolean(curveCreation)} onPendingChange={setDrawingPending} onDrawingControls={publishDrawingControls} onExitTool={leaveDrawingTool} onError={setError} cancelSignal={cancelSignal} interactionLocked={curveCreation ? commandSubmission.applying || editorPending || parameterPending || namePending || storageBusy || deleteFeature !== null || resolvingTopology !== null : pendingOtherCommands || editorPending && !mirrorAxisPick && !placementPositionPick || storageBusy || externalWorkflowOpen} viewLocked={navigationLocked} onControlsReady={publishRenderedControls} onViewFrame={backgroundSketch ? publishSketchViewFrame : undefined} viewControls={backgroundSketch ? sketchViewControls : undefined} /> : null}
+          graphControls={{ document: profileCopyPreview, selection: [], onSelect: selectGraph, onEditMany: props.onEditMany }} /> : canvasReference && !currentRegionPick ? <CadSketchCanvas outlined={sketchOutlined} getFitArea={getFitArea} graphContextMenu={graphContextMenu} onContextMenu={openSketchMenu} navigationMode={preferences.navigationMode} dimensionControls={preferences.showOnPartDimensions ? { document, onEditMany: props.onEditMany, onPendingChange: setDimensionPending, interactionLocked: Boolean(currentDimensionPicks) || commandSubmission.applying || externalWorkflowOpen || pluginsOpen || editorPending || parameterPending || namePending || treeRenamePending || newFeature !== null || deleteFeature !== null || resolvingTopology !== null || storageBusy, onInspectInput: inspectInput, onConfigure: name => { setInspectorCollapsed(false); inspectInput(name); } } : undefined} previewProfile={profilePreview} previewSketch={preparedSketch} selectionFilter={partView.selectionFilter} onSelectionFilterChange={changeSelectionFilter} graphControls={sketch ? { document, selection: graphSelections, patternInteraction: currentPattern ? patternInteraction ?? undefined : undefined, onEditPattern: editSketchPattern, geometryPick: currentPlacement ? placementInteraction?.geometryPick : mirrorAxisPick ?? dimensionGeometryPick ?? constraintGeometryPick, positionPick: placementPositionPick, placement: currentPlacement ? placementInteraction?.placement : undefined, relation: inspectedRelation, inspection: currentMirror && mirrorInteraction?.kind === 'preview' ? { pointIds: [], entityIds: [mirrorInteraction.axisLineId] } : currentOffset?.source.kind === 'graph-cycle' ? { pointIds: [], entityIds: currentOffset.source.sourceRefs.map(ref => ref.entityId) } : diagnosticHighlight, degreesOfFreedom: graphFreedom, definition: shownAnalysis.definition, definitionLocked: shownAnalysis.locks, diagnosis: previewMarks ?? shownAnalysis.diagnosis, showDimensions: preferences.showOnPartDimensions, showRelations: relationsShown, selectionActions, onSelect: selectGraph, onSelectSet: selectGraphSet, onDelete: (selection, focused) => focused ? deleteFromFocus({ geometry: selection }, 'Delete') : deleteSketchGeometry(selection), onConfigureRelation: configureGraphRelation, dimensionSelection: graphDimensions, onSelectDimension: selectGraphDimension, onDeleteDimension: (dimension, key) => dimension ? deleteFromFocus({ annotations: [dimension] }, key ?? 'Delete') : deleteSketchAnnotations(), onDimensionMenu: (dimension, at) => openAnnotationMenu([dimension], at), onSelectRelations: selectGraphAnnotations, onOpenRelation: openGraphRelation, onDeleteRelations: (relations, key) => deleteFromFocus({ annotations: relations }, key), onRelationMenu: openAnnotationMenu, highlight: sketchHighlight, onEditMany: applyCanvasEdits, onPrepareEdits: props.onPrepareEdits, onPreviewDocument: publishSketchPreview } : undefined} inspection={sketchInspection} key={`${document.id}/${canvasReference.id}`} sketch={canvasReference} documentVersion={props.documentVersion} parameters={preparedSketchDocument?.parameters ?? previewParameters ?? document.parameters} placementLabel={cadPlacementLabel(canvasReference.plane, document.features)} tool={tool} selectedProfileId={profileId} onSelectProfile={canvasReference.kind === 'curve' ? () => undefined : selectProfile} onAddProfile={addProfile} onAddFreshSketch={addFreshSketch} onAddPath={addPath} onTranslateProfile={(id, translation, signal) => { if (!sketch) return; return applyCanvasEdits([{ kind: 'translate-sketch-profiles', sketchId: sketch.id, profileIds: [id], translation }], signal); }} onMoveHandle={(id, handle, translation, signal) => { if (!sketch) return; return applyCanvasEdits([{ kind: 'move-sketch-handle', sketchId: sketch.id, profileId: id, handle, translation }], signal); }} onAddCurve={addCurve} onCancelCurve={cancel} curveCreation={Boolean(curveCreation)} onPendingChange={setDrawingPending} onDrawingControls={publishDrawingControls} onExitTool={leaveDrawingTool} onError={setError} cancelSignal={cancelSignal} interactionLocked={curveCreation ? commandSubmission.applying || editorPending || parameterPending || namePending || storageBusy || deleteFeature !== null || resolvingTopology !== null : pendingOtherCommands || editorPending && !mirrorAxisPick && !placementPositionPick || storageBusy || externalWorkflowOpen} viewLocked={navigationLocked} onControlsReady={publishRenderedControls} onViewFrame={backgroundSketch ? publishSketchViewFrame : undefined} viewControls={backgroundSketch ? sketchViewControls : undefined} /> : null}
         {currentSketchPlaneRequest && <div className="cad-plane-request" role="status"><PencilRuler size={14} /><span>{currentSketchPlaneRequest.replaceSketchId ? `Click the new plane for ${document.features.find(feature => feature.id === currentSketchPlaneRequest.replaceSketchId)?.name ?? 'the sketch'}` : 'Select a plane in the design area'}</span><Button aria-label="Cancel plane selection" onClick={cancel}>Cancel</Button></div>}
         {buildState === 'building' && <div className="cad-build-overlay" role="status"><Loader2 size={13} className="cad-spin" /> Building solid geometry…</div>}
         {sketchHeader}{valueEditor}
@@ -2087,7 +2156,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       {inspectorVisible && <aside key={`configuration-${externalWorkflowOpen}-${pluginsOpen}`} className={`cad-properties cad-floating-inspector${floatingPluginInspector ? ' cad-plugin-inspector' : ''}${inspectorCollapsed ? ' is-minimized' : ''}`} data-cad-properties aria-label="Feature properties"><CadInspectorTitleContext.Provider value={titleHost}><div className="cad-panel-heading"><span className="cad-panel-title">{titleClaims > 0 && !inspectorCollapsed ? null : currentTopologyPick ? currentTopologyPick.purpose === 'shell' ? 'Choose opening' : 'Choose edges' : currentRegionPick ? 'Choose areas' : sketch ? sketch.name : curve ? curve.name : newFeature ? 'New feature' : currentProperties ? 'Properties' : profile ? 'Configuration' : selected?.name ?? 'Properties'}<span ref={setTitleSlot} className="cad-panel-title-slot" hidden={inspectorCollapsed} /></span>{currentTopologyPick ? <><Button variant="primary" className="cad-panel-finish" type="button" aria-label="Use topology selection" disabled={inputPicker.busy || !inputPicker.selection?.picks.length} onClick={() => { void inputPicker.finish(); }}><Check size={16} /></Button><Button type="button" aria-label="Cancel topology selection" onClick={currentTopologyPick.onCancel}><CloseIcon size={13} /></Button></> : currentRegionPick ? <><Button variant="primary" className="cad-panel-finish" aria-label="Finish area selection" title="Keep these areas" type="button" onClick={event => { event.preventDefault(); currentRegionPick.onFinish(); }}><Check size={16} /></Button><Button aria-label="Cancel area selection" title="Restore previous area choice" type="button" onClick={event => { event.preventDefault(); currentRegionPick.onCancel(); }}><CloseIcon size={13} /></Button></> : <>{curve && !curveCreation && <Button variant="primary" className="cad-panel-finish" aria-label="Finish curve editing" title="Finish curve editing" disabled={locked} onClick={finishCurve}><Check size={14} /><span>Finish</span></Button>}{currentProperties && !featureEditorOpen && !sketch && !curve && !newFeature && <Button aria-label="Close properties" title="Close properties (Esc)" onClick={() => setProperties(null)}><CloseIcon size={13} /></Button>}{featureEditorOpen && !curve && !newFeature && <Button aria-label="Close feature editor" title="Close editor (Esc)" disabled={commandSubmission.applying} onClick={closeFeatureEditor}><CloseIcon size={13} /></Button>}<Button aria-label={inspectorCollapsed ? 'Expand configuration' : 'Minimize configuration'} aria-expanded={!inspectorCollapsed} disabled={pending} onClick={() => setInspectorCollapsed(!inspectorCollapsed)}>{inspectorCollapsed ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</Button>{(sketch ? graphSelections.length > 0 || profile : featureEditorOpen) && !newFeature && <Button aria-label={graphSelections.length > 1 ? 'Delete selected geometry' : graphSelection ? `Delete selected ${graphSelection.kind === 'point' ? 'point and attached geometry' : 'edge'}` : 'Delete selected feature or profile'} disabled={locked || Boolean(props.sketchEdit && !graphSelections.length && !profile)} onClick={removeSelected}><Trash2 size={13} /></Button>}</>}</div>
         {currentRegionPick && <div className="cad-region-pick-hint" role="status">Click an area · Shift adds or removes</div>}
         {currentTopologyPick && <div className="cad-property-form">
-          <div className="cad-region-pick-hint" role="status">{!inputPicker.source ? inputPicker.busy ? 'Showing feature input…' : 'Feature input unavailable' : inputPicker.busy ? 'Checking selection…' : inputPicker.mode === 'face' ? 'Pick one planar face to open' : 'Pick edges · Ctrl or Command adds or removes'}</div>
+          <div className="cad-region-pick-hint" role="status">{!inputPicker.source ? inputPicker.busy ? 'Showing feature input…' : 'Feature input unavailable' : inputPicker.busy ? 'Checking selection…' : inputPicker.notice ?? (inputPicker.mode === 'face' ? 'Pick one planar face to open' : 'Pick edges · Ctrl or Command adds or removes')}</div>
           {inputPicker.error && <p className="cad-error" role="alert">{inputPicker.error}</p>}
           {inputPicker.source && <CadTopologyInspector bodyId={inputPicker.source.bodyId} buildId={inputPicker.source.result.buildId} documentVersion={props.documentVersion}
             pickMode={inputPicker.mode} selection={inputPicker.selection} locked={inputPicker.busy} onInspect={inputPicker.inspect}

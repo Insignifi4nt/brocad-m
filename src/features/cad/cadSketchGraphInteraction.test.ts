@@ -120,31 +120,31 @@ describe('stable sketch point and entity interaction', () => {
 
   it('distinguishes whole-entity containment from stroke crossing without implicitly adding endpoints', () => {
     const prepared = prepareCadSketchGraphInteraction(source, {}), bounds = { minX: -1, minY: -1, maxX: 10, maxY: 1 };
-    expect(prepared.pickBox({ bounds, mode: 'contain' })).toEqual([{ kind: 'point', id: 'a' }]);
-    expect(prepared.pickBox({ bounds, mode: 'cross' })).toEqual([{ kind: 'point', id: 'a' }, { kind: 'entity', id: 'ab' }, { kind: 'entity', id: 'da' }]);
-    expect(prepared.pickBox({ bounds, mode: 'cross', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'ab' }, { kind: 'entity', id: 'da' }]);
-    expect(prepared.pickBox({ bounds, mode: 'cross', filter: 'points' })).toEqual([{ kind: 'point', id: 'a' }]);
-    expect(prepared.pickBox({ bounds: { minX: 5, minY: -1, maxX: 15, maxY: 1 }, mode: 'cross' })).toEqual([{ kind: 'entity', id: 'ab' }]);
+    expect(prepared.pickBox({ bounds, mode: 'window' })).toEqual([{ kind: 'point', id: 'a' }]);
+    expect(prepared.pickBox({ bounds, mode: 'crossing' })).toEqual([{ kind: 'point', id: 'a' }, { kind: 'entity', id: 'ab' }, { kind: 'entity', id: 'da' }]);
+    expect(prepared.pickBox({ bounds, mode: 'crossing', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'ab' }, { kind: 'entity', id: 'da' }]);
+    expect(prepared.pickBox({ bounds, mode: 'crossing', filter: 'points' })).toEqual([{ kind: 'point', id: 'a' }]);
+    expect(prepared.pickBox({ bounds: { minX: 5, minY: -1, maxX: 15, maxY: 1 }, mode: 'crossing' })).toEqual([{ kind: 'entity', id: 'ab' }]);
   });
 
   it('rejects a diagonal AABB-only hit and retains collinear box-boundary contact', () => {
     const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 10] }],
       entities: [{ id: 'diagonal', kind: 'line', startPointId: 'a', endPointId: 'b', construction: false }], relations: [] });
-    expect(prepareCadSketchGraphInteraction(graph, {}).pickBox({ bounds: { minX: 0, minY: 9, maxX: 1, maxY: 10 }, mode: 'cross' })).toEqual([]);
+    expect(prepareCadSketchGraphInteraction(graph, {}).pickBox({ bounds: { minX: 0, minY: 9, maxX: 1, maxY: 10 }, mode: 'crossing' })).toEqual([]);
     const prepared = prepareCadSketchGraphInteraction(source, {}), bounds = { minX: 5, minY: 0, maxX: 15, maxY: 1 };
-    expect(prepared.pickBox({ bounds, mode: 'cross' })).toEqual([{ kind: 'entity', id: 'ab' }]);
-    expect(prepared.pickBox({ bounds, mode: 'contain' })).toEqual([]);
+    expect(prepared.pickBox({ bounds, mode: 'crossing' })).toEqual([{ kind: 'entity', id: 'ab' }]);
+    expect(prepared.pickBox({ bounds, mode: 'window' })).toEqual([]);
   });
 
   it('selects a circle stroke at crossings and tangency without treating its interior or center as an edge', () => {
     const graph = parseCadSketchGraph({ points: [{ id: 'center', position: [0, 0] }], entities: [{ id: 'circle', kind: 'circle', centerPointId: 'center', radius: 10, construction: true }], relations: [] });
     const prepared = prepareCadSketchGraphInteraction(graph, {}), inner = { minX: -1, minY: -1, maxX: 1, maxY: 1 };
-    expect(prepared.pickBox({ bounds: inner, mode: 'cross', filter: 'edges' })).toEqual([]);
-    expect(prepared.pickBox({ bounds: inner, mode: 'cross' })).toEqual([{ kind: 'point', id: 'center' }]);
-    expect(prepared.pickBox({ bounds: { minX: -1, minY: 9.9, maxX: 1, maxY: 10.1 }, mode: 'cross' })).toEqual([{ kind: 'entity', id: 'circle' }]);
-    expect(prepared.pickBox({ bounds: { minX: -1, minY: 10, maxX: 1, maxY: 11 }, mode: 'cross' })).toEqual([{ kind: 'entity', id: 'circle' }]);
-    expect(prepared.pickBox({ bounds: { minX: -1, minY: 10.000001, maxX: 1, maxY: 11 }, mode: 'cross' })).toEqual([]);
-    expect(prepared.pickBox({ bounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 }, mode: 'contain', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }]);
+    expect(prepared.pickBox({ bounds: inner, mode: 'crossing', filter: 'edges' })).toEqual([]);
+    expect(prepared.pickBox({ bounds: inner, mode: 'crossing' })).toEqual([{ kind: 'point', id: 'center' }]);
+    expect(prepared.pickBox({ bounds: { minX: -1, minY: 9.9, maxX: 1, maxY: 10.1 }, mode: 'crossing' })).toEqual([{ kind: 'entity', id: 'circle' }]);
+    expect(prepared.pickBox({ bounds: { minX: -1, minY: 10, maxX: 1, maxY: 11 }, mode: 'crossing' })).toEqual([{ kind: 'entity', id: 'circle' }]);
+    expect(prepared.pickBox({ bounds: { minX: -1, minY: 10.000001, maxX: 1, maxY: 11 }, mode: 'crossing' })).toEqual([]);
+    expect(prepared.pickBox({ bounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 }, mode: 'window', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }]);
   });
 
   it('uses signed circular sweeps and full analytic extrema instead of endpoint chords or AABB overlap', () => {
@@ -154,11 +154,11 @@ describe('stable sketch point and entity interaction', () => {
     ], relations: [] });
     for (const graph of [make(), make(true)]) {
       const prepared = prepareCadSketchGraphInteraction(graph, {});
-      expect(prepared.pickBox({ bounds: { minX: -10.1, minY: -.1, maxX: -9.9, maxY: .1 }, mode: 'cross', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'major' }]);
-      expect(prepared.pickBox({ bounds: { minX: 6.9, minY: 6.9, maxX: 7.2, maxY: 7.2 }, mode: 'cross', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'minor' }]);
-      expect(prepared.pickBox({ bounds: { minX: 4, minY: 4, maxX: 6, maxY: 6 }, mode: 'cross', filter: 'edges' })).toEqual([]);
-      expect(prepared.pickBox({ bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 }, mode: 'contain', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'minor' }]);
-      expect(prepared.pickBox({ bounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 }, mode: 'contain', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'major' }, { kind: 'entity', id: 'minor' }]);
+      expect(prepared.pickBox({ bounds: { minX: -10.1, minY: -.1, maxX: -9.9, maxY: .1 }, mode: 'crossing', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'major' }]);
+      expect(prepared.pickBox({ bounds: { minX: 6.9, minY: 6.9, maxX: 7.2, maxY: 7.2 }, mode: 'crossing', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'minor' }]);
+      expect(prepared.pickBox({ bounds: { minX: 4, minY: 4, maxX: 6, maxY: 6 }, mode: 'crossing', filter: 'edges' })).toEqual([]);
+      expect(prepared.pickBox({ bounds: { minX: 0, minY: 0, maxX: 10, maxY: 10 }, mode: 'window', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'minor' }]);
+      expect(prepared.pickBox({ bounds: { minX: -10, minY: -10, maxX: 10, maxY: 10 }, mode: 'window', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'major' }, { kind: 'entity', id: 'minor' }]);
     }
   });
 
@@ -168,8 +168,8 @@ describe('stable sketch point and entity interaction', () => {
         { id: 'major', kind: 'arc', centerPointId: 'center', startPointId: 'start', endPointId: 'end', direction: 'cw', construction: false },
         { id: 'circle', kind: 'circle', centerPointId: 'center', radius: ' radius ', construction: true }
       ], relations: [] }), before = JSON.stringify(graph), prepared = prepareCadSketchGraphInteraction(graph, parameters), { x, y, radius: r } = parameters;
-      expect(prepared.pickBox({ bounds: { minX: x - 1.1 * r, minY: y - .1 * r, maxX: x - .9 * r, maxY: y + .1 * r }, mode: 'cross', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }, { kind: 'entity', id: 'major' }]);
-      expect(prepared.pickBox({ bounds: { minX: x - r, minY: y - r, maxX: x + r, maxY: y + r }, mode: 'contain', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }, { kind: 'entity', id: 'major' }]);
+      expect(prepared.pickBox({ bounds: { minX: x - 1.1 * r, minY: y - .1 * r, maxX: x - .9 * r, maxY: y + .1 * r }, mode: 'crossing', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }, { kind: 'entity', id: 'major' }]);
+      expect(prepared.pickBox({ bounds: { minX: x - r, minY: y - r, maxX: x + r, maxY: y + r }, mode: 'window', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }, { kind: 'entity', id: 'major' }]);
       expect(JSON.stringify(graph)).toBe(before);
     }
   });
@@ -177,25 +177,25 @@ describe('stable sketch point and entity interaction', () => {
   it('keeps empty-space boxes empty even when distant box extents dwarf the source geometry', () => {
     const graph = parseCadSketchGraph({ points: [{ id: 'center', position: [0, 0] }], entities: [{ id: 'circle', kind: 'circle', centerPointId: 'center', radius: 10, construction: false }], relations: [] });
     const prepared = prepareCadSketchGraphInteraction(graph, {});
-    for (const mode of ['contain', 'cross'] as const)
+    for (const mode of ['window', 'crossing'] as const)
       expect(prepared.pickBox({ bounds: { minX: -1e100, minY: 100, maxX: 1e100, maxY: 101 }, mode })).toEqual([]);
-    expect(prepared.pickBox({ bounds: { minX: -1e100, minY: -1, maxX: 1e100, maxY: 1 }, mode: 'cross', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }]);
+    expect(prepared.pickBox({ bounds: { minX: -1e100, minY: -1, maxX: 1e100, maxY: 1 }, mode: 'crossing', filter: 'edges' })).toEqual([{ kind: 'entity', id: 'circle' }]);
   });
 
   it('returns stable detached targets independently of graph order and later query mutation', () => {
     const before = JSON.stringify(source), bounds = { minX: -1, minY: -1, maxX: 21, maxY: 11 };
     const normal = prepareCadSketchGraphInteraction(source, {}), reversed = prepareCadSketchGraphInteraction({ ...source, points: [...source.points].reverse(), entities: [...source.entities].reverse() }, {});
-    const hits = normal.pickBox({ bounds, mode: 'contain' });
+    const hits = normal.pickBox({ bounds, mode: 'window' });
     expect(hits).toEqual([{ kind: 'point', id: 'a' }, { kind: 'point', id: 'b' }, { kind: 'point', id: 'c' }, { kind: 'point', id: 'd' },
       { kind: 'entity', id: 'ab' }, { kind: 'entity', id: 'bc' }, { kind: 'entity', id: 'cd' }, { kind: 'entity', id: 'da' }]);
-    expect(reversed.pickBox({ bounds, mode: 'contain' })).toEqual(hits);
-    expect(normal.pickBox({ bounds, mode: 'contain' })[0]).not.toBe(hits[0]);
+    expect(reversed.pickBox({ bounds, mode: 'window' })).toEqual(hits);
+    expect(normal.pickBox({ bounds, mode: 'window' })[0]).not.toBe(hits[0]);
     expect(Reflect.set(hits[0], 'id', 'poisoned')).toBe(false);
     const pointHits = normal.pick([0, 0], .1); Reflect.set(pointHits[0], 'id', 'poisoned');
     expect(normal.pick([0, 0], .1)[0]).toEqual({ kind: 'point', id: 'a' });
     bounds.maxX = 1;
     expect(hits[1]).toEqual({ kind: 'point', id: 'b' });
-    expect(normal.pickBox({ bounds, mode: 'contain', filter: 'points' })).toEqual([{ kind: 'point', id: 'a' }, { kind: 'point', id: 'd' }]);
+    expect(normal.pickBox({ bounds, mode: 'window', filter: 'points' })).toEqual([{ kind: 'point', id: 'a' }, { kind: 'point', id: 'd' }]);
     expect(JSON.stringify(source)).toBe(before);
   });
 
@@ -207,9 +207,9 @@ describe('stable sketch point and entity interaction', () => {
     for (const bounds of [{ minX: NaN, minY: 0, maxX: 1, maxY: 1 }, { minX: 0, minY: 0, maxX: Infinity, maxY: 1 },
       { minX: 1, minY: 0, maxX: 0, maxY: 1 }, { minX: 0, minY: 1, maxX: 1, maxY: 0 },
       { minX: 0, minY: 0, maxX: 0, maxY: 1 }, { minX: 0, minY: 0, maxX: 1, maxY: 0 }])
-      for (const mode of ['contain', 'cross'] as const) expect(prepared.pickBox({ bounds, mode })).toEqual([]);
+      for (const mode of ['window', 'crossing'] as const) expect(prepared.pickBox({ bounds, mode })).toEqual([]);
     const empty = prepareCadSketchGraphInteraction(parseCadSketchGraph({ points: [], entities: [], relations: [] }), {});
-    expect(empty.pickBox({ bounds: { minX: 0, minY: 0, maxX: 1, maxY: 1 }, mode: 'cross' })).toEqual([]);
+    expect(empty.pickBox({ bounds: { minX: 0, minY: 0, maxX: 1, maxY: 1 }, mode: 'crossing' })).toEqual([]);
   });
 
   it('hits exact circular and signed major arc supports without their complementary extensions', () => {

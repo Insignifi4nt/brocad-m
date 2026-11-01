@@ -11,7 +11,8 @@ import type { Bounds2, Point2 } from '@/domain/path-intel/types';
 import { CAD_SKETCH_PICK_RADIUS_PX, cadSketchBoundaryDistance } from './cadSketchPicking';
 import type { SketchPoint } from './cadSketchInteraction';
 import type { CadSketchGraphSelection } from './cadViewportControls';
-import type { CadSketchGraphPickFilter } from './cadSketchGraphSelection';
+import { cadSketchPickScopeHasEdges, cadSketchPickScopeHasPoints, type CadSketchGraphPickScope } from './cadSketchGraphSelection';
+import type { CadBoxMode } from '@/domain/cad/selection/cadSelectionBox';
 import { prepareCadSketchGeometrySnaps } from './cadSketchGeometrySnaps';
 import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
 import { cadSketchExternalReferenceComponents, cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
@@ -20,8 +21,9 @@ export type { CadSketchGraphSelection } from './cadViewportControls';
 export type { CadSketchGraphPickFilter } from './cadSketchGraphSelection';
 export interface CadSketchGraphBoxQuery {
   readonly bounds: Readonly<Bounds2>;
-  readonly mode: 'contain' | 'cross';
-  readonly filter?: CadSketchGraphPickFilter;
+  /** Window takes what lies wholly inside the box; crossing also takes what the box touches. */
+  readonly mode: CadBoxMode;
+  readonly filter?: CadSketchGraphPickScope;
 }
 export interface CadSketchGraphPointControl {
   readonly id: string;
@@ -101,13 +103,13 @@ function prepareInteraction(graph: CadSketchGraph, parameters: Readonly<Record<s
     freeAxes: Object.freeze([!cadSketchLinearPatternLockReason(graph, { kind: 'point', id: point.id }) && typeof point.position[0] === 'number' && !fixed.get(point.id)?.has(0), !cadSketchLinearPatternLockReason(graph, { kind: 'point', id: point.id }) && typeof point.position[1] === 'number' && !fixed.get(point.id)?.has(1)] satisfies [boolean, boolean])
   })));
   return { graph, parameters, geometry, points, snap: prepareCadSketchGeometrySnaps({ graph, points, segments: geometry.segments }),
-    pick(point: SketchPoint, millimetersPerPixel: number, filter: CadSketchGraphPickFilter = 'auto'): readonly CadSketchGraphSelection[] {
+    pick(point: SketchPoint, millimetersPerPixel: number, filter: CadSketchGraphPickScope = 'auto'): readonly CadSketchGraphSelection[] {
       if (!point.every(Number.isFinite) || !Number.isFinite(millimetersPerPixel) || millimetersPerPixel <= 0) return [];
       const tolerance = CAD_SKETCH_PICK_RADIUS_PX * millimetersPerPixel;
       if (!Number.isFinite(tolerance)) return [];
       const hits = [
-        ...(filter === 'edges' ? [] : points.map(control => ({ kind: 'point' as const, id: control.id, distance: Math.hypot(point[0] - control.position[0], point[1] - control.position[1]) }))),
-        ...(filter === 'points' ? [] : geometry.segments.map(segment => ({ kind: 'entity' as const, id: segment.id, distance: cadSketchBoundaryDistance({ x: point[0], y: point[1] }, segment) })))
+        ...(!cadSketchPickScopeHasPoints(filter) ? [] : points.map(control => ({ kind: 'point' as const, id: control.id, distance: Math.hypot(point[0] - control.position[0], point[1] - control.position[1]) }))),
+        ...(!cadSketchPickScopeHasEdges(filter) ? [] : geometry.segments.map(segment => ({ kind: 'entity' as const, id: segment.id, distance: cadSketchBoundaryDistance({ x: point[0], y: point[1] }, segment) })))
       ].filter(hit => hit.distance <= tolerance);
       hits.sort((a, b) => (a.kind === b.kind ? a.distance - b.distance : a.kind === 'point' ? -1 : 1) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       return hits.map(({ kind, id }) => ({ kind, id }));
@@ -117,13 +119,13 @@ function prepareInteraction(graph: CadSketchGraph, parameters: Readonly<Record<s
       if (![bounds.minX, bounds.minY, bounds.maxX, bounds.maxY].every(Number.isFinite)
         || bounds.minX >= bounds.maxX || bounds.minY >= bounds.maxY) return [];
       const hits: CadSketchGraphSelection[] = [];
-      if (filter !== 'edges') for (const point of points) if (inside({ x: point.position[0], y: point.position[1] }, bounds)) hits.push({ kind: 'point', id: point.id });
-      if (filter !== 'points') {
+      if (cadSketchPickScopeHasPoints(filter)) for (const point of points) if (inside({ x: point.position[0], y: point.position[1] }, bounds)) hits.push({ kind: 'point', id: point.id });
+      if (cadSketchPickScopeHasEdges(filter)) {
         for (const segment of geometry.segments) {
           const extent = boundsCorners(segment.bounds), epsilon = cadPathClosureTolerance(extent);
           const contained = extent.every(point => inside(point, bounds, epsilon));
           if (contained) { hits.push({ kind: 'entity', id: segment.id }); continue; }
-          if (mode !== 'cross') continue;
+          if (mode !== 'crossing') continue;
           // Clip the query to the curve's broad bounds before intersection math.
           // Distant box corners must not inflate contact tolerance or overflow edge vectors.
           const clipped = { minX: Math.max(bounds.minX, segment.bounds.minX - epsilon), minY: Math.max(bounds.minY, segment.bounds.minY - epsilon),

@@ -709,12 +709,118 @@ describe('graph spatial selection', () => {
     expect(h.selected).toHaveBeenCalledExactlyOnceWith({ kind: 'entity', id: 'bc' }, true);
     expect(document.activeElement).toBe(container.querySelector('[data-cad-sketch-entity="bc"]'));
     expect(h.pending).toHaveBeenLastCalledWith(false); expect(h.edited).not.toHaveBeenCalled();
-    const filter = container.querySelector<HTMLSelectElement>('[aria-label="Sketch selection filter"]'); if (!filter) throw new Error('Filter missing.');
-    await act(async () => { filter.value = 'points'; filter.dispatchEvent(new Event('change', { bubbles: true })); });
+    // Turning edges off in the filter leaves the point as the only candidate.
+    const filter = container.querySelector<HTMLButtonElement>('button[aria-label="Filter"]'); if (!filter) throw new Error('Filter missing.');
+    await act(async () => filter.click());
+    const edges = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemcheckbox"]')].find(item => item.textContent?.trim() === 'Edges');
+    if (!edges) throw new Error('Edges row missing.'); await act(async () => edges.click());
     await h.pointer('pointerdown', 10, 0, false, 7, 2); await h.pointer('pointerup', 10, 0, false, 7, 2);
     const dimension = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === 'Dimension');
     if (!dimension) throw new Error('Singleton point action missing.'); await act(async () => dimension.click());
     expect(start).toHaveBeenCalledExactlyOnceWith([{ kind: 'point', id: 'b' }]); expect(h.edited).not.toHaveBeenCalled();
+  });
+  it('selects the contour of a double-clicked edge, its tangent chain with Alt, and adds it with Shift', async () => {
+    const h = await spatialFixture();
+    const dblclick = async (x: number, y: number, modifiers: Pick<MouseEventInit, 'altKey' | 'shiftKey'> = {}, target: Element = h.canvas) => {
+      const state = currentControls().getState(); if (state.mode === 'solid') throw new Error('Sketch state missing.');
+      await act(async () => target.dispatchEvent(new MouseEvent('dblclick', { button: 0, detail: 2, bubbles: true, cancelable: true, ...modifiers,
+        clientX: 510 + (x - state.centerMm[0]) / (state.heightSpanMm * 2) * 1000, clientY: 270 - (y - state.centerMm[1]) / state.heightSpanMm * 500 })));
+    };
+    const ids = (call: number) => (h.selectedSet.mock.calls[call][0] as readonly CadSketchGraphSelection[]).map(atom => `${atom.kind}:${atom.id}`).sort();
+    // The two lines meet end to end at a corner: one contour, but each line is its own tangent chain.
+    await dblclick(5, 0);
+    expect(ids(0)).toEqual(['entity:ab', 'entity:bc']); expect(h.selectedSet.mock.calls[0][1]).toBe(false);
+    await h.show({ graphControls: { ...h.props().graphControls!, selection: h.selectedSet.mock.calls[0][0] } });
+    expect(container.querySelector('.cad-sketch-context')?.textContent).toContain('Contour · 2 edges');
+    await dblclick(5, 0, { altKey: true });
+    expect(ids(1)).toEqual(['entity:ab']);
+    // A lone edge needs no chain status.
+    await h.show({ graphControls: { ...h.props().graphControls!, selection: h.selectedSet.mock.calls[1][0] } });
+    expect(container.querySelector('.cad-sketch-context')?.textContent ?? '').not.toMatch(/Contour|Tangent chain/);
+    await h.show({ graphControls: { ...h.props().graphControls!, selection: [{ kind: 'point', id: 'c' }] } });
+    expect(container.querySelector('.cad-sketch-context')?.textContent ?? '').not.toContain('Contour');
+    await dblclick(20, 10, { shiftKey: true });
+    expect(ids(2)).toEqual(['entity:ab', 'entity:bc', 'point:c']); expect(h.selectedSet.mock.calls[2][1]).toBe(true);
+    // Away from an edge, or with edges filtered out, a double-click selects nothing.
+    await dblclick(0, 15); expect(h.selectedSet).toHaveBeenCalledTimes(3);
+    await h.show({ selectionFilter: { excluded: ['edge'] } });
+    await dblclick(5, 0); expect(h.selectedSet).toHaveBeenCalledTimes(3);
+    expect(h.error).not.toHaveBeenCalled(); expect(h.edited).not.toHaveBeenCalled();
+  });
+  it('selects the contour and the tangent chain from the right-click menu once it closes', async () => {
+    const h = await spatialFixture();
+    const ids = (call: number) => (h.selectedSet.mock.calls[call][0] as readonly CadSketchGraphSelection[]).map(atom => `${atom.kind}:${atom.id}`).sort();
+    const choose = async (label: string) => {
+      await h.pointer('pointerdown', 5, 0, false, 7, 2); await h.pointer('pointerup', 5, 0, false, 7, 2);
+      const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(row => row.textContent === label);
+      if (!item) throw new Error(`${label} missing.`); await act(async () => item.click());
+    };
+    // The open menu holds the canvas; its commands still act once it has closed.
+    await choose('Select contour');
+    expect(ids(0)).toEqual(['entity:ab', 'entity:bc']); expect(h.selectedSet.mock.calls[0][1]).toBe(false);
+    expect(document.querySelector('[role="menuitem"]')).toBeNull();
+    await choose('Select tangent chain');
+    expect(ids(1)).toEqual(['entity:ab']);
+    // An operation elsewhere that starts while the menu is open still stops the command.
+    await h.pointer('pointerdown', 5, 0, false, 7, 2); await h.pointer('pointerup', 5, 0, false, 7, 2);
+    const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(row => row.textContent === 'Select contour');
+    await h.show({ interactionLocked: true });
+    if (item?.isConnected) await act(async () => item.click());
+    expect(h.selectedSet).toHaveBeenCalledTimes(2);
+    expect(h.error).not.toHaveBeenCalled(); expect(h.edited).not.toHaveBeenCalled();
+  });
+  it('steps Select other through every candidate under the pointer with N and back with Shift + N', async () => {
+    const h = await spatialFixture();
+    const key = async (shiftKey = false) => act(async () => { h.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: shiftKey ? 'N' : 'n', shiftKey, bubbles: true, cancelable: true })); });
+    // At the shared corner, on the horizontal axis, a point, both lines and the axis are under the pointer: the point comes first, as a click
+    // prefers it, and the axis last.
+    await h.pointer('pointermove', 10, 0);
+    const seen: string[] = [];
+    let selection: readonly CadSketchGraphSelection[] = [];
+    for (let step = 0; step < 5; step++) {
+      await key();
+      const next = h.selectedSet.mock.lastCall?.[0] as readonly CadSketchGraphSelection[];
+      expect(next).toHaveLength(1); expect(h.selectedSet.mock.lastCall?.[1]).toBe(false);
+      seen.push(`${next[0].kind}:${next[0].id}`); selection = next;
+      await h.show({ graphControls: { ...h.props().graphControls!, selection } });
+    }
+    expect(seen[0]).toBe('point:b'); expect(new Set(seen.slice(1, 3))).toEqual(new Set(['entity:ab', 'entity:bc'])); expect(seen.slice(3)).toEqual(['entity:@h', 'point:b']);
+    await key(true);
+    expect(h.selectedSet.mock.lastCall?.[0]).toEqual([{ kind: 'entity', id: '@h' }]);
+    // The filter limits the candidates as it limits clicks.
+    await h.show({ selectionFilter: { excluded: ['point', 'axis'] }, graphControls: { ...h.props().graphControls!, selection: [] } });
+    await key(true);
+    expect((h.selectedSet.mock.lastCall?.[0] as readonly CadSketchGraphSelection[] | undefined)?.[0]).toMatchObject({ kind: 'entity', id: expect.stringMatching(/^(ab|bc)$/) });
+    // Nothing is under a pointer that has left the canvas and nothing has focus, so N does nothing.
+    const calls = h.selectedSet.mock.calls.length;
+    await act(async () => { h.canvas.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })); });
+    await key(); expect(h.selectedSet).toHaveBeenCalledTimes(calls);
+    expect(h.error).not.toHaveBeenCalled(); expect(h.edited).not.toHaveBeenCalled();
+  });
+  it('steps Select other through the origin and both axes where they overlap geometry, moving focus to each choice', async () => {
+    const h = await spatialFixture();
+    // At the origin lie point a, the origin, line ab and both axes: points first with the origin among them, then the edge, then the axes.
+    await h.pointer('pointermove', 0, 0);
+    const seen: string[] = [], focused: (string | null)[] = [];
+    for (let step = 0; step < 6; step++) {
+      await act(async () => { h.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true })); });
+      const next = h.selectedSet.mock.lastCall?.[0] as readonly CadSketchGraphSelection[];
+      seen.push(`${next[0].kind}:${next[0].id}`);
+      const active = document.activeElement;
+      focused.push(active?.getAttribute('data-cad-sketch-point') ?? active?.getAttribute('data-cad-sketch-entity') ?? active?.getAttribute('data-cad-sketch-fixed') ?? null);
+      await h.show({ graphControls: { ...h.props().graphControls!, selection: next } });
+    }
+    expect(seen).toEqual(['point:a', 'point:@origin', 'entity:ab', 'entity:@h', 'entity:@v', 'point:a']);
+    expect(focused).toEqual(['a', '@origin', 'ab', '@h', '@v', 'a']);
+    // N pressed on a focused point leaves that point: arrow keys then cannot move the point the selection left.
+    await act(async () => { h.canvas.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })); });
+    await h.show({ graphControls: { ...h.props().graphControls!, selection: [{ kind: 'point', id: 'b' }] } });
+    const point = container.querySelector<SVGGElement>('[data-cad-sketch-point="b"]'); if (!point) throw new Error('Point missing.');
+    await act(async () => { point.focus(); point.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true, cancelable: true })); });
+    const [chosen] = h.selectedSet.mock.lastCall![0] as readonly CadSketchGraphSelection[];
+    expect(chosen.kind).toBe('entity'); expect(document.activeElement).not.toBe(point);
+    expect(document.activeElement?.getAttribute('data-cad-sketch-entity')).toBe(chosen.id);
+    expect(h.error).not.toHaveBeenCalled(); expect(h.edited).not.toHaveBeenCalled();
   });
   it('previews an exact off-grid split at the owned cursor and submits the same named joint once', async () => {
     const h = await spatialFixture(), original = structuredClone(h.feature), operation = deferred<void>(); h.edited.mockReturnValue(operation.promise);

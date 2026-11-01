@@ -1,5 +1,5 @@
 import type { CadSketchPlane } from '@/domain/cad/cadDocument';
-import { CAD_DEFAULT_SELECTION_FILTER, setCadSelectionKind, type CadSelectionFilter, type CadSelectionKind } from './cadSelectionFilter';
+import { CAD_DEFAULT_SELECTION_FILTER, parseCadSelectionFilter, sameCadSelectionFilter, setCadSelectionKind, type CadSelectionFilter, type CadSelectionKind } from '@/domain/cad/selection/cadSelectionFilter';
 
 /**
  * What the CAD view shows around the geometry being edited. It is display state: it lives with the device preferences, never in a
@@ -94,7 +94,8 @@ export type CadPartViewAction =
   | { readonly kind: 'set-section-flip'; readonly flip: boolean }
   | { readonly kind: 'set-section-caps'; readonly caps: boolean }
   | { readonly kind: 'set-reference-geometry'; readonly shown: boolean }
-  | { readonly kind: 'set-selection-kind'; readonly selection: CadSelectionKind; readonly accepted: boolean };
+  | { readonly kind: 'set-selection-kind'; readonly selection: CadSelectionKind; readonly accepted: boolean }
+  | { readonly kind: 'set-selection-filter'; readonly filter: CadSelectionFilter };
 
 /** The section record's version in the device preferences. A record of any other version is ignored, and reading never rewrites it. */
 export const CAD_SECTION_VIEW_VERSION = 1;
@@ -131,6 +132,10 @@ export function reduceCadPartView(view: CadPartView, action: CadPartViewAction):
     case 'set-selection-kind': {
       const selectionFilter = setCadSelectionKind(view.selectionFilter, action.selection, action.accepted);
       return selectionFilter === view.selectionFilter ? view : Object.freeze({ ...view, selectionFilter });
+    }
+    case 'set-selection-filter': {
+      const selectionFilter = parseCadSelectionFilter(action.filter) ?? view.selectionFilter;
+      return sameCadSelectionFilter(selectionFilter, view.selectionFilter) ? view : Object.freeze({ ...view, selectionFilter });
     }
   }
 }

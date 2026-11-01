@@ -10,6 +10,7 @@ import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { WorkbenchStorageAdapter } from '@/domain/storage/workbenchStorageAdapter';
 import type { CadKernelClient } from './kernel/cadKernelClient';
 import type { CadTopologyInspectRequest, CadTopologyResolvePicksRequest } from '@/domain/cad/cadTopology';
+import type { CadTopologyAdjacencyRequest, CadTopologyTangentChainRequest } from '@/domain/cad/cadTopologyAdjacency';
 import { createCadTopologyActions } from './cadTopologyActions';
 import { ToolError } from '@/features/webmcp/siteTools';
 
@@ -31,7 +32,7 @@ export interface CadFeatureInputSnapshot {
   readonly document: CadDocument;
   readonly result: CadBuildResult;
 }
-type InputKernel = Pick<CadKernelClient, 'build' | 'inspectTopology' | 'resolveTopologyPicks' | 'dispose'>;
+type InputKernel = Pick<CadKernelClient, 'build' | 'inspectTopology' | 'resolveTopologyPicks' | 'topologyAdjacency' | 'topologyTangentChain' | 'dispose'>;
 interface Bindings {
   assertCurrent(expectedVersion: string, scope?: 'editor'): { readonly document: CadDocument; readonly storage: WorkbenchStorageAdapter };
   createKernel(): Promise<InputKernel>;
@@ -84,6 +85,8 @@ export function createCadFeatureInputCoordinator(bindings: Bindings) {
         return {
           inspectTopology(document, inspection) { signal?.throwIfAborted(); return client.inspectTopology(document, inspection, job.controller.signal); },
           resolveTopologyPicks(document, selection) { signal?.throwIfAborted(); return client.resolveTopologyPicks(document, selection, job.controller.signal); },
+          topologyAdjacency(document, adjacency) { signal?.throwIfAborted(); return client.topologyAdjacency(document, adjacency, job.controller.signal); },
+          topologyTangentChain(document, chain) { signal?.throwIfAborted(); return client.topologyTangentChain(document, chain, job.controller.signal); },
         };
       },
     });
@@ -129,6 +132,12 @@ export function createCadFeatureInputCoordinator(bindings: Bindings) {
     },
     inspect(request: CadTopologyInspectRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor', inputToken?: string) {
       return read(request, expectedVersion, signal, scope, inputToken, actions => actions.inspect(request, expectedVersion, signal, scope));
+    },
+    adjacency(request: CadTopologyAdjacencyRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor', inputToken?: string) {
+      return read(request, expectedVersion, signal, scope, inputToken, actions => actions.adjacency(request, expectedVersion, signal, scope));
+    },
+    tangentChain(request: CadTopologyTangentChainRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor', inputToken?: string) {
+      return read(request, expectedVersion, signal, scope, inputToken, actions => actions.tangentChain(request, expectedVersion, signal, scope));
     },
     async resolve(request: CadTopologyResolvePicksRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'editor', inputToken?: string) {
       signal?.throwIfAborted();

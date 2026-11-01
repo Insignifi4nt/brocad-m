@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AxesHelper, GridHelper, LineDashedMaterial, LineSegments, Mesh, MeshBasicMaterial, MeshStandardMaterial, OrthographicCamera, Vector3, type Camera, type Plane, type Scene } from 'three';
@@ -211,10 +211,13 @@ describe('hidden under a sketch surface', () => {
 
 describe('viewport pointer ownership and hover', () => {
   const meshes: readonly CadMesh[] = [{ ...mesh, faceGroups: [{ key: 'face', start: 0, count: 3 }], edgeGroups: [{ key: 'edge', start: 0, count: 2 }] }];
-  async function harness(mode: 'body' | 'face' | 'auto' = 'body') {
+  type ViewportExtra = Partial<Pick<ComponentProps<typeof CadViewport>, 'onTopologyChain' | 'onTopologySet' | 'selectionFilter' | 'topologySelection' | 'references' | 'referenceVersion' | 'onSelectPlane'>>;
+  async function harness(mode: 'body' | 'face' | 'edge' | 'auto' = 'body', extra: ViewportExtra = {}) {
     const select = vi.fn(), topology = vi.fn(), contextMenu = vi.fn();
+    let more = extra;
     const show = async (locked = false, navigationLocked = locked, selectedId: string | null = null, navigationMode: 'mouse' | 'trackpad' = 'mouse') => { await act(async () => root.render(<CadViewport meshes={meshes} selectedId={selectedId} onSelect={select}
-      {...{ navigationLocked, navigationMode, onContextMenu: contextMenu }} pickMode={mode} onTopologyPick={topology} interactionLocked={locked} onControlsReady={value => { controls = value; }} />)); };
+      {...{ navigationLocked, navigationMode, onContextMenu: contextMenu }} pickMode={mode} onTopologyPick={topology} interactionLocked={locked} onControlsReady={value => { controls = value; }} {...more} />)); };
+    const update = async (next: ViewportExtra) => { more = { ...more, ...next }; await show(); };
     await show(); await act(async () => currentControls().setView?.('Top')); await flushFrame();
     const [scene, camera] = renderer().render.mock.calls.at(-1)!; scene.updateMatrixWorld(true); camera.updateMatrixWorld();
     const point = new Vector3(2, 2, 0).project(camera), x = (point.x + 1) * 400, y = (1 - point.y) * 300;
@@ -225,8 +228,99 @@ describe('viewport pointer ownership and hover', () => {
       Object.defineProperties(event, { pointerId: { value: id }, pointerType: { value: pointerType }, isPrimary: { value: id === 1 } });
       canvas.dispatchEvent(event);
     }); };
-    return { select, topology, contextMenu, show, pointer, canvas, x, y };
+    /** Screen position of a model point in the top view. */
+    const at = (modelX: number, modelY: number) => { const projected = new Vector3(modelX, modelY, 0).project(camera); return { dx: (projected.x + 1) * 400 - x, dy: (1 - projected.y) * 300 - y }; };
+    const mouse = async (type: string, offset: { dx: number; dy: number }, init: MouseEventInit = {}) => act(async () => {
+      const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x + offset.dx, clientY: y + offset.dy, ...init });
+      Object.defineProperties(event, { pointerId: { value: 1 }, pointerType: { value: 'mouse' }, isPrimary: { value: true } });
+      canvas.dispatchEvent(event);
+    });
+    const key = async (value: string, shiftKey = false) => act(async () => { canvas.dispatchEvent(new KeyboardEvent('keydown', { key: value, shiftKey, bubbles: true, cancelable: true })); });
+    return { select, topology, contextMenu, show, update, pointer, canvas, x, y, at, mouse, key };
   }
+  it('asks for a chain on double-click: a loop, a tangent chain with Alt, tangent faces on a face, and adds with Ctrl', async () => {
+    const chain = vi.fn(), h = await harness('auto', { onTopologyChain: chain });
+    const face = { bodyId: 'body', pick: { kind: 'face', key: 'face' } }, edge = { bodyId: 'body', pick: { kind: 'edge', key: 'edge' } };
+    await h.mouse('dblclick', h.at(2, 2));
+    expect(chain).toHaveBeenLastCalledWith(face, 'loop', false, null);
+    await h.mouse('dblclick', h.at(2, 2), { ctrlKey: true });
+    expect(chain).toHaveBeenLastCalledWith(face, 'loop', true, null);
+    // On an edge the face under the pointer is named for the loop, when there is one.
+    await h.mouse('dblclick', h.at(5, .05), { altKey: true });
+    expect(chain).toHaveBeenLastCalledWith(edge, 'tangent', false, 'face');
+    await h.mouse('dblclick', h.at(5, .05));
+    expect(chain).toHaveBeenLastCalledWith(edge, 'loop', false, 'face');
+    // Nothing under the pointer, a locked view or body picking asks for nothing.
+    const calls = chain.mock.calls.length;
+    await h.mouse('dblclick', h.at(40, 40)); await h.show(true); await h.mouse('dblclick', h.at(2, 2));
+    expect(chain).toHaveBeenCalledTimes(calls);
+    const body = await harness('body', { onTopologyChain: chain }); await body.mouse('dblclick', body.at(2, 2));
+    expect(chain).toHaveBeenCalledTimes(calls); expect(h.topology).not.toHaveBeenCalled();
+  });
+  it('steps Select other with N through the edge and the face under the pointer, and back with Shift + N', async () => {
+    const set = vi.fn(), h = await harness('auto', { onTopologySet: set });
+    const selection = (key: 'edge' | 'face') => ({ documentVersion: 'v1', buildId: 'b1', bodyId: 'body', picks: [{ kind: key, key }] });
+    // Without a pointer over the view, N does nothing.
+    await h.key('n'); expect(set).not.toHaveBeenCalled();
+    await h.mouse('pointermove', h.at(5, .05));
+    await h.key('n'); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'edge', key: 'edge' }]);
+    await h.update({ topologySelection: selection('edge') });
+    await h.key('n'); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'face', key: 'face' }]);
+    await h.update({ topologySelection: selection('face') });
+    await h.key('n'); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'edge', key: 'edge' }]);
+    await h.key('N', true); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'edge', key: 'edge' }]);
+    // The filter limits the candidates as it limits clicks: with edges off only the face is left.
+    await h.update({ selectionFilter: { excluded: ['edge'] }, topologySelection: null });
+    await h.key('n'); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'face', key: 'face' }]);
+    expect(set).toHaveBeenCalledTimes(5);
+    // Right-click offers the same step when more than one candidate is under the pointer.
+    await h.update({ selectionFilter: undefined });
+    await h.pointer('pointerdown', 1, h.at(5, .05).dx, h.at(5, .05).dy, 'mouse', 2); await h.pointer('pointerup', 1, h.at(5, .05).dx, h.at(5, .05).dy, 'mouse', 2);
+    const request = h.contextMenu.mock.lastCall?.[0];
+    expect(request).toMatchObject({ target: { kind: 'topology', hit: { pick: { kind: 'edge' } } } });
+    act(() => request.selectOther()); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'edge', key: 'edge' }]);
+    expect(h.select).not.toHaveBeenCalled(); expect(h.topology).not.toHaveBeenCalled();
+  });
+  it('offers Select other on right-click over a datum plane that crosses a face', async () => {
+    // A plane standing on the line y = 2, seen edge on from the top, runs through the face under the pointer.
+    const references = prepareCadViewportReferences([{ id: 'mount', name: 'Mount', kind: 'datum-plane', suppressed: false, definition: { kind: 'world', basePlane: 'XZ', origin: [0, 2, 0], rotation: [0, 0, 0] } }], {});
+    const set = vi.fn(), plane = vi.fn(), h = await harness('auto', { onTopologySet: set, onSelectPlane: plane, references, referenceVersion: 'v1' });
+    const { dx, dy } = h.at(2, 2);
+    await h.pointer('pointerdown', 1, dx, dy, 'mouse', 2); await h.pointer('pointerup', 1, dx, dy, 'mouse', 2);
+    const request = h.contextMenu.mock.lastCall?.[0];
+    expect(request).toMatchObject({ target: { kind: 'feature', featureId: 'mount' } }); expect(request.selectOther).toBeTypeOf('function');
+    act(() => request.selectOther());
+    expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'face', key: 'face' }]); expect(plane).not.toHaveBeenCalled();
+  });
+  it('draws a window solid and a crossing dashed, and takes edges when the filter leaves bodies out', async () => {
+    const set = vi.fn(), h = await harness('auto', { onTopologySet: set }); const overlay = () => container.querySelector<HTMLElement>('.cad-box-select');
+    const drag = async (from: { dx: number; dy: number }, to: { dx: number; dy: number }) => {
+      await h.mouse('pointerdown', from, { shiftKey: true, buttons: 1 }); await h.mouse('pointermove', to, { shiftKey: true, buttons: 1 });
+      const crossing = overlay()?.classList.contains('is-crossing'); await h.mouse('pointerup', to, { shiftKey: true }); return crossing;
+    };
+    // Rightward around the whole triangle: a window, which takes the body.
+    expect(await drag(h.at(-2, 12), h.at(12, -2))).toBe(false); expect(h.select).toHaveBeenLastCalledWith('body');
+    // Leftward over only part of it: a crossing, which takes the body it touches; drawn rightward the same box holds nothing.
+    expect(await drag(h.at(4, 4), h.at(-2, -2))).toBe(true); expect(h.select).toHaveBeenLastCalledWith('body');
+    expect(await drag(h.at(-2, 4), h.at(4, -2))).toBe(false); expect(h.select).toHaveBeenLastCalledWith(null);
+    await h.update({ selectionFilter: { excluded: ['body'] } });
+    expect(await drag(h.at(-2, 12), h.at(12, -2))).toBe(false); expect(set).toHaveBeenLastCalledWith('body', [{ kind: 'edge', key: 'edge' }]);
+    expect(h.topology).not.toHaveBeenCalled();
+  });
+  it('clears edge picks through the click operation when an edge box takes no edge, for a window and a crossing', async () => {
+    const set = vi.fn(), h = await harness('edge', { onTopologySet: set });
+    const drag = async (from: { dx: number; dy: number }, to: { dx: number; dy: number }) => {
+      await h.mouse('pointerdown', from, { shiftKey: true, buttons: 1 }); await h.mouse('pointermove', to, { shiftKey: true, buttons: 1 });
+      await h.mouse('pointerup', to, { shiftKey: true });
+    };
+    // A window and a crossing away from the triangle each clear, as a click on empty space does, so a chain still being read is dropped.
+    await drag(h.at(20, 20), h.at(30, 10)); expect(h.topology).toHaveBeenCalledExactlyOnceWith(null, false);
+    await drag(h.at(30, 20), h.at(20, 10)); expect(h.topology).toHaveBeenCalledTimes(2); expect(h.topology).toHaveBeenLastCalledWith(null, false);
+    expect(set).not.toHaveBeenCalled();
+    // A box round the triangle sets its edge instead, and an edge box never selects a body.
+    await drag(h.at(-2, 12), h.at(12, -2)); expect(set).toHaveBeenCalledExactlyOnceWith('body', [{ kind: 'edge', key: 'edge' }]);
+    expect(h.topology).toHaveBeenCalledTimes(2); expect(h.select).not.toHaveBeenCalled();
+  });
   it('requires the initiating pointer to complete a pick without unrelated pointer-up cancelling its owner', async () => {
     const h = await harness();
     await h.pointer('pointerdown', 1, 0, 0, 'mouse'); await h.pointer('pointerup', 2, 0, 0, 'pen');

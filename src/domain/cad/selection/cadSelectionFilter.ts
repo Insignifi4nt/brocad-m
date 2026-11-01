@@ -1,11 +1,12 @@
 /**
  * Which kinds of geometry a pick may land on. The filter is display state kept with the device preferences. It records the kinds turned
- * off, so a kind added later starts selectable. The predicate knows nothing of the 3D view, so the sketch canvas can use the same one.
+ * off, so a kind added later starts selectable. One filter serves the part and its sketches: points cover sketch points and the origin,
+ * edges sketch edges as well as solid ones, and axes the sketch axes as well as the origin's; relations and dimensions are sketch marks.
  */
-export type CadSelectionKind = 'body' | 'face' | 'edge' | 'vertex' | 'plane' | 'axis' | 'point';
+export type CadSelectionKind = 'body' | 'face' | 'edge' | 'vertex' | 'plane' | 'axis' | 'point' | 'relation' | 'dimension';
 export interface CadSelectionFilter { readonly excluded: readonly CadSelectionKind[] }
 
-export const CAD_SELECTION_KINDS: readonly CadSelectionKind[] = Object.freeze(['body', 'face', 'edge', 'vertex', 'plane', 'axis', 'point']);
+export const CAD_SELECTION_KINDS: readonly CadSelectionKind[] = Object.freeze(['body', 'face', 'edge', 'vertex', 'plane', 'axis', 'point', 'relation', 'dimension']);
 /** Everything is selectable until the user turns a kind off. */
 export const CAD_DEFAULT_SELECTION_FILTER: CadSelectionFilter = Object.freeze({ excluded: Object.freeze([]) });
 

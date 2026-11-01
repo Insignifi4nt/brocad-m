@@ -13,4 +13,6 @@
 }
 .cad-depth-label[data-active='true'] { border-color: var(--primary); color: var(--primary); }
 .cad-depth-label[data-locked='true'] { color: var(--muted-foreground); }
-.cad-box-select { position: absolute; z-index: 2; border: 1px dashed var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); pointer-events: none; }
+/* A window box, dragged rightward, is drawn solid; a crossing box, dragged leftward, dashed, as in the sketch. */
+.cad-box-select { position: absolute; z-index: 2; border: 1px solid var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); pointer-events: none; }
+.cad-box-select.is-crossing { border-style: dashed; }

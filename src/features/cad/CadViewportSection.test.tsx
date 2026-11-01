@@ -7,7 +7,7 @@ import { cadPrincipalFrame, type CadResolvedFrame } from '@/domain/cad/cadDatumP
 import { CadViewport, type CadViewportSection } from './CadViewport';
 import type { CadRenderedViewControls } from './cadViewportControls';
 import { cadOriginReferences, prepareCadViewportReferences, type CadViewportReference } from './cadViewportReferences';
-import type { CadSelectionFilter } from './view/cadSelectionFilter';
+import type { CadSelectionFilter } from '@/domain/cad/selection/cadSelectionFilter';
 
 const renderers = vi.hoisted((): { domElement: HTMLCanvasElement; render: ReturnType<typeof vi.fn<(scene: Scene, camera: Camera) => void>> }[] => []);
 vi.mock('@/features/editor/captureEditorPreview', () => ({ captureCanvas: vi.fn(() => ({ dataUrl: 'data:image/png;base64,AA==', width: 800, height: 600, source: '3d' })) }));
@@ -153,6 +153,29 @@ describe('section view', () => {
     // A plane above both keeps nothing in front of the camera except what lies below it.
     await show({ section: section(false, true, 0) }); await click(target); expect(handlers.onSelect).not.toHaveBeenLastCalledWith('upper');
     expect(handlers.onSelect).not.toHaveBeenLastCalledWith('lower');
+  });
+
+  it('lets a box take only what the section keeps, by crossing or by window', async () => {
+    // The tall box from z 0 to 8, cut at z 4 and seen from the front, keeps its lower half.
+    await show({ meshes: [box('tall', 0, 8)], section: section(), pickMode: 'auto' });
+    await act(async () => currentControls().setView?.('Front'));
+    const { camera } = await drawn(), canvas = renderer().domElement;
+    canvas.setPointerCapture = vi.fn(); canvas.releasePointerCapture = vi.fn();
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, right: 800, bottom: 600, width: 800, height: 600, x: 0, y: 0, toJSON: () => ({}) });
+    const screen = (x: number, z: number) => { const point = new Vector3(x, 0, z).project(camera); return { clientX: (point.x + 1) * 400, clientY: (1 - point.y) * 300 }; };
+    const drag = async (from: [number, number], to: [number, number]) => act(async () => {
+      for (const [type, at] of [['pointerdown', from], ['pointermove', to], ['pointerup', to]] as const) {
+        const event = new MouseEvent(type, { bubbles: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, shiftKey: true, ...screen(...at) });
+        Object.defineProperties(event, { pointerId: { value: 1 }, pointerType: { value: 'mouse' }, isPrimary: { value: true } });
+        canvas.dispatchEvent(event);
+      }
+    });
+    // Leftward, wholly over the removed half: nothing drawn is touched. Over the kept half it takes the body.
+    await drag([12, 7], [-2, 6]); expect(handlers.onSelect).toHaveBeenLastCalledWith(null);
+    await drag([12, 2], [-2, 1]); expect(handlers.onSelect).toHaveBeenLastCalledWith('tall');
+    // Rightward around the kept half only: a window that holds all that is drawn.
+    handlers.onSelect.mockClear();
+    await drag([-2, 4.5], [12, -0.5]); expect(handlers.onSelect).toHaveBeenLastCalledWith('tall');
   });
 
   it('never picks an outline the section removes from just beside the cut, and still picks a kept one from just past it', async () => {

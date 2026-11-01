@@ -7,12 +7,15 @@ import { CadViewTools } from './CadCommandDock';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import type { CadMesh, CadPlane, CadSketchPlane } from '@/domain/cad/cadDocument';
-import type { CadTopologyPickSet } from '@/domain/cad/cadTopology';
+import type { CadTopologyPick, CadTopologyPickSet } from '@/domain/cad/cadTopology';
+import { cadBoxModeFor } from '@/domain/cad/selection/cadSelectionBox';
+import { cadSelectOtherApply, cadSelectOtherStep } from '@/domain/cad/selection/cadSelectionCycle';
+import type { CadTopologyChainGesture } from '@/domain/cad/selection/cadTopologySelection';
 import { captureCanvas } from '@/features/editor/captureEditorPreview';
 import { ToolError } from '@/features/webmcp/siteTools';
 import type { CadNamedView, CadRenderedViewControls } from './cadViewportControls';
-import { pickTopology, topologyGroupAt, type CadPickMode, type CadTopologyHit } from './cadTopologyPicking';
-import { cadBoxSelectedBody, cadProjectedBounds, cadScreenBox } from './cadBoxSelection';
+import { pickTopology, topologyCandidates, topologyGroupAt, type CadPickMode, type CadTopologyHit } from './cadTopologyPicking';
+import { cadBoxSelection, cadScreenBox } from './cadBoxSelection';
 import { createCadTopologyHighlights } from './cadTopologyHighlights';
 import { pickCadCurveReference } from './cadCurveRendering';
 import { cadReferenceFeatureIds, cadReferencePlanes, cadSameReferencePlane, isCadContourReference, isCadOriginMarker, type CadViewportReference } from './cadViewportReferences';
@@ -31,7 +34,7 @@ import { CAD_SKETCH_DIM_AMOUNT, createCadBackgroundDim } from './view/cadSketchB
 import type { CadResolvedFrame } from '@/domain/cad/cadDatumPlanes';
 import { cadBoundsClipped, cadClipRaycaster, cadSectionClipPlane } from './view/cadSectionView';
 import { cadCapBodySolids, createCadSectionCaps } from './view/cadSectionCaps';
-import { CAD_DEFAULT_SELECTION_FILTER, cadSelectionAccepts, type CadSelectionFilter, type CadSelectionKind } from './view/cadSelectionFilter';
+import { CAD_DEFAULT_SELECTION_FILTER, cadSelectionAccepts, type CadSelectionFilter, type CadSelectionKind } from '@/domain/cad/selection/cadSelectionFilter';
 import type { CadOriginSelection } from './view/cadReferenceSelection';
 const NO_REFERENCES: readonly CadViewportReference[] = Object.freeze([]);
 const NO_SOURCE_PICK_IDS: readonly string[] = Object.freeze([]);
@@ -49,8 +52,18 @@ export interface CadViewportContextMenuRequest {
   readonly clientX: number;
   readonly clientY: number;
   readonly trigger: 'pointer' | 'keyboard';
-  readonly target: { readonly kind: 'feature'; readonly featureId: string } | { readonly kind: 'topology'; readonly hit: CadTopologyHit } | null;
+  /** A topology target names the face under the pointer too, which the loop through an edge follows. */
+  readonly target: { readonly kind: 'feature'; readonly featureId: string } | { readonly kind: 'topology'; readonly hit: CadTopologyHit; readonly faceKey?: string | null } | null;
+  /** Selects the next of the candidates under the pointer when there is more than one, as N does. */
+  readonly selectOther?: () => void;
 }
+/** One of the candidates Select other steps through. */
+type CadViewportOther = { readonly kind: 'topology'; readonly hit: CadTopologyHit } | { readonly kind: 'plane'; readonly key: string; readonly plane: CadSketchPlane }
+  | { readonly kind: 'body'; readonly featureId: string };
+const samePick = (a: CadTopologyPick, b: CadTopologyPick) => a.kind === b.kind && a.key === b.key;
+const sameOther = (a: CadViewportOther, b: CadViewportOther) => a.kind === 'topology' ? b.kind === 'topology' && a.hit.bodyId === b.hit.bodyId && samePick(a.hit.pick, b.hit.pick)
+  : a.kind === 'plane' ? b.kind === 'plane' && a.key === b.key : b.kind === 'body' && a.featureId === b.featureId;
+const planeKey = (plane: CadSketchPlane) => typeof plane === 'string' ? plane : `datum:${plane.featureId}`;
 
 /**
  * The model drawn behind an open sketch. The sketch canvas lies on top and owns every pointer and key; this view only draws, through a camera
@@ -76,7 +89,7 @@ export interface CadViewportSection {
 export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersion = null, selectedId, onSelect, onControlsReady, interactionLocked = false,
   navigationLocked = interactionLocked, navigationMode = 'mouse', onContextMenu, pickMode = 'body', topologySelection = null, onTopologyPick, pickingEnabled = true, getFitArea,
   selectedReferencePlane = null, hoveredReferencePlane = null, onSelectPlane, onHoverPlane, planePickingOnly = false, sourceReferencePickIds = NO_SOURCE_PICK_IDS, regionSelection = null, depthControl = null, busyInputLocked = false, hidden = false, sketchView = null,
-  section = null, selectionFilter = CAD_DEFAULT_SELECTION_FILTER, selectedOrigin = null, onSelectOrigin, viewControls }: {
+  section = null, selectionFilter = CAD_DEFAULT_SELECTION_FILTER, selectedOrigin = null, onSelectOrigin, viewControls, onTopologyChain, onTopologySet }: {
   meshes: readonly CadMesh[];
   references?: readonly CadViewportReference[];
   referenceVersion?: string | null;
@@ -120,6 +133,13 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
   onSelectOrigin?(selection: CadOriginSelection): void;
   /** Part view controls the workbench owns, shown with the navigation controls. */
   viewControls?: ReactNode;
+  /**
+   * A double-click on topology asks for its chain: the loop through an edge on `faceKey`, the face under the pointer, or with Alt its tangent
+   * chain; a face asks for its tangent faces. Ctrl, Cmd or Shift adds the chain to the selection.
+   */
+  onTopologyChain?(hit: CadTopologyHit, gesture: CadTopologyChainGesture, additive: boolean, faceKey: string | null): void;
+  /** Replaces the topology selection with these edges or faces of one body, as a box or Select other chooses them. */
+  onTopologySet?(bodyId: string, picks: readonly CadTopologyPick[]): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const planeLabels = useRef<HTMLDivElement>(null);
@@ -141,8 +161,8 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
   const sourceInteraction = ownedRegions?.sketchId ?? sourceReferenceIds;
   const meshInteraction = ownedRegions?.cells ?? meshes;
   const referenceVersionInteraction = ownedRegions?.expectedVersion ?? referenceVersion;
-  const data = useRef({ meshes, references, referenceVersion, selectedId, onSelect, pickMode, topologySelection, onTopologyPick, interactionLocked, navigationLocked, navigationMode, onContextMenu, pickingEnabled, getFitArea, selectedReferencePlane, hoveredReferencePlane, onSelectPlane, onHoverPlane, planePickingOnly, sourceReferenceIds, regionSelection: ownedRegions, depthControl: ownedDepth, busyInputLocked, hidden, sketchView, section, selectionFilter, selectedOrigin, onSelectOrigin });
-  data.current = { meshes, references, referenceVersion, selectedId, onSelect, pickMode, topologySelection, onTopologyPick, interactionLocked, navigationLocked, navigationMode, onContextMenu, pickingEnabled, getFitArea, selectedReferencePlane, hoveredReferencePlane, onSelectPlane, onHoverPlane, planePickingOnly, sourceReferenceIds, regionSelection: ownedRegions, depthControl: ownedDepth, busyInputLocked, hidden, sketchView, section, selectionFilter, selectedOrigin, onSelectOrigin };
+  const data = useRef({ meshes, references, referenceVersion, selectedId, onSelect, pickMode, topologySelection, onTopologyPick, interactionLocked, navigationLocked, navigationMode, onContextMenu, pickingEnabled, getFitArea, selectedReferencePlane, hoveredReferencePlane, onSelectPlane, onHoverPlane, planePickingOnly, sourceReferenceIds, regionSelection: ownedRegions, depthControl: ownedDepth, busyInputLocked, hidden, sketchView, section, selectionFilter, selectedOrigin, onSelectOrigin, onTopologyChain, onTopologySet });
+  data.current = { meshes, references, referenceVersion, selectedId, onSelect, pickMode, topologySelection, onTopologyPick, interactionLocked, navigationLocked, navigationMode, onContextMenu, pickingEnabled, getFitArea, selectedReferencePlane, hoveredReferencePlane, onSelectPlane, onHoverPlane, planePickingOnly, sourceReferenceIds, regionSelection: ownedRegions, depthControl: ownedDepth, busyInputLocked, hidden, sketchView, section, selectionFilter, selectedOrigin, onSelectOrigin, onTopologyChain, onTopologySet };
   const present = useRef<((hidden: boolean, sketch: CadSketchBackgroundView | null) => void) | null>(null);
   const redraw = useRef<(() => void) | null>(null);
   const recolor = useRef<(() => void) | null>(null);
@@ -660,7 +680,7 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
     const raycaster = new THREE.Raycaster();
     let down: { pointerId: number; button: number; x: number; y: number; moved: boolean } | null = null;
     const activePointers = new Set<number>();
-    const setRay = (event: PointerEvent) => {
+    const setRay = (event: { readonly clientX: number; readonly clientY: number }) => {
       const rect = renderer.domElement.getBoundingClientRect();
       raycaster.setFromCamera(new THREE.Vector2((event.clientX - rect.left) / Math.max(1, rect.width) * 2 - 1, -(event.clientY - rect.top) / Math.max(1, rect.height) * 2 + 1), camera);
       clippedRay.ray.copy(raycaster.ray); clippedRay.camera = camera; cadClipRaycaster(clippedRay, pickClip());
@@ -720,6 +740,87 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
       const patches = [...installedReferences.values()].flatMap(entry => entry.patch && entry.reference.plane ? [entry.patch] : []);
       const hit = raycaster.intersectObjects([...planeLines, ...patches], false)[0];
       return hit ? installedReferences.get(hit.object.userData.referenceId)?.reference ?? null : null;
+    };
+    /** The face under the pointer, whatever the filter, which the loop through an edge follows. */
+    const faceUnder = () => pickTopology({ mode: 'face', raycaster: clippedRay, bodies: pickableBodies, edges: pickableEdges, meshByObject, camera, viewportHeight: container.clientHeight, clip: pickClip() });
+    /** Where the pointer last was over the view, kept so N can work there; nothing else is done on a move. */
+    let lastPointer: { clientX: number; clientY: number } | null = null;
+    /**
+     * The candidates under the ray for Select other, in a stable order: the topology the pick mode and filter allow, visible edges nearest the
+     * pointer and then faces by depth, those behind included; in body picking the bodies by depth; then the planes by depth.
+     */
+    const otherCandidates = (): CadViewportOther[] => {
+      const current = data.current;
+      if (current.regionSelection || current.sourceReferenceIds.size) return [];
+      const found: CadViewportOther[] = [];
+      const mode = current.planePickingOnly ? null : topologyMode();
+      if (mode && current.pickingEnabled) for (const hit of topologyCandidates({ mode, raycaster: clippedRay, bodies: pickableBodies, edges: pickableEdges, meshByObject, camera, viewportHeight: container.clientHeight, clip: pickClip() }))
+        found.push({ kind: 'topology', hit });
+      if (current.pickMode === 'body' && !current.planePickingOnly && current.pickingEnabled && accepts('body')) {
+        const seen = new Set<string>();
+        for (const hit of clippedRay.intersectObjects(pickableBodies, false)) {
+          const id: unknown = hit.object.userData.featureId;
+          if (typeof id === 'string' && !seen.has(id)) { seen.add(id); found.push({ kind: 'body', featureId: id }); }
+        }
+      }
+      if ((current.pickMode === 'auto' || current.pickMode === 'body') && accepts('plane')) {
+        const planeLines = pickableReferences.filter(line => installedReferences.get(line.userData.referenceId)?.reference.plane);
+        raycaster.params.Line.threshold = (camera.top - camera.bottom) / camera.zoom / Math.max(1, container.clientHeight) * 5;
+        const patches = [...installedReferences.values()].flatMap(entry => entry.patch && entry.reference.plane ? [entry.patch] : []);
+        const seen = new Set<string>();
+        for (const hit of raycaster.intersectObjects([...planeLines, ...patches], false)) {
+          const plane = installedReferences.get(hit.object.userData.referenceId)?.reference.plane;
+          if (!plane || seen.has(planeKey(plane))) continue;
+          seen.add(planeKey(plane)); found.push({ kind: 'plane', key: planeKey(plane), plane });
+        }
+      }
+      return found;
+    };
+    /** The selection as Select other sees it: the picked edges or faces, the selected plane and, in body picking, the selected body. */
+    const currentOthers = (): CadViewportOther[] => {
+      const current = data.current, selection = current.topologySelection;
+      return [...selection ? selection.picks.map(pick => ({ kind: 'topology' as const, hit: { bodyId: selection.bodyId, pick } })) : [],
+        ...current.selectedReferencePlane ? [{ kind: 'plane' as const, key: planeKey(current.selectedReferencePlane), plane: current.selectedReferencePlane }] : [],
+        ...current.pickMode === 'body' && current.selectedId ? [{ kind: 'body' as const, featureId: current.selectedId }] : []];
+    };
+    /**
+     * Select other: the next candidate takes the place of the selected one. Within edges or faces of one body it swaps in place and the rest
+     * stay selected; otherwise it is selected alone. Shift goes back.
+     */
+    const stepOther = (candidates: readonly CadViewportOther[], direction: 1 | -1) => {
+      const current = data.current, step = cadSelectOtherStep(candidates, currentOthers(), sameOther, direction);
+      if (!step || current.interactionLocked || current.busyInputLocked) return false;
+      const candidate = step.candidate, replaces = step.replaces, selection = current.topologySelection;
+      if (candidate.kind === 'topology') {
+        const swap = replaces?.kind === 'topology' && selection?.bodyId === candidate.hit.bodyId && selection.picks.every(pick => pick.kind === candidate.hit.pick.kind);
+        const picks = swap ? cadSelectOtherApply(selection.picks, { candidate: candidate.hit.pick, index: step.index, replaces: replaces.hit.pick }, samePick) : [candidate.hit.pick];
+        if (current.onTopologySet) current.onTopologySet(candidate.hit.bodyId, picks); else current.onTopologyPick?.(candidate.hit, false);
+      } else if (candidate.kind === 'plane') current.onSelectPlane?.(candidate.plane);
+      else current.onSelect(candidate.featureId);
+      return true;
+    };
+    const selectOtherKey = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== 'n' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.defaultPrevented) return;
+      const current = data.current, at = lastPointer;
+      if (!at || current.hidden || current.busyInputLocked || current.interactionLocked || depthPointer !== null || box || renderer.getContext().isContextLost()) return;
+      setRay(at);
+      if (stepOther(otherCandidates(), event.shiftKey ? -1 : 1)) { event.preventDefault(); event.stopPropagation(); }
+    };
+    /**
+     * A double-click on an edge selects its loop on the face under the pointer, and with Alt its tangent chain; on a face, its tangent faces.
+     * Ctrl, Cmd or Shift adds to the selection. This follows the loop and tangency selections of SOLIDWORKS and Fusion.
+     */
+    const doubleClick = (event: MouseEvent) => {
+      const current = data.current;
+      if (event.button !== 0 || !current.onTopologyChain || current.hidden || current.busyInputLocked || current.interactionLocked || !current.pickingEnabled || current.planePickingOnly
+        || current.regionSelection || current.sourceReferenceIds.size || current.pickMode === 'body' || depthPointer !== null || box || renderer.getContext().isContextLost()) return;
+      setRay(event);
+      if (current.pickMode === 'auto' && (hitFeature(false) || hitOrigin())) return;
+      const hit = hitTopology();
+      if (!hit) return;
+      const face = hit.pick.kind === 'edge' ? faceUnder() : null;
+      event.preventDefault();
+      current.onTopologyChain(hit, event.altKey ? 'tangent' : 'loop', event.ctrlKey || event.metaKey || event.shiftKey, face?.bodyId === hit.bodyId ? face.pick.key : null);
     };
     const pointerDown = (event: PointerEvent) => {
       if (data.current.busyInputLocked) return;
@@ -797,13 +898,15 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
       if (event.pointerId === depthPointer && event.button === 0) depth.release(event.pointerId);
       event.preventDefault(); event.stopImmediatePropagation();
     };
-    // Shift + left drag draws a selection box instead of panning. It selects the body that fits wholly inside it.
+    // Shift + left drag draws a selection box instead of panning: dragged rightward a window, taking what lies wholly inside, and leftward a
+    // crossing, taking what it touches, as in CATIA, SOLIDWORKS and AutoCAD. It takes a body, else edges, else faces, as the filter allows.
     let box: { pointerId: number; start: { x: number; y: number }; end: { x: number; y: number } } | null = null;
     const drawBox = () => {
       const overlay = boxOverlay.current;
       if (!overlay) return;
       const rectangle = box && Math.hypot(box.end.x - box.start.x, box.end.y - box.start.y) > 4 ? cadScreenBox(box.start, box.end) : null;
       overlay.hidden = !rectangle;
+      overlay.classList.toggle('is-crossing', Boolean(box && rectangle && cadBoxModeFor(box.start, box.end) === 'crossing'));
       if (rectangle) Object.assign(overlay.style, { left: `${rectangle.left}px`, top: `${rectangle.top}px`, width: `${rectangle.right - rectangle.left}px`, height: `${rectangle.bottom - rectangle.top}px` });
     };
     const endBox = () => {
@@ -813,7 +916,7 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
     const boxPointerDown = (event: PointerEvent) => {
       if (box) { event.preventDefault(); event.stopImmediatePropagation(); return; }
       const current = data.current;
-      if (!event.shiftKey || event.button !== 0 || event.isPrimary === false || current.pickMode !== 'auto' || current.busyInputLocked || current.interactionLocked || current.navigationLocked || current.planePickingOnly
+      if (!event.shiftKey || event.button !== 0 || event.isPrimary === false || current.pickMode !== 'auto' && current.pickMode !== 'edge' || current.busyInputLocked || current.interactionLocked || current.navigationLocked || current.planePickingOnly
         || current.regionSelection || depthPointer !== null || facePress || !current.pickingEnabled || renderer.getContext().isContextLost()) return;
       const start = localPixel(event);
       box = { pointerId: event.pointerId, start, end: start };
@@ -837,7 +940,7 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
       if (Math.hypot(end.x - start.x, end.y - start.y) <= 4) {
         // A Shift click without a drag stays an ordinary pick.
         setRay(event);
-        const id = hitFeature(false), origin = id ? null : hitOrigin(), hit = id || origin ? null : hitTopology();
+        const auto = data.current.pickMode === 'auto', id = auto ? hitFeature(false) : null, origin = id || !auto ? null : hitOrigin(), hit = id || origin ? null : hitTopology();
         if (id) data.current.onSelect(id);
         else if (origin) selectOrigin(origin);
         else if (hit) data.current.onTopologyPick?.(hit, true);
@@ -849,14 +952,20 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
         point.set(x, y, z).project(camera);
         return point.z < -1 || point.z > 1 ? null : { x: (point.x + 1) / 2 * width, y: (1 - point.y) / 2 * height };
       };
-      // A body the section removes entirely is not drawn, so the box cannot choose it.
-      const clip = pickClip();
-      const bodies = accepts('body') ? pickableBodies.filter(body => body.visible && !cadBoundsClipped(meshByObject.get(body)?.bounds ?? { min: [0, 0, 0], max: [0, 0, 0] }, clip))
-        .map(body => ({ featureId: String(body.userData.featureId), bounds: cadProjectedBounds(meshByObject.get(body)?.positions ?? [], project) })) : [];
-      const selected = cadBoxSelectedBody(cadScreenBox(start, end), bodies);
-      data.current.onSelect(selected);
+      // A body the section removes entirely is not drawn, so the box cannot choose it, and of the rest only the kept side counts, for a
+      // window as for a crossing. A command's edge pick takes edges whatever the filter.
+      const clip = pickClip(), auto = data.current.pickMode === 'auto';
+      const bodies = pickableBodies.flatMap(body => { const mesh = meshByObject.get(body); return body.visible && mesh && !cadBoundsClipped(mesh.bounds, clip) ? [mesh] : []; });
+      const target = cadBoxSelection({ rect: cadScreenBox(start, end), mode: cadBoxModeFor(start, end), bodies, project, clip,
+        kinds: { body: auto && accepts('body'), edge: !auto || accepts('edge'), face: auto && accepts('face') } });
+      if (target?.kind === 'topology') { if (data.current.onTopologySet) data.current.onTopologySet(target.bodyId, target.picks); }
+      else if (auto) data.current.onSelect(target?.featureId ?? null);
+      // An empty box in edge or face picking clears the picks through the same operation as a click on empty space, so a chain still being
+      // read is dropped too.
+      else data.current.onTopologyPick?.(null, false);
     };
     const pointerMove = (event: PointerEvent) => {
+      lastPointer = { clientX: event.clientX, clientY: event.clientY };
       if (data.current.busyInputLocked) return;
       if (down && down.pointerId === event.pointerId && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 4) down.moved = true;
       if (down || event.buttons || data.current.interactionLocked && !data.current.depthControl || !data.current.pickingEnabled && data.current.pickMode !== 'body' && data.current.pickMode !== 'auto') { setHover(null); setFeatureHover(null); return; }
@@ -879,7 +988,7 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
       }
     };
     const cancelAllPointers = () => cancelPointerInteraction(false, data.current.busyInputLocked && preserveIdleHover.current);
-    const pointerLeave = () => { if (depthPointer !== null && renderer.domElement.hasPointerCapture?.(depthPointer) || box && renderer.domElement.hasPointerCapture?.(box.pointerId)) return; cancelAllPointers(); depth.hover(null); };
+    const pointerLeave = () => { lastPointer = null; if (depthPointer !== null && renderer.domElement.hasPointerCapture?.(depthPointer) || box && renderer.domElement.hasPointerCapture?.(box.pointerId)) return; cancelAllPointers(); depth.hover(null); };
     const ownsPointer = (pointerId: number) => activePointers.has(pointerId) || depthPointer === pointerId || box?.pointerId === pointerId || facePress?.pointerId === pointerId;
     const pointerCancel = (event: PointerEvent) => { if (ownsPointer(event.pointerId)) cancelPointerInteraction(); };
     const lostPointerCapture = (event: PointerEvent) => { if (ownsPointer(event.pointerId)) cancelPointerInteraction(); };
@@ -905,7 +1014,11 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
         const auto = data.current.pickMode === 'auto', feature = auto ? hitFeature(false) : null;
         const hit = data.current.pickingEnabled && !feature ? hitTopology() : null;
         const id = feature ?? (data.current.pickMode === 'body' || auto && !hit ? hitFeature() : null);
-        data.current.onContextMenu?.({ clientX: event.clientX, clientY: event.clientY, trigger: 'pointer', target: hit ? { kind: 'topology', hit } : id ? { kind: 'feature', featureId: id } : null });
+        // Select other is offered over a plane or outline as well, whenever more than one candidate lies under the pointer.
+        const face = hit?.pick.kind === 'edge' ? faceUnder() : null, others = otherCandidates();
+        data.current.onContextMenu?.({ clientX: event.clientX, clientY: event.clientY, trigger: 'pointer',
+          target: hit ? { kind: 'topology', hit, ...face ? { faceKey: face.bodyId === hit.bodyId ? face.pick.key : null } : {} } : id ? { kind: 'feature', featureId: id } : null,
+          ...(others.length > 1 ? { selectOther: () => { stepOther(others, 1); } } : {}) });
         return;
       }
       if (data.current.pickMode === 'auto' && !data.current.planePickingOnly && data.current.pickingEnabled) {
@@ -1020,6 +1133,8 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
     renderer.domElement.addEventListener('lostpointercapture', lostPointerCapture);
     renderer.domElement.addEventListener('contextmenu', nativeContextMenu);
     renderer.domElement.addEventListener('keydown', keyboardContextMenu);
+    renderer.domElement.addEventListener('keydown', selectOtherKey);
+    renderer.domElement.addEventListener('dblclick', doubleClick);
     renderer.domElement.addEventListener('wheel', wheelNavigation, { capture: true, passive: false });
     window.addEventListener('blur', cancelAllPointers);
     const observer = new ResizeObserver(resize);
@@ -1154,6 +1269,8 @@ export function CadViewport({ meshes, references = NO_REFERENCES, referenceVersi
       renderer.domElement.removeEventListener('lostpointercapture', lostPointerCapture);
       renderer.domElement.removeEventListener('contextmenu', nativeContextMenu);
       renderer.domElement.removeEventListener('keydown', keyboardContextMenu);
+      renderer.domElement.removeEventListener('keydown', selectOtherKey);
+      renderer.domElement.removeEventListener('dblclick', doubleClick);
       renderer.domElement.removeEventListener('wheel', wheelNavigation, true);
       window.removeEventListener('blur', cancelAllPointers);
       renderer.domElement.removeEventListener('webglcontextlost', contextLost);

@@ -13,6 +13,7 @@
     "icons:review": "node scripts/render-icon-review.mjs && node scripts/audit-icon-review-coverage.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:bundle": "npm run icons:build && vite build && npm run postbuild",
     "preview": "vite preview",
     "test": "vitest",
     "ui:check": "tsx scripts/check-ui-controls.ts",

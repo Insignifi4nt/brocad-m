@@ -28,8 +28,9 @@ test('slides a bore on an angled guide, locates it and follows guide edits throu
   await expect.poll(async()=>{const p=await position();return Math.abs(p[1]-p[0]/2);}).toBeLessThan(1e-9);
   const moved=await position();expect(moved[0]).toBeGreaterThan(25);
   // The center's distance from the V axis comes from the Dimension tool on the point and the axis, then its value is typed at the dimension.
-  const canvas=page.getByLabel('Sketch drawing canvas');
-  await pick('point','center');await page.locator('[data-cad-sketch-fixed="@v"]').press('Shift+Enter');await relationOffer(page,'Dimension the selection').click();
+  // The released drag shows its position at once but locks the canvas until the draft takes its edit; the V axis is a button again then.
+  const canvas=page.getByLabel('Sketch drawing canvas'),vAxis=page.getByRole('button',{name:'Select the V axis',exact:true});await expect(vAxis).toBeVisible();
+  await pick('point','center');await vAxis.press('Shift+Enter');await expect(vAxis).toHaveAttribute('aria-pressed','true');await relationOffer(page,'Dimension the selection').click();
   await expect(canvas).toHaveAccessibleDescription(/Click or press Enter to place/);await canvas.press('Enter');
   await openRelationsList(page);const distance=relationRow(page,'Distance relation 2');await expect(distance).toHaveCount(1);await canvas.press('Escape');
   await distance.dblclick();await page.getByRole('textbox',{name:'Distance mm',exact:true}).fill('30');await apply();

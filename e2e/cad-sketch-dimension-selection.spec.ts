@@ -156,9 +156,15 @@ test('leaves every pointer action on a point or an edge under a dimension line o
   await clear();
 
   // Geometry a filter leaves out still keeps the press from the dimension, so the press there begins a box, as anywhere off the selectable geometry.
-  const filter = async (value: string) => {
+  // The filter keeps points, edges or both; each row toggles one kind.
+  const filter = async (value: 'points' | 'edges' | 'auto') => {
     const view = page.getByRole('button', { name: 'View controls', exact: true });
-    await view.click(); await page.getByRole('combobox', { name: 'Sketch selection filter', exact: true }).selectOption(value); await view.click();
+    for (const [row, wanted] of [['Points', value !== 'edges'], ['Edges', value !== 'points']] as const) {
+      await view.click(); await page.getByRole('button', { name: 'Filter', exact: true }).click();
+      const item = page.getByRole('menuitemcheckbox', { name: row, exact: true });
+      if ((await item.getAttribute('aria-checked') === 'true') !== wanted) await item.click(); else await page.keyboard.press('Escape');
+      if (await page.getByRole('group', { name: 'Sketch controls' }).isVisible()) await view.click();
+    }
   };
   await filter('points');
   await drag(tip, { x: centre.x - 30, y: centre.y + 30 }); await expect(page.locator('.cad-sketch-selection-box')).toHaveCount(1);
