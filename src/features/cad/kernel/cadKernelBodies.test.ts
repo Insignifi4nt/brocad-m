@@ -12,6 +12,7 @@ import { buildCadKernelModel, type CadKernelModel } from './cadKernelModel';
 import { isCadKernelReply } from './cadKernelProtocol';
 import { cadKernelDisposeShape, cadKernelSolids } from './cadKernelShapes';
 import { cadKernelParityModels } from './__tests__/cadKernelParity';
+import { cadBodyKeyVariants } from '../../../domain/cad/__tests__/cadBodyKeyVariants';
 
 beforeAll(async () => {
   const wasmBinary = await readFile(new URL('../../../../node_modules/replicad-opencascadejs/dist/replicad_single.wasm', import.meta.url));
@@ -34,6 +35,8 @@ const pocket = (id: string, x: number, y: number, targetId: string): CadFeature[
 /** A rod cleaved through its axis: neither half keeps a face of the rod, so the kernel might list them in another order. */
 const rod = (id = 'rod') => [sketch(`${id}_sketch`, { kind: 'circle', x: 0, y: 0, radius: 10 }), pad(id, `${id}_sketch`, 20), sketch('cleave_sketch', rect(-1, -15, 2, 30)), pad('cleave', 'cleave_sketch', 20, 'cut', id)];
 const row = (sourceId: string, count: number, spacing: number): CadFeature => ({ ...base('row'), kind: 'linear-pattern', sourceId, count, spacing: [spacing, 0, 0] });
+/** A pattern of one copy of `sourceId`'s solids, `spacing` away. */
+const twice = (id: string, sourceId: string, spacing: readonly [number, number, number]): CadFeature => ({ ...base(id), kind: 'linear-pattern', sourceId, count: 2, spacing });
 const document = (features: readonly CadFeature[]): CadDocument => parseCadDocument({ ...createCadDocument('Bodies'), features });
 
 function built<T>(features: readonly CadFeature[], read: (model: CadKernelModel, parsed: CadDocument) => T): T {
@@ -132,9 +135,9 @@ function sameShapes(a: readonly (readonly number[])[], b: readonly (readonly num
   return a.length === b.length && a.every(shape => { const at = left.findIndex(other => sameShape(shape, other)); return at >= 0 && left.splice(at, 1).length > 0; });
 }
 /**
- * Checks that two builds of one history, whose Booleans listed solids in opposite orders, agree: the same bodies, solid counts and issues,
- * every key either build lists resolving the same way in both, a certain key naming the same solid and an ambiguous key standing for the
- * same solids.
+ * Checks that two builds of one history, whose Booleans listed solids in different orders, agree: the same bodies, solid counts and issues,
+ * and every key either build lists, or formed from one by changing the indices of its split steps, resolving the same way in both: a
+ * certain key naming the same solid, an ambiguous key standing for the same solids and a missing key missing in both.
  * Returns whether the order changed the solid of some ambiguous key, as it should somewhere for the check to mean anything.
  */
 function agreeInEitherOrder(normal: Bodies, reordered: Bodies, label: string): boolean {
@@ -143,7 +146,8 @@ function agreeInEitherOrder(normal: Bodies, reordered: Bodies, label: string): b
   const issues = (built: Bodies) => built.issues.map(issue => `${issue.code} ${issue.featureId} ${issue.body} ${issue.pieces.length}`).sort();
   expect(issues(reordered), label).toEqual(issues(normal));
   let renumbered = false;
-  for (const key of new Set([normal, reordered].flatMap(built => built.bodies.flatMap(body => [body.key, ...body.pieces ?? [], ...body.ambiguous?.flat() ?? []])))) {
+  const listed = [normal, reordered].flatMap(built => built.bodies.flatMap(body => [body.key, ...body.pieces ?? [], ...body.ambiguous?.flat() ?? [], ...body.interchangeable?.flat() ?? []]));
+  for (const key of cadBodyKeyVariants(listed)) {
     const [a, b] = [resolveIn(normal, key), resolveIn(reordered, key)];
     expect(a.status, `${label}: ${key} resolves as ${a.status} in one solid order and ${b.status} in the other`).toBe(b.status);
     if (a.status === 'missing' || b.status === 'missing') continue;
@@ -398,9 +402,8 @@ describe('kernel body parts are inherited only when continuity is certain', () =
   it('resolves a key another order would have given only among what its own operations made, whichever order each operation lists', () => {
     // As above, then a pattern copies the three pieces 100 along X, a join bridges the originals into one solid, and a second pattern copies
     // everything 50 along Y. Both patterns give inst(1,0) steps, so the bridge's copy has the steps a split half's first copy would have had.
-    const pattern = (id: string, sourceId: string, spacing: readonly [number, number, number]): CadFeature => ({ ...base(id), kind: 'linear-pattern', sourceId, count: 2, spacing });
     const features = [...box, ...slot('split', 18, 'box'), { ...base('round'), kind: 'fillet', targetId: 'split', radius: 1 } as CadFeature, ...slot('more', 30, 'round'),
-      pattern('across', 'more', [100, 0, 0]), sketch('bridge_sketch', rect(5, 5, 30, 10)), pad('bridge', 'bridge_sketch', 10, 'join', 'across'), pattern('down', 'bridge', [0, 50, 0])];
+      twice('across', 'more', [100, 0, 0]), sketch('bridge_sketch', rect(5, 5, 30, 10)), pad('bridge', 'bridge_sketch', 10, 'join', 'across'), twice('down', 'bridge', [0, 50, 0])];
     const results = multiSolidResults(features), normal = built(features, bodiesOf);
     expect(results).toBeGreaterThanOrEqual(3);
     const keyings = new Set<string>(), all = 2 ** results - 1, alone = Array.from({ length: results }, (_, result) => 1 << result);
@@ -418,6 +421,37 @@ describe('kernel body parts are inherited only when continuity is certain', () =
     }
     // The orders key the pieces differently, which is what the twins stand in for.
     expect(keyings.size).toBeGreaterThan(1);
+  }, 120_000);
+
+  it('resolves every key the same way in every combination of solid orders when a later cut splits a piece the faces ordered', () => {
+    // As above, then a cut at x = 24 splits the first of the halves the faces ordered. Those halves were never interchangeable, so no order
+    // gives the second half's key the pieces the first half split into.
+    const features = [...box, ...slot('split', 18, 'box'), { ...base('round'), kind: 'fillet', targetId: 'split', radius: 1 } as CadFeature, ...slot('more', 30, 'round'),
+      ...slot('again', 24, 'more')];
+    const results = multiSolidResults(features), normal = built(features, bodiesOf);
+    expect(results).toBe(3);
+    for (let reversals = 1; reversals < 2 ** results; reversals++) {
+      const reordered = reorderingSolids((result, solids) => reversals & 1 << result ? reversed(solids) : inOrder(solids), () => built(features, bodiesOf));
+      agreeInEitherOrder(normal, reordered, `results reversed ${reversals.toString(2).padStart(results, '0')}`);
+      for (const key of ['round/split(0)/split(1)/split(0)', 'round/split(1)/split(1)/split(0)']) expect(resolveIn(reordered, key).status, key).toBe('missing');
+    }
+  }, 120_000);
+
+  it.each<[string, (prefix: readonly CadFeature[]) => CadFeature[]]>([
+    ['a pattern of the pieces and a cut across its copy', prefix => [...prefix, twice('across', 'more', [100, 0, 0]), ...slot('again', 124, 'across')]],
+    ['two more patterns after that', prefix => [...prefix, twice('across', 'more', [100, 0, 0]), ...slot('again', 124, 'across'), twice('down', 'again', [0, 50, 0]),
+      twice('up', 'down', [0, 150, 0])]],
+    ['a mirror image, a cut across it and a pattern', prefix => [...prefix, { ...base('flip'), kind: 'mirror', sourceId: 'more', plane: 'XZ' } as CadFeature,
+      ...slot('again', 24, 'flip'), twice('across', 'again', [100, 0, 0])]]
+  ])('resolves every key the same way whichever result lists its solids in reverse, after %s', (_, more) => {
+    const prefix = [...box, ...slot('split', 18, 'box'), { ...base('round'), kind: 'fillet', targetId: 'split', radius: 1 } as CadFeature, ...slot('more', 30, 'round')];
+    const features = more(prefix), results = multiSolidResults(features), normal = built(features, bodiesOf);
+    const all = 2 ** results - 1;
+    // Each result's solids reversed alone, and all of them.
+    for (const reversals of [...Array.from({ length: results }, (_, result) => 1 << result), all]) {
+      const reordered = reorderingSolids((result, solids) => reversals & 1 << result ? reversed(solids) : inOrder(solids), () => built(features, bodiesOf));
+      agreeInEitherOrder(normal, reordered, `results reversed ${reversals.toString(2).padStart(results, '0')}`);
+    }
   }, 120_000);
 
   it('reports a pattern copy a later cut removes as lost, so references to it resolve as missing', () => {

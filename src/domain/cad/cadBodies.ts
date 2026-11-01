@@ -92,14 +92,21 @@ export interface CadBodyState {
    * pieces as candidates. No key is in two groups.
    */
   readonly ambiguous?: readonly (readonly CadBodyKey[])[];
+  /**
+   * Sets of sibling keys that one split gave in an order the kernel decided: pieces tied by rank, or ordered by faces of different solids
+   * or by none. These are the only steps where another kernel order would have given a solid another key, since every later step follows
+   * its solid. Each set has two or more keys with one parent, each ending in a `split` step. A set is kept while one of its keys is, or
+   * leads to, a piece, a group's key or a key of another kept set.
+   */
+  readonly interchangeable?: readonly (readonly CadBodyKey[])[];
   /** The body has more parts than the lineage tracks, so it keeps none, and references to its parts resolve as missing. */
   readonly untracked?: true;
 }
 
 /**
- * The most part keys a body tracks: its pieces and the keys its groups keep, together. Past it the body's parts are untracked from then on,
- * never a rejected build. A group keeps every former member's key while a solid descends from it, so each feature that splits or removes an
- * ambiguous piece adds keys, however few solids are left.
+ * The most distinct part keys a body tracks: its pieces, the keys its groups keep and the keys its interchangeable sets keep, together.
+ * Past it the body's parts are untracked from then on, never a rejected build. A group keeps every former member's key while a solid
+ * descends from it, so each feature that splits or removes an ambiguous piece adds keys, however few solids are left.
  */
 export const MAX_CAD_BODY_LIST = 4096;
 
@@ -132,16 +139,27 @@ export function isCadBodyState(value: unknown): value is CadBodyState {
   if (!Array.isArray(modifiedBy)) return false;
   for (const id of modifiedBy) if (!isFeatureId(id)) return false;
   if (body.consumedBy !== undefined && !isFeatureId(body.consumedBy)) return false;
-  if (body.untracked !== undefined) return body.untracked === true && body.pieces === undefined && body.ambiguous === undefined;
+  if (body.untracked !== undefined) return body.untracked === true && body.pieces === undefined && body.ambiguous === undefined && body.interchangeable === undefined;
   let makers: ReadonlySet<string> | undefined;
   const made = () => makers ??= new Set([body.createdBy as string, ...modifiedBy as string[]]);
-  if (body.pieces !== undefined && !isPartKeys(body.pieces, key, made, new Set())) return false;
-  const groups = body.ambiguous;
-  if (groups === undefined) return true;
-  if (!Array.isArray(groups) || groups.length > MAX_CAD_BODY_LIST) return false;
-  const grouped = new Set<string>();
-  for (const group of groups) if (!Array.isArray(group) || !group.length || !isPartKeys(group, key, made, grouped) || grouped.size > MAX_CAD_BODY_LIST) return false;
-  return true;
+  const pieces = new Set<string>();
+  if (body.pieces !== undefined && !isPartKeys(body.pieces, key, made, pieces)) return false;
+  // Pieces and the keys groups and sets keep count against the list limit together.
+  const all = new Set(pieces);
+  const lists = (value: unknown, fits: (list: readonly string[]) => boolean) => {
+    if (value === undefined) return true;
+    if (!Array.isArray(value) || value.length > MAX_CAD_BODY_LIST) return false;
+    const seen = new Set<string>();
+    for (const list of value) {
+      if (!Array.isArray(list) || !list.length || !isPartKeys(list, key, made, seen) || !fits(list)) return false;
+      for (const part of list) all.add(part);
+      if (all.size > MAX_CAD_BODY_LIST) return false;
+    }
+    return true;
+  };
+  const parent = (part: string) => part.slice(0, part.lastIndexOf('/'));
+  return lists(body.ambiguous, () => true)
+    && lists(body.interchangeable, set => set.length > 1 && set.every(part => parent(part) === parent(set[0]) && part.startsWith('split(', part.lastIndexOf('/') + 1)));
 }
 
 const BODY_ISSUE_CODES: ReadonlySet<unknown> = new Set<CadBodyIssue['code']>(['ambiguous-body-parts', 'lost-body-parts', 'untracked-body-parts', 'more-body-issues']);
@@ -279,6 +297,7 @@ function freeze<T extends object>(value: T): T { return Object.freeze(value); }
 export interface CadBodyParts {
   readonly pieces?: readonly CadBodyKey[];
   readonly ambiguous?: readonly (readonly CadBodyKey[])[];
+  readonly interchangeable?: readonly (readonly CadBodyKey[])[];
   readonly untracked?: true;
   /**
    * Keys the feature itself left ambiguous, for a new `ambiguous-body-parts` issue: none was ambiguous before it or descends from a key
@@ -361,14 +380,14 @@ function unsettled(list: readonly Placed[]): readonly (readonly Placed[])[] {
  */
 export function cadBodyParts(input: {
   readonly featureId: string;
-  readonly previous: Pick<CadBodyState, 'key' | 'pieces' | 'ambiguous' | 'untracked'>;
+  readonly previous: Pick<CadBodyState, 'key' | 'pieces' | 'ambiguous' | 'interchangeable' | 'untracked'>;
   readonly beforeSolids: number | undefined;
   readonly facts: CadBodyKernelFacts;
 }): CadBodyParts {
   const { featureId, previous, facts } = input, key = previous.key, count = facts.solids, before = previous.pieces;
   if (previous.untracked) return UNTRACKED;
-  if (before && facts.sameSolidOrder && before.length === count)
-    return freeze({ pieces: before, ...(previous.ambiguous ? { ambiguous: previous.ambiguous } : {}), ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
+  if (before && facts.sameSolidOrder && before.length === count) return freeze({ pieces: before, ...(previous.ambiguous ? { ambiguous: previous.ambiguous } : {}),
+    ...(previous.interchangeable ? { interchangeable: previous.interchangeable } : {}), ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
   const patterned = facts.sources.some(source => source.kind === 'copy'), fused = facts.sources.some(source => source.kind === 'tool');
   const beforeSolids = input.beforeSolids ?? 1;
   if (!before && (count <= 1 || fused && !patterned || !patterned && !facts.removesMaterial && count <= beforeSolids)) return WHOLE;
@@ -449,6 +468,8 @@ export function cadBodyParts(input: {
   // Keys that must share a group: those whose order the kernel decides, and below, those a solid keeping no face leaves uncertain and the
   // descendants of each earlier group through each source.
   const sets: (readonly CadBodyKey[])[] = unordered.map(list => list.map(entry => pieces[entry.solid]));
+  // Those are siblings under one parent each, and the body's new interchangeable sets.
+  const swapped = sets.map(set => freeze(set));
   const groupOf = new Map<CadBodyKey, number>();
   previous.ambiguous?.forEach((group, g) => { for (const earlier of group) groupOf.set(earlier, g); });
   // Keys before that no solid continues: unidentified when a solid keeping no face could be one of them, whatever group they were in;
@@ -498,14 +519,24 @@ export function cadBodyParts(input: {
     for (const part of set) if (!parent.has(part)) parent.set(part, part);
     for (const part of set.slice(1)) parent.set(root(part), root(set[0]));
   }
-  if (parent.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED;
+  // An earlier interchangeable set stays while one of its keys is, or leads to, a piece, a group's key or a key of another set that stays.
+  const leads = new Set<string>(), stays = new Set<readonly CadBodyKey[]>();
+  const reach = (part: string) => { for (let end = part.length; end > 0 && !leads.has(part.slice(0, end)); end = part.lastIndexOf('/', end - 1)) leads.add(part.slice(0, end)); };
+  for (const part of [...pieces, ...parent.keys(), ...swapped.flat()]) reach(part);
+  for (let more = true; more;) {
+    more = false;
+    for (const set of previous.interchangeable ?? []) if (!stays.has(set) && set.some(part => leads.has(part))) { stays.add(set); set.forEach(reach); more = true; }
+  }
+  const interchangeable = [...(previous.interchangeable ?? []).filter(set => stays.has(set)), ...swapped];
+  const all = new Set<CadBodyKey>([...pieces, ...parent.keys(), ...interchangeable.flat()]);
+  if (all.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED;
   const groups = new Map<CadBodyKey, CadBodyKey[]>();
   for (const part of parent.keys()) { const top = root(part), group = groups.get(top); if (group) group.push(part); else groups.set(top, [part]); }
   const descended = new Set(inherited.map(([piece]) => piece));
   const ambiguousNow = [...parent.keys()].filter(part => !groupOf.has(part) && !descended.has(part));
   const ambiguous = [...groups.values()].map(group => freeze(group));
-  return freeze({ pieces: freeze(pieces), ...(ambiguous.length ? { ambiguous: freeze(ambiguous) } : {}), ambiguousNow: freeze(ambiguousNow),
-    inherited: freeze(inherited), lost: freeze(lost) });
+  return freeze({ pieces: freeze(pieces), ...(ambiguous.length ? { ambiguous: freeze(ambiguous) } : {}),
+    ...(interchangeable.length ? { interchangeable: freeze(interchangeable) } : {}), ambiguousNow: freeze(ambiguousNow), inherited: freeze(inherited), lost: freeze(lost) });
 }
 
 /**
@@ -540,6 +571,7 @@ interface Body {
   readonly consumedBy?: string;
   readonly pieces?: readonly CadBodyKey[];
   readonly ambiguous?: readonly (readonly CadBodyKey[])[];
+  readonly interchangeable?: readonly (readonly CadBodyKey[])[];
   readonly untracked?: true;
   readonly solids: number | undefined;
   readonly order: number;
@@ -555,7 +587,8 @@ function stateOf(body: Body): CadBodyState {
     ...(body.consumedBy !== undefined ? { consumedBy: body.consumedBy } : {}),
     ...(body.untracked ? { untracked: true as const } : {}),
     ...(body.pieces && !body.untracked ? { pieces: body.pieces } : {}),
-    ...(body.ambiguous?.length && !body.untracked ? { ambiguous: body.ambiguous } : {})
+    ...(body.ambiguous?.length && !body.untracked ? { ambiguous: body.ambiguous } : {}),
+    ...(body.interchangeable?.length && !body.untracked ? { interchangeable: body.interchangeable } : {})
   });
 }
 
@@ -643,6 +676,7 @@ export function createCadBodyLineage(): CadBodyLineage {
         ...(from?.untracked ? { untracked: true as const } : {}),
         ...(from?.pieces && !from.untracked ? { pieces: from.pieces } : {}),
         ...(from?.ambiguous && !from.untracked ? { ambiguous: from.ambiguous } : {}),
+        ...(from?.interchangeable && !from.untracked ? { interchangeable: from.interchangeable } : {}),
         solids: facts?.solids, order: applied
       };
       const gone: CadBodyKey[] = [];
@@ -726,7 +760,7 @@ export type CadBodyRefResolution =
 /**
  * Resolves `ref` against `lineage` as it stands before the referring feature. A whole body's key resolves to it, and a piece's to that
  * part. An ambiguous key resolves as ambiguous, with the pieces of its group as candidates, or as missing once none is left. So does a
- * key no body lists that another kernel order would have given a solid, among the groups of its twins (`twinGroups`). Anything else is
+ * key no body lists that other kernel orders would have given a solid, among the groups of its twins (`twinGroups`). Anything else is
  * missing: a lost piece, a split piece's old key, a part of an untracked body, or a consumed body or one of its parts.
  */
 export function resolveCadBodyRef(ref: CadBodyRef, lineage: Pick<CadBodyLineage, 'get' | 'bodies' | 'consumed'>): CadBodyRefResolution {
@@ -751,32 +785,30 @@ export function resolveCadBodyRef(ref: CadBodyRef, lineage: Pick<CadBodyLineage,
 }
 
 /**
- * The groups of the keys `body` lists in the place of `key`, which it does not list, in the order `body` lists its groups. A kernel order
- * decides only which of the keys one split gave at once names which solid, and every later step of a key follows its solid: a pattern's
- * copies are told apart by the copy they keep faces of, never by the order. So another order would have given `key` to what a twin names,
- * a twin being `key` with one `split` step changed to a sibling's, a key that the same split gave beside it, that is in its group. The
- * nearest such step with any twin `body` lists decides; a certain piece or the body's own key ends the search, since nothing above it is
- * ambiguous.
+ * The groups of the keys `body` lists in the place of `key`, which it does not list, in the order `body` lists its groups. Its twins are
+ * the keys other kernel orders would have given its solid: kernel orders decide only which sibling of an interchangeable set names which
+ * solid, and every later step follows its solid, so a twin is `key` with any of its steps, read from the first, changed to a sibling in
+ * that step's interchangeable set. Steps no set holds stay, whatever groups their keys are in: a split whose pieces the faces ordered,
+ * a copy and an image. Twins `body` never had lead nowhere, so the search keeps only keys that are, or lead to, a key it keeps.
  */
 function twinGroups(body: CadBodyState, key: CadBodyKey): readonly (readonly CadBodyKey[])[] | undefined {
-  if (!body.ambiguous) return undefined;
-  const groups = new Map<string, readonly CadBodyKey[]>();
-  for (const group of body.ambiguous) for (const part of group) groups.set(part, group);
-  for (let end = key.lastIndexOf('/'); end > 0; end = key.lastIndexOf('/', end - 1)) {
-    const ancestor = key.slice(0, end), group = groups.get(ancestor);
-    if (!group) { if (ancestor === body.key || body.pieces?.includes(ancestor as CadBodyKey)) return undefined; continue; }
-    // Only a split step's siblings can trade solids with it; a copy's, or an image's, never do.
-    const at = ancestor.lastIndexOf('/'), sibling = `${ancestor.slice(0, at)}/split(`;
-    if (at < 0 || !ancestor.startsWith(sibling)) continue;
-    const steps = key.slice(end), twins = new Set<readonly CadBodyKey[]>();
-    for (const member of group) {
-      if (member === ancestor || member.lastIndexOf('/') !== at || !member.startsWith(sibling)) continue;
-      const twin = groups.get(member + steps);
-      if (twin) twins.add(twin);
-    }
-    if (twins.size) return body.ambiguous.filter(each => twins.has(each));
+  if (!body.ambiguous || !body.interchangeable) return undefined;
+  const groupOf = new Map<string, readonly CadBodyKey[]>(), setOf = new Map<string, readonly CadBodyKey[]>(), leads = new Set<string>();
+  for (const group of body.ambiguous) for (const part of group) groupOf.set(part, group);
+  for (const set of body.interchangeable) for (const part of set) setOf.set(part, set);
+  for (const part of [...groupOf.keys(), ...setOf.keys()])
+    for (let end = part.length; end > 0 && !leads.has(part.slice(0, end)); end = part.lastIndexOf('/', end - 1)) leads.add(part.slice(0, end));
+  const steps = key.split('/');
+  let twins = [steps[0]];
+  for (const step of steps.slice(1)) {
+    const next = new Set<string>();
+    for (const twin of twins) for (const part of setOf.get(`${twin}/${step}`) ?? [`${twin}/${step}`]) if (leads.has(part)) next.add(part);
+    if (!next.size) return undefined;
+    twins = [...next];
   }
-  return undefined;
+  const groups = new Set<readonly CadBodyKey[]>();
+  for (const twin of twins) { const group = groupOf.get(twin); if (group) groups.add(group); }
+  return groups.size ? body.ambiguous.filter(group => groups.has(group)) : undefined;
 }
 
 /** What a body is for in a setup: the part made, the stock it is cut from, a fixture holding it, or reference geometry. */
