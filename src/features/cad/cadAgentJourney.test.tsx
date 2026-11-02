@@ -185,8 +185,10 @@ describe('CAD agent discovery and authoring journeys', () => {
       expect(pages).toBeLessThanOrEqual(4);
       const response = object(await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [{ ...fewer, ...sent.length ? { removedRelationIds: sent } : {} }] }));
       expect(new TextEncoder().encode(JSON.stringify(response)).length).toBeLessThanOrEqual(32 * 1024);
-      expect(response).toMatchObject({ ok: false, error: { code: 'unconfirmed-sketch-generator-removals', message: expect.stringContaining('Send all 200 IDs as removedRelationIds'),
+      // The message names the generator and says how to confirm, whole, however long the IDs it would list.
+      expect(response).toMatchObject({ ok: false, error: { code: 'unconfirmed-sketch-generator-removals', message: expect.stringMatching(/^Regular polygon "poly" .*removedRelationIds/),
         details: { version: seeded.version, relationCount: 200, confirmedCount: sent.length } } });
+      expect(object(response.error).messageTruncated).toBeUndefined();
       expect(h.session.getSnapshot().document).toBe(seeded.document);
       const details = object(object(response.error).details), page = details.relationIds as string[];
       expect(page.length).toBeGreaterThan(0);
@@ -205,6 +207,38 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(sketch.kind === 'sketch' && sketch.graph?.relations.filter(relation => !relation.id.startsWith('poly_')).map(relation => relation.id)).toEqual(['poly']);
     await h.success('cad_history', { expectedVersion: h.session.getSnapshot().version, direction: 'undo' });
     expect(h.session.getSnapshot().document).toEqual(moved.document);
+  });
+
+  it('pages one relation ID that a hundred sketches share, listing it on every page, and confirms it in all of them in one step', async () => {
+    const h = await mount(), empty = h.session.getSnapshot();
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
+    // The same long relation ID ties a point to the sixth corner in each of a hundred sketches with long IDs, so its rows overflow one page.
+    const tie = `tie-${'x'.repeat(80)}`, sketchIds = Array.from({ length: 100 }, (_, at) => `s${at}${'x'.repeat(80)}`);
+    const sketch = (id: string) => ({ kind: 'add-feature', feature: { id, name: 'Plate', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: tie, kind: 'coincident', pointIds: ['u', 'poly_v5'] }] } } });
+    await h.success('cad_edit_document', { expectedVersion: empty.version, edits: [{ kind: 'set-parameter', name: 'n', value: 6 }, ...sketchIds.slice(0, 50).map(sketch)] });
+    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: sketchIds.slice(50).map(sketch) });
+    const seeded = h.session.getSnapshot(), fewer = { kind: 'set-parameter', name: 'n', value: 5 };
+    const response = object(await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [fewer] }));
+    expect(new TextEncoder().encode(JSON.stringify(response)).length).toBeLessThanOrEqual(32 * 1024);
+    expect(h.session.getSnapshot().document).toBe(seeded.document);
+    expect(response).toMatchObject({ ok: false, error: { code: 'unconfirmed-sketch-generator-removals', message: expect.stringMatching(/^Regular polygon "poly" and 99 more .*removedRelationIds/) } });
+    expect(object(response.error).messageTruncated).toBeUndefined();
+    // The page names the ID whole, places it in as many sketches as fit after it, and counts the rest.
+    const details = object(object(response.error).details), rows = details.relations as { sketchId: string; relationId: string }[];
+    expect(details).toMatchObject({ version: seeded.version, relationIds: [tie], relationCount: 1, confirmedCount: 0, omittedRelationCount: 0 });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows).toEqual(sketchIds.slice(0, rows.length).map(sketchId => ({ sketchId, relationId: tie })));
+    expect(details.omittedRelationRowCount).toBe(100 - rows.length);
+    // Sent at the version it was refused at, the one ID removes the tie from every sketch in one step.
+    await h.success('cad_edit_document', { expectedVersion: seeded.version, edits: [{ ...fewer, removedRelationIds: details.relationIds }] });
+    const applied = h.session.getSnapshot().document;
+    expect(applied.parameters.n).toBe(5);
+    for (const feature of applied.features) expect(feature.kind === 'sketch' && feature.graph?.relations.some(relation => relation.id === tie), feature.id).toBe(false);
+    await h.success('cad_history', { expectedVersion: h.session.getSnapshot().version, direction: 'undo' });
+    expect(h.session.getSnapshot().document).toEqual(seeded.document);
   });
 
   it('keeps initial CAD discovery below 50 KiB without repeating complete plugin recipe schemas', () => {

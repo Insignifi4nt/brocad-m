@@ -126,24 +126,45 @@ function parameterContext(document: CadDocument) {
     omittedParameterCount: parameterCount - retainedParameterCount, parameterGroups, parameterGroupCount: allGroups.length,
     omittedParameterGroups: parameterGroups.length < allGroups.length, omittedParameterGroupCount: allGroups.length - parameterGroups.length };
 }
-/** A removal refusal lists at most this many IDs, with their rows in at most this many bytes, well inside a refusal's details. */
-const REMOVAL_PAGE_IDS = 64, REMOVAL_PAGE_BYTES = 12 * 1024;
+/**
+ * A removal refusal lists at most this many IDs in at most this many bytes, then the rows placing them while the page stays within its
+ * bytes, well inside a refusal's details.
+ */
+const REMOVAL_PAGE_IDS = 64, REMOVAL_PAGE_ID_BYTES = 6 * 1024, REMOVAL_PAGE_BYTES = 12 * 1024;
 /**
  * A removal refusal's details: the version it was refused at, how many relations the edit removes and how many it confirmed, and a page
  * of the IDs it did not, each placed in its sketches by `relations`. Resent at that version with the page added to removedRelationIds, the
- * edit lists the next page, and applies once it confirms them all.
+ * edit lists the next page, and applies once it confirms them all. The IDs are paged first and any one fits, so each page confirms at
+ * least one, however many sketches share it; rows that do not fit after them are counted.
  */
 function removalPage(error: CadSketchGeneratorRemovalError, version: string) {
-  const relationIds: string[] = [], relations: { sketchId?: string; relationId: string }[] = [];
+  const relationIds: string[] = [];
   let bytes = 0;
   for (const id of error.pendingRelationIds) {
-    const rows = error.relations.filter(relation => relation.relationId === id).map(({ sketchId, relationId }) => ({ ...sketchId === undefined ? {} : { sketchId }, relationId }));
-    const cost = jsonByteLength(id) + 1 + rows.reduce((sum, row) => sum + jsonByteLength(row) + 1, 0);
-    if (relationIds.length === REMOVAL_PAGE_IDS || bytes + cost > REMOVAL_PAGE_BYTES) break;
-    relationIds.push(id); relations.push(...rows); bytes += cost;
+    const cost = jsonByteLength(id) + 1;
+    if (relationIds.length === REMOVAL_PAGE_IDS || bytes + cost > REMOVAL_PAGE_ID_BYTES) break;
+    relationIds.push(id); bytes += cost;
   }
-  return { version, relationIds, relations, relationCount: error.relationIds.length, confirmedCount: error.relationIds.length - error.pendingRelationIds.length,
-    omittedRelationCount: error.pendingRelationIds.length - relationIds.length };
+  const rows = relationIds.flatMap(id => error.relations.filter(relation => relation.relationId === id)
+    .map(({ sketchId, relationId }) => ({ ...sketchId === undefined ? {} : { sketchId }, relationId })));
+  let shown = 0;
+  for (const row of rows) {
+    const cost = jsonByteLength(row) + 1;
+    if (bytes + cost > REMOVAL_PAGE_BYTES) break;
+    shown++; bytes += cost;
+  }
+  return { version, relationIds, relations: rows.slice(0, shown), relationCount: error.relationIds.length, confirmedCount: error.relationIds.length - error.pendingRelationIds.length,
+    omittedRelationCount: error.pendingRelationIds.length - relationIds.length, omittedRelationRowCount: rows.length - shown };
+}
+/**
+ * A removal refusal's message: whole when it fits a tool reply's message, which is cut at 1 KiB; otherwise its first generator, how
+ * many there are and how many relations they remove, and how the details page confirms them, so the instruction is never cut off.
+ */
+function removalMessage(error: CadSketchGeneratorRemovalError) {
+  if (jsonByteLength(error.message) <= 1024) return error.message;
+  const generators = new Set(error.relations.map(relation => `${relation.sketchId ?? ''}\u0000${relation.generator}`)).size;
+  return `${error.relations[0].generator}${generators > 1 ? ` and ${generators - 1} more` : ''} no longer generate${generators > 1 ? '' : 's'} geometry that ${error.relations.length} relations use.`
+    + ' Send error.details.relationIds as removedRelationIds at error.details.version, adding the IDs each refusal lists next, until it applies; or keep the generator\'s inputs.';
 }
 // The kinds agents may name, in catalog order; each definition holds what they are told of it.
 const agentFeatureKinds = cadFeatureKinds().filter(kind => cadFeaturePresentation(kind).agent.exposed);
@@ -169,7 +190,7 @@ export function cadSiteTools(getController: () => CadController) {
         if (error instanceof CadSketchGeneratorRemovalError) {
           // The edit was prepared at its expectedVersion, so its page is that version's; an edit sent without one ran at the current version.
           const pinned = (input as { readonly expectedVersion?: unknown }).expectedVersion;
-          throw new ToolError(error.code, error.message, removalPage(error, typeof pinned === 'string' ? pinned : getController().session.getSnapshot().version));
+          throw new ToolError(error.code, removalMessage(error), removalPage(error, typeof pinned === 'string' ? pinned : getController().session.getSnapshot().version));
         }
         if (error instanceof CadError || error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
