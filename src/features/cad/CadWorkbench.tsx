@@ -32,8 +32,8 @@ import { cadSketchRelationName } from './cadSketchRelationNames';
 import { CAD_SKETCH_RELATION_ICONS } from './CadSketchRelationGlyphs';
 import { cadSketchDimensionToDriving, cadSketchDimensionToReference } from './cadSketchDimensionCommands';
 import {
-  CAD_SKETCH_DIMENSION_EXISTING_REASON, cadSketchDimensionBatchAt, cadSketchDimensionCandidateAt, cadSketchDimensionPickAllowed, cadSketchDimensionPickEligibility, cadSketchDimensionPreselection, cadSketchDimensionRetry,
-  NO_SKETCH_DIMENSION_PLAN, planCadSketchDimension, type CadSketchDimensionForm, type CadSketchDimensionOperand
+  CAD_SKETCH_DIMENSION_EXISTING_REASON, cadSketchDimensionBatchAt, cadSketchDimensionCandidateAt, cadSketchDimensionPickAllowed, cadSketchDimensionPickEligibility, cadSketchDimensionPickTargets, cadSketchDimensionPreselection, cadSketchDimensionRetry,
+  NO_SKETCH_DIMENSION_PLAN, planCadSketchDimension, type CadSketchDimensionForm, type CadSketchDimensionOperand, type CadSketchDimensionPickTargets
 } from './cadSketchDimensionPlacement';
 import { createCadSketchPointerStore } from './CadSketchDimensionPreview';
 import type { Point2 } from '@/domain/path-intel/types';
@@ -126,6 +126,7 @@ const NO_SKETCH_SELECTIONS: readonly CadSketchGraphSelection[] = Object.freeze([
 const NO_RELATION_IDS: readonly string[] = Object.freeze([]);
 const NO_RELATION_OFFERS: readonly CadSketchRelationOffer[] = Object.freeze([]);
 const NO_SELECTION_RELATIONS: readonly CadSketchSelectionAction[] = Object.freeze([]);
+const NO_DIMENSION_PICK_TARGETS: CadSketchDimensionPickTargets = Object.freeze({ entityIds: [], sizedEntityIds: [], pointIds: [] });
 /** A relation of the selection in a right-click menu: Remove for an applied one, as the icon shown pressed removes it. */
 const relationMenuLabel = (action: CadSketchSelectionAction) => action.state === 'applied' ? `Remove ${action.label.toLowerCase()}` : action.label;
 /** The sketch with its profile view `profileId`, a legacy profile or a generator, renamed. */
@@ -1630,18 +1631,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     <dl className="cad-properties-list">{propertyRows.map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>
   </div>;
   const sketchDimensionAvailable = profile && cadSketchDimensionQuantities(profile.geometry).some(quantity => !inspectCadSketchDimensions(profile, document.parameters).some(dimension => dimension.field === (quantity === 'diameter' ? 'radius' : quantity)));
-  const dimensionPickTargets = useMemo(() => {
-    const graph = sketch?.graph;
-    // Generated pattern edges keep their pattern's spacing and take no dimension.
-    const entities = graph?.entities.filter(entity => !cadSketchOwnedGeometryLockReason(graph, { kind: 'entity', id: entity.id })) ?? [];
-    return { entityIds: entities.map(entity => entity.id),
-      // A linked edge follows its source, so it anchors a distance or an angle to other geometry but takes no size of its own. A circle whose
-      // radius follows an expression keeps its size there; its center still takes distances.
-      sizedEntityIds: entities.filter(entity => !cadSketchExternalReferenceLockReason(graph!, { kind: 'entity', id: entity.id })
-        && !(entity.kind === 'circle' && typeof entity.radius === 'string' && !graph?.relations.some(relation => relation.kind === 'radial-size' && relation.entityId === entity.id))).map(entity => entity.id),
-      // Driven/reference points can anchor a free partner or a passive measurement; a lone point still measures from the origin or an axis.
-      pointIds: graph?.points.map(point => point.id) ?? [] };
-  }, [sketch]);
+  const dimensionPickTargets = useMemo(() => sketch?.graph ? cadSketchDimensionPickTargets(sketch.graph) : NO_DIMENSION_PICK_TARGETS, [sketch]);
   const canPickDimension = Boolean(dimensionPickTargets.entityIds.length || dimensionPickTargets.pointIds.length);
   /**
    * The toolbar button and D start the tool, on the selected geometry and plane references when they are picks it takes, and end it when it is
