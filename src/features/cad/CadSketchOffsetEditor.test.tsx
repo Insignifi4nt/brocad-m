@@ -6,7 +6,7 @@ import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import type { CadDocument } from '@/domain/cad/cadDocument';
 import type { CadSketchOffsetSource } from '@/domain/cad/cadSketchOffset';
 import { CadSession } from './cadSession';
-import { CadSketchOffsetEditor } from './CadSketchOffsetEditor';
+import { CadSketchOffsetEditor, cadSketchOffsetSource } from './CadSketchOffsetEditor';
 import type { CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadEditCompletion } from './useCadEditSubmission';
 
@@ -117,4 +117,20 @@ it('links an offset of a loop of sketch curves to a generator whose edges follow
   expect(joint()).toEqual([-2, -2]);
   await act(async () => h.session.edit([{ kind: 'set-parameter', name: 'clearance', value: 3 }]));
   expect(joint()).toEqual([-3, -3]);
+});
+
+it('names the exact loop of a generated shape picked as a whole, and none for a construction shape or a loop it shares', () => {
+  const sketchOf = (relations: readonly unknown[], points: readonly unknown[] = [], entities: readonly unknown[] = []) => {
+    const sketch = parseCadDocument({ ...createCadDocument('Plate', 'offset-source'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Plate',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points, entities, relations } }] }).features[0];
+    if (sketch.kind !== 'sketch') throw new Error('Missing sketch'); return sketch;
+  };
+  const plate = (construction: boolean) => ({ id: 'plate', kind: 'generator', idPrefix: 'plate', construction, geometry: { kind: 'rectangle', x: 0, y: 0, width: 40, height: 20, cornerRadius: 0 } });
+  const edges = (source: CadSketchOffsetSource | null) => source?.kind === 'graph-cycle' ? source.sourceRefs.map(ref => ref.entityId).sort() : source;
+  expect(edges(cadSketchOffsetSource(sketchOf([plate(false)]), {}, [], 'plate'))).toEqual(['plate_e0', 'plate_e1', 'plate_e2', 'plate_e3']);
+  expect(cadSketchOffsetSource(sketchOf([plate(true)]), {}, [], 'plate')).toBeNull();
+  // A free line across the rectangle splits it into two loops, each with an edge the shape does not own.
+  const split = sketchOf([plate(false), { id: 'from', kind: 'coincident', pointIds: ['m', 'plate_p0'] }, { id: 'to', kind: 'coincident', pointIds: ['n', 'plate_p2'] }],
+    [{ id: 'm', position: [0, 0] }, { id: 'n', position: [40, 20] }], [{ id: 'cut', kind: 'line', construction: false, startPointId: 'm', endPointId: 'n' }]);
+  expect(edges(cadSketchOffsetSource(split, {}, [], 'plate'))).toBeNull();
 });

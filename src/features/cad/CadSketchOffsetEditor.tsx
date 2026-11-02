@@ -6,19 +6,35 @@ import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { inspectCadScalarValue } from '@/domain/cad/cadScalarValueIntent';
 import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
 import type { CadSketchOffsetSource } from '@/domain/cad/cadSketchOffset';
+import { cadSketchGeneratorMembers } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { cadSketchProfileGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { ScalarField } from './CadFields';
 import { cadPreviewMarks, useCadPreparedPreview, type CadPrepareEdits } from './useCadPreparedPreview';
 import { CadSketchCommandForm, useCadSketchCommandSession, type CadSketchCommandSessionProps } from './useCadSketchCommandSession';
 
-/** A selected edge identifies its exact whole compiler cycle; points and multiple loops do not guess a source. */
+/**
+ * A selected edge identifies its exact whole compiler cycle; points and multiple loops do not guess a source. A generated shape selected
+ * by its interior or from the tree names the cycle made of exactly its edges, so it offsets as a selected edge of it would; a saved
+ * profile names itself.
+ */
 export function cadSketchOffsetSource(sketch: CadSketchFeature, parameters: CadDocument['parameters'], selection: readonly CadSketchGraphSelection[], profileId: string | null): CadSketchOffsetSource | null {
+  const cycle = (matches: (refs: readonly { readonly entityId: string }[]) => boolean): CadSketchOffsetSource | null => {
+    const cycles = sketch.graph ? compileCadSketchGraph(sketch.graph, parameters).cycles.filter(cycle => !cycle.construction && matches(cycle.sourceRefs)) : [];
+    return cycles.length === 1 ? { kind: 'graph-cycle', sourceRefs: cycles[0].sourceRefs } : null;
+  };
   if (selection.length) {
     if (selection.some(item => item.kind !== 'entity') || !sketch.graph) return null;
     // One edge names its loop, and so do several edges of the same loop, as a finished Offset or Mirror leaves the whole copy selected.
     const ids = selection.map(item => item.id);
-    const cycles = compileCadSketchGraph(sketch.graph, parameters).cycles.filter(cycle => !cycle.construction && ids.every(id => cycle.sourceRefs.some(ref => ref.entityId === id)));
-    return cycles.length === 1 ? { kind: 'graph-cycle', sourceRefs: cycles[0].sourceRefs } : null;
+    return cycle(refs => ids.every(id => refs.some(ref => ref.entityId === id)));
+  }
+  const generator = profileId ? cadSketchProfileGenerator(sketch, profileId) : undefined;
+  if (generator) {
+    // A construction shape's cycle is construction, so it names none, as a construction profile does not.
+    if (generator.geometry.kind === 'plugin' || !sketch.graph) return null;
+    const edges = new Set(cadSketchGeneratorMembers(sketch.graph, generator).entityIds);
+    return cycle(refs => refs.length === edges.size && refs.every(ref => edges.has(ref.entityId)));
   }
   const profile = sketch.profiles.find(profile => profile.id === profileId);
   return profile && !profile.construction && profile.geometry.kind !== 'plugin' ? { kind: 'profile', profileId: profile.id } : null;

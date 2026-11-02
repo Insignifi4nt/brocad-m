@@ -528,6 +528,38 @@ describe('CAD sketch interaction', () => {
     expect(viewport().getState().selectedSketchGeometrySet).toEqual([{ kind: 'entity', id: accepted.graph.entities[0].id }]);
     expect(viewport().getState().selectedProfileId).toBeNull(); expect(viewport().getState().workflowOpen).toBe(false);
   });
+  it('offsets a generated shape picked by its interior, an edge or its tree row, independently or linked to its edges', async () => {
+    const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
+      geometry: { kind: 'rectangle', x: 20, y: 20, width: 50, height: 40, cornerRadius: 0 } } as const;
+    const initial = parseCadDocument({ ...createCadDocument('Plate', 'generated-offset'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate] } }] });
+    await mount(initial);
+    const edges = ['plate_e0', 'plate_e1', 'plate_e2', 'plate_e3'];
+    const picks = {
+      interior: () => act(async () => viewport().apply({ kind: 'select-profile', profileId: 'plate' })),
+      edge: () => act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: 'plate_e2' } })),
+      tree: () => click('Plate profile')
+    };
+    for (const [pick, choose] of Object.entries(picks)) for (const linked of [false, true]) {
+      await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' })); await choose();
+      expect(button('Offset loop').disabled, pick).toBe(false);
+      await click('Offset loop');
+      for (const id of edges) expect(container.querySelector(`[data-cad-sketch-entity="${id}"]`)?.classList.contains('is-relation-highlighted'), `${pick} ${id}`).toBe(true);
+      await input(field('Offset distance'), '2'); await click('Inside');
+      if (linked) await click('Linked');
+      await click('Apply');
+      const graph = sketchGraph();
+      const copy = graph.entities.filter(entity => !entity.id.startsWith('plate_'));
+      expect(copy, pick).toHaveLength(4);
+      expect(viewport().getState().selectedSketchGeometrySet).toEqual(copy.map(entity => ({ kind: 'entity', id: entity.id })));
+      const corners = graph.points.filter(point => !point.id.startsWith('plate_')).map(point => point.position.map(Number)).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      expect(corners, pick).toEqual([[22, 22], [22, 58], [68, 22], [68, 58]]);
+      const offsets = graph.relations.filter(relation => relation.kind === 'generator' && relation.geometry.kind === 'offset');
+      if (linked) expect(offsets, pick).toEqual([expect.objectContaining({ geometry: { kind: 'offset', distance: -2, chain: edges.map(entityId => ({ entityId, reversed: false })) } })]);
+      else expect(offsets, pick).toEqual([]);
+      await act(async () => currentSession.undo()); expect(currentDocument, pick).toEqual(initial);
+    }
+  });
   it('selects the accepted Split joint in the real owned sketch workspace after private publication', async () => {
     const initial = parseCadDocument({ ...createCadDocument(), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
       suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
