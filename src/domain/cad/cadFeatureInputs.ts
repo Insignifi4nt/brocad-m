@@ -40,12 +40,5 @@ export function cadConsumedBodyIds(feature: CadFeature, scope: CadFeatureScope):
   const { body } = cadFeatureDefinition(feature.kind);
   return body === 'none' || body === 'new' || !cadFeatureActive(feature, scope) ? [] : cadFeatureInputs(feature).bodyIds;
 }
-/** The bodies left after `features` in `scope`, in the order they were made. */
-export function cadVisibleBodyIds(features: readonly CadFeature[], scope: CadFeatureScope): readonly string[] {
-  const visible = new Set<string>();
-  for (const feature of features) {
-    cadConsumedBodyIds(feature, scope).forEach(id => visible.delete(id));
-    if (cadFeatureProducesBody(feature) && cadFeatureActive(feature, scope)) visible.add(feature.id);
-  }
-  return [...visible];
-}
+/** Body identity derives the current bodies from the same body behaviour, keyed by their creating features. */
+export { cadVisibleBodyIds } from './cadBodies';

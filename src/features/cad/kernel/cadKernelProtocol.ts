@@ -1,4 +1,5 @@
 import type { CadBuildResult, CadDocument, CadMesh, CadMeshTopologyGroup } from '../../../domain/cad/cadDocument';
+import { cadBodyFeatureId, isCadBodyIssue, isCadBodyKey, isCadBodyState, MAX_CAD_BODY_ISSUES } from '../../../domain/cad/cadBodies';
 import { isCadSectionResult, type CadSectionRequest, type CadSectionResult } from '../../../domain/cad/cadSection';
 import { isCadTopologyInspectResult, isCadTopologyResolvePicksResult, type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '../../../domain/cad/cadTopology';
@@ -55,11 +56,23 @@ export function isCadKernelReply(value: unknown): value is CadKernelReply {
     || !('durationMs' in result) || typeof result.durationMs !== 'number' || !Number.isFinite(result.durationMs) || result.durationMs < 0
     || !('meshes' in result) || !Array.isArray(result.meshes)
     || !('diagnostics' in result) || !Array.isArray(result.diagnostics) || result.diagnostics.length > 512) return false;
-  const bodyIds = new Set<string>();
+  const bodyIds = new Set<string>(), bodyKeys = new Set<string>();
   for (const mesh of result.meshes) {
-    if (!isCadMesh(mesh) || bodyIds.has(mesh.featureId)) return false;
+    if (!isCadMesh(mesh) || bodyIds.has(mesh.featureId) || mesh.bodyKey !== undefined && bodyKeys.has(mesh.bodyKey)) return false;
     bodyIds.add(mesh.featureId);
+    if (mesh.bodyKey !== undefined) bodyKeys.add(mesh.bodyKey);
   }
+  // Body states, when given, describe the meshes one for one, and a body with parts keys each of its mesh's solids.
+  if ('bodies' in result && result.bodies !== undefined) {
+    if (!Array.isArray(result.bodies) || result.bodies.length !== result.meshes.length) return false;
+    for (const [index, body] of result.bodies.entries()) {
+      const mesh = result.meshes[index] as CadMesh;
+      if (!isCadBodyState(body) || body.key !== mesh.bodyKey || cadBodyFeatureId(body) !== mesh.featureId) return false;
+      if (body.pieces !== undefined && body.pieces.length !== (mesh.solidCount ?? 1)) return false;
+    }
+  }
+  if ('bodyIssues' in result && result.bodyIssues !== undefined
+    && (!Array.isArray(result.bodyIssues) || result.bodyIssues.length > MAX_CAD_BODY_ISSUES || !result.bodyIssues.every(isCadBodyIssue))) return false;
   for (const diagnostic of result.diagnostics) {
     if (typeof diagnostic !== 'object' || diagnostic === null || typeof diagnostic.code !== 'string'
       || diagnostic.code.length > 128 || typeof diagnostic.message !== 'string' || diagnostic.message.length > 8192
@@ -94,6 +107,7 @@ function isCadMesh(value: unknown): value is CadMesh {
     || !('faceGroups' in value) || !isGroups(value.faceGroups, value.indices.length, 3)
     || !('edgeGroups' in value) || !isGroups(value.edgeGroups, value.edges.length / 3, 2)
     || !('volume' in value) || typeof value.volume !== 'number' || !Number.isFinite(value.volume) || value.volume <= 0
+    || ('bodyKey' in value && value.bodyKey !== undefined && !isCadBodyKey(value.bodyKey))
     || ('solidCount' in value && value.solidCount !== undefined && (typeof value.solidCount !== 'number'
       || !Number.isSafeInteger(value.solidCount) || value.solidCount <= 0))
     || !('bounds' in value) || typeof value.bounds !== 'object' || value.bounds === null

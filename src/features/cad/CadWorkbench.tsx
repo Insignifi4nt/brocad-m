@@ -70,7 +70,8 @@ import { cadEditsOnlyPlaceDimensions, type CadEdit } from '@/domain/cad/cadOpera
 import type { CadTopologyPick, CadTopologyPickSet, CadTopologyResolvePicksRequest, CadTopologyResolvePicksResult } from '@/domain/cad/cadTopology';
 import { cadTopologyChainPicks, type CadTopologyChainGesture, type CadTopologyChainPicks } from '@/domain/cad/selection/cadTopologySelection';
 import type { CadTopologyAdjacency, CadTopologyAdjacencyRequest, CadTopologyTangentChain, CadTopologyTangentChainRequest } from '@/domain/cad/cadTopologyAdjacency';
-import { cadDocumentsPlacedAlike, cadFeatureDependencies, cadFeatureProducesBody, cadVisibleBodyIds } from '@/domain/cad/cadSchema';
+import { cadDocumentsPlacedAlike, cadFeatureDependencies, cadFeatureProducesBody } from '@/domain/cad/cadSchema';
+import { cadBodyFeatureId, cadBodyLineage, cadSelectedBody, type CadBodyLineage } from '@/domain/cad/cadBodies';
 import { CadFeatureEditor, CadProfileEditor, featureLabels } from './CadFeatureEditor';
 import { CadSketchProfilePanel, type CadSketchProfileCommand } from './CadSketchProfilePanel';
 import { cadSketchDimensionQuantities, inspectCadSketchDimensions } from '@/domain/cad/cadSketchConstraints';
@@ -249,12 +250,13 @@ const PART_SELECTION_KINDS: readonly { readonly kind: CadSelectionKind; readonly
   { kind: 'body', label: 'Bodies' }, { kind: 'face', label: 'Faces' }, { kind: 'edge', label: 'Edges' },
   { kind: 'plane', label: 'Planes' }, { kind: 'axis', label: 'Axes' }, { kind: 'point', label: 'Points' }]);
 
-function featureDraft(kind: CadFeature['kind'], document: CadDocument, selected: CadFeature | undefined, bodyIds: readonly string[], plane: CadSketchPlane = selected?.kind === 'datum-plane' && cadFeatureActive(selected, document) ? Object.freeze({ kind: 'datum-plane', featureId: selected.id }) : 'XY'): CadFeature {
+function featureDraft(kind: CadFeature['kind'], document: CadDocument, selected: CadFeature | undefined, bodyIds: readonly string[], lineage: CadBodyLineage, plane: CadSketchPlane = selected?.kind === 'datum-plane' && cadFeatureActive(selected, document) ? Object.freeze({ kind: 'datum-plane', featureId: selected.id }) : 'XY'): CadFeature {
   const id = crypto.randomUUID();
   const sequence = document.features.filter((feature) => feature.kind === kind).length + 1;
   const base = { id, name: `${kind === 'extrude' ? 'Extrude' : featureLabels[kind]} ${sequence}`, suppressed: false };
   const sourceError = (purpose: CadSketchSourcePurpose, fallback: string) => selected?.kind === 'sketch' ? cadSketchSourceIssueMessage(selected, purpose, document.parameters) ?? fallback : fallback;
-  const body = selected && bodyIds.includes(selected.id) ? selected : [...document.features].reverse().find((feature) => bodyIds.includes(feature.id));
+  // The body the selected feature leads to by key, wherever it is in that body's history; otherwise the latest drawn body.
+  const target = cadSelectedBody(lineage, selected?.id, bodyIds), body = target && { id: cadBodyFeatureId(target) };
   switch (kind) {
     case 'datum-plane': return { ...base, kind, definition: { kind: 'world', basePlane: 'XY', origin: [0, 0, 0], rotation: [0, 0, 0] } };
     case 'sketch': return { ...base, kind, plane, offset: 0, profiles: [] };
@@ -280,7 +282,7 @@ function featureDraft(kind: CadFeature['kind'], document: CadDocument, selected:
     case 'fillet':
     case 'chamfer': if (!body) throw new Error('Create a solid body first.'); return { ...base, kind, targetId: body.id, radius: 1 };
     case 'shell': throw new Error('Pick one planar face before starting an inward shell.');
-    case 'boolean': { const tool = [...document.features].reverse().find((feature) => bodyIds.includes(feature.id) && feature.id !== body?.id); if (!body || !tool) throw new Error('A boolean operation needs two independent solid bodies.'); return { ...base, kind, targetId: body.id, toolId: tool.id, operation: 'union' }; }
+    case 'boolean': { const other = target && cadSelectedBody(lineage, null, bodyIds, target.key), tool = other && { id: cadBodyFeatureId(other) }; if (!body || !tool) throw new Error('A boolean operation needs two independent solid bodies.'); return { ...base, kind, targetId: body.id, toolId: tool.id, operation: 'union' }; }
     case 'transform': if (!body) throw new Error('Create a solid body first.'); return { ...base, kind, sourceId: body.id, translation: [0, 0, 0], rotation: [0, 0, 0] };
     case 'linear-pattern': if (!body) throw new Error('Create a solid body first.'); return { ...base, kind, sourceId: body.id, count: 2, spacing: [30, 0, 0] };
     case 'circular-pattern': if (!body) throw new Error('Create a solid body first.'); return { ...base, kind, sourceId: body.id, count: 4, axis: 'z', center: [0, 0, 0], angle: 360 };
@@ -697,8 +699,12 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   // A rejected preview or Apply marks its operands until the editor publishes again; otherwise a rejected analysis does.
   const previewMarks = (editorPending || drawingPending) && sketchPreview?.source === document && sketchPreview.marks?.sketchId === sketch?.id ? sketchPreview.marks : null;
   const preparedSketch = preparedSketchDocument?.features.find((feature): feature is CadSketchFeature => feature.kind === 'sketch' && feature.id === sketch?.id);
-  const visibleBodyIds = cadVisibleBodyIds(document.features, document);
-  const currentBodyIds = buildState === 'ready' ? build?.meshes.map((mesh) => mesh.featureId).filter((id) => visibleBodyIds.includes(id)) ?? [] : [];
+  // Body identity for this history, derived once per document rather than on every render.
+  const bodyLineage = useMemo(() => cadBodyLineage(document.features, document), [document]);
+  const visibleBodyIds = useMemo(() => bodyLineage.bodies().map(cadBodyFeatureId), [bodyLineage]);
+  // Hovering a plane renders the workbench again; the drawn bodies and the section body change only with the build or the selection.
+  const currentBodyIds = useMemo(() => buildState === 'ready' ? build?.meshes.map((mesh) => mesh.featureId).filter((id) => visibleBodyIds.includes(id)) ?? [] : [],
+    [buildState, build, visibleBodyIds]);
   const topologyReady = buildState === 'ready' && props.buildVersion === props.documentVersion && Boolean(build);
   const topologySelection = pickedTopology && !canvasReference && topologyReady && pickedTopology.documentVersion === props.documentVersion && pickedTopology.buildId === build?.buildId
     && currentBodyIds.includes(pickedTopology.bodyId) ? pickedTopology : null;
@@ -931,7 +937,9 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     }
   }, [props.documentVersion, props.buildVersion, build?.buildId, buildState, sketchId, pickedTopology, topologySelection, topologyReady]);
   useEffect(() => () => topologyResolution.current?.controller.abort(), []);
-  const sectionBodyId = selected && currentBodyIds.includes(selected.id) ? selected.id : currentBodyIds.at(-1);
+  const selectedFeatureId = selected?.id;
+  const sectionBodyId = useMemo(() => { const body = cadSelectedBody(bodyLineage, selectedFeatureId, currentBodyIds); return body && cadBodyFeatureId(body); },
+    [bodyLineage, selectedFeatureId, currentBodyIds]);
   const run = (action: () => CadEditCompletion) => {
     setError(null); setFileMenu(false);
     try { Promise.resolve(action()).catch((cause: unknown) => setError(userFacingMessage(cause, 'The operation could not be completed.'))); }
@@ -1115,12 +1123,12 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     }
     if (kind === 'shell' || !source && (kind === 'fillet' || kind === 'chamfer') && topologySelection?.picks[0]?.kind === 'edge') return startTopologyFeature(kind);
     // A command opened from a feature's own menu works on that feature; otherwise a selected plane, axis or the origin feeds it.
-    const draft = cadFeatureWithReference(featureDraft(kind, document, source ?? selected, currentBodyIds, plane), source ? null : selectedReference, document);
+    const draft = cadFeatureWithReference(featureDraft(kind, document, source ?? selected, currentBodyIds, bodyLineage, plane), source ? null : selectedReference, document);
     setProperties(null); setNewFeature(draft); setSketchId(null); setCurveId(null); if (kind === 'curve') setTool('path'); setProfileId(null); setEditorPending(false);
   });
   const createSketchOnPlane = (plane: CadSketchPlane) => {
     if (typeof plane !== 'string' && !document.features.some(feature => feature.id === plane.featureId && feature.kind === 'datum-plane' && cadFeatureActive(feature, document))) return;
-    const feature = featureDraft('sketch', document, undefined, currentBodyIds, plane);
+    const feature = featureDraft('sketch', document, undefined, currentBodyIds, bodyLineage, plane);
     setPlaneSelection({ documentId: document.id, plane });
     submitEdit(signal => props.onEdit({ kind: 'add-feature', feature }, signal), () => {
       setPlaneSelection(null); setPickedTopology(null); setSelectedId(feature.id); setSketchId(feature.id); setCurveId(null); setProfileId(null); setTool('rectangle'); setError(null);
@@ -1439,7 +1447,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   };
   const addPlugin = (plugin: CadPluginPackage) => {
     try {
-      const target = sketch ?? selectedSketch ?? featureDraft('sketch', document, selected, currentBodyIds);
+      const target = sketch ?? selectedSketch ?? featureDraft('sketch', document, selected, currentBodyIds, bodyLineage);
       if (target.kind !== 'sketch') throw new Error('Plugin profiles require a sketch.');
       const id = crypto.randomUUID();
       const edits: CadEdit[] = document.features.some(feature => feature.id === target.id) ? [] : [{ kind: 'add-feature', feature: target }];

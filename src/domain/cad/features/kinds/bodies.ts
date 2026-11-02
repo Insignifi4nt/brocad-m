@@ -83,6 +83,6 @@ const mirrorShape = cadFeatureShape(Type.Literal('mirror'), {
 export const mirror = {
   kind: 'mirror', family: 'body', ...mirrorShape,
   // The source stays a body of its own beside the mirrored copy.
-  outputs: ['body'], body: 'new', suppression: 'no-output', evaluator: { owner: 'kernel', version: 1 },
+  outputs: ['body'], body: 'new', suppression: 'no-output', occurrence: 'mirror', evaluator: { owner: 'kernel', version: 1 },
   diagnostics: ['missing-body']
 } satisfies CadFeatureDefinition<'mirror'>;

@@ -3,7 +3,7 @@ import { act, useEffect, useState, useSyncExternalStore, type ReactNode } from '
 import { AppRailProvider, useAppRail } from '@/app/AppRailContext';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CadBuildResult, CadDocument, CadSketchPlane } from '@/domain/cad/cadDocument';
+import type { CadBuildResult, CadDocument, CadMesh, CadSketchPlane } from '@/domain/cad/cadDocument';
 import type { CadTopologyDescriptor, CadTopologyResolvePicksResult } from '@/domain/cad/cadTopology';
 import { CadTangentContours, type CadTopologyAdjacency, type CadTopologyAdjacencyRequest, type CadTopologyTangentChain, type CadTopologyTangentChainRequest } from '@/domain/cad/cadTopologyAdjacency';
 import { CAD_TOPOLOGY_LONE_EDGE_NOTE } from '@/domain/cad/selection/cadTopologySelection';
@@ -4608,6 +4608,30 @@ describe('CAD sketch interaction', () => {
     const sourceSelect = [...container.querySelectorAll('label')].find((label) => label.querySelector('span')?.textContent === 'Body')?.querySelector('select');
     expect(sourceSelect?.value).toBe('fillet');
     expect([...sourceSelect?.options ?? []].map((option) => option.value)).toEqual(['fillet']);
+    await click('Apply');
+    expect(currentDocument.features.at(-1)).toMatchObject({ kind: 'transform', sourceId: 'fillet' });
+  });
+
+  it('follows a selected historical feature to its own body by key, not to the latest body', async () => {
+    const plate = { kind: 'rectangle' as const, x: 0, y: 0, width: 50, height: 40, cornerRadius: 0 }, block = { ...plate, x: 80, width: 10 };
+    const initial = applyCadEdits(createCadDocument(), [
+      { kind: 'add-feature', feature: { id: 'sketch', name: 'Outline', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false, profiles: [{ id: 'rectangle', name: 'Plate', construction: false, geometry: plate }] } },
+      { kind: 'add-feature', feature: { id: 'pad', name: 'Pad 1', kind: 'extrude', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null } },
+      { kind: 'add-feature', feature: { id: 'fillet', name: 'Fillet 1', kind: 'fillet', suppressed: false, targetId: 'pad', radius: 1 } },
+      { kind: 'add-feature', feature: { id: 'block_sketch', name: 'Block outline', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false, profiles: [{ id: 'block', name: 'Block', construction: false, geometry: block }] } },
+      { kind: 'add-feature', feature: { id: 'block', name: 'Block', kind: 'extrude', suppressed: false, sketchId: 'block_sketch', distance: 10, symmetric: false, operation: 'new', targetId: null } },
+    ]);
+    const mesh = (featureId: string, name: string, bodyKey: string, min: number, max: number) => ({ featureId, bodyKey, name, positions: [], normals: [], indices: [], edges: [], faceGroups: [], edgeGroups: [], volume: 100,
+      bounds: { min: [min, 0, 0] as const, max: [max, 40, 10] as const } }) as unknown as CadMesh;
+    const section = vi.fn();
+    await mount(initial, { onSectionForCam: section, buildState: 'ready', build: { buildId: 'build-1', meshes: [mesh('fillet', 'Fillet 1', 'pad', 0, 50), mesh('block', 'Block', 'block', 80, 90)], diagnostics: [], durationMs: 1 } });
+    await click('Select Pad 1 in history'); await click('File'); await click('Section for CAM');
+    expect(section).toHaveBeenLastCalledWith('fillet');
+    await click('Select Outline in history'); await click('File'); await click('Section for CAM');
+    expect(section).toHaveBeenLastCalledWith('block');
+    await click('Select Pad 1 in history'); await click('Move');
+    const sourceSelect = [...container.querySelectorAll('label')].find((label) => label.querySelector('span')?.textContent === 'Body')?.querySelector('select');
+    expect(sourceSelect?.value).toBe('fillet');
     await click('Apply');
     expect(currentDocument.features.at(-1)).toMatchObject({ kind: 'transform', sourceId: 'fillet' });
   });
