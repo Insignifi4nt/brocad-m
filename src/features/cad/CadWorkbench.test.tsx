@@ -4671,7 +4671,8 @@ describe('CAD sketch interaction', () => {
     expect(currentDocument.features[0]).toEqual(feature); expect(() => currentSession.assertWorkflowClosed()).not.toThrow();
   });
 
-  it('dimensions parallel lines, a point or curve center from a line, and two curve centers with a distance', async () => {
+  /** A sketch of lines, circles and points to dimension, open for editing, with picks and a placement that undoes what it placed. */
+  async function distanceSketch() {
     const source = parseCadDocument({ ...createCadDocument(), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Distances', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
       points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [20, 0] }, { id: 'c', position: [0, 10] }, { id: 'd', position: [20, 10] }, { id: 'e', position: [30, 0] },
         { id: 'f', position: [40, 10] }, { id: 'p', position: [5, 4] }, { id: 'o', position: [10, -6] }, { id: 'q', position: [40, -6] }],
@@ -4692,6 +4693,11 @@ describe('CAD sketch interaction', () => {
       const added = relations(); await act(async () => currentSession.undo()); expect(currentDocument).toEqual(source);
       return added;
     };
+    return { source, pick, line, point, geometry, place };
+  }
+
+  it('dimensions parallel lines, a point or curve center from a line, and two curve centers with a distance', async () => {
+    const { source, pick, line, point, geometry, place } = await distanceSketch();
     // Two parallel lines take a distance from the second line to the first, held parallel.
     await click('Dimension'); await pick(line('base')); await pick(line('top'));
     expect(await place()).toEqual([{ id: expect.any(String), kind: 'point-line-distance', pointId: 'c', lineId: 'base', side: 'left', value: 10 },
@@ -4710,6 +4716,12 @@ describe('CAD sketch interaction', () => {
     // A circle takes a distance from a line, measured from its center, or from a second circle, center to center.
     await pick(line('ring')); await pick(line('base')); expect(await place()).toMatchObject([{ kind: 'point-line-distance', pointId: 'o', lineId: 'base', value: 6 }]);
     await pick(line('ring')); await pick(line('disk')); expect(await place()).toEqual([{ id: expect.any(String), kind: 'distance', pointIds: ['o', 'q'], value: 30 }]);
+    expect(currentDocument).toEqual(source);
+  });
+
+  it('dimensions a point from a curve center, and starts a distance from a selected point and line in the toolbar and the context menu', async () => {
+    const { source, pick, line, point, geometry, place } = await distanceSketch();
+    await click('Dimension');
     // A point and an arc or circle, picked in either order or selected, take a point-pair distance to its center; a circle does not take its own center.
     await pick(point('p')); await pick(line('ring')); expect(await place('Horizontal distance')).toMatchObject([{ kind: 'axis-distance', axis: 'x', pointIds: ['p', 'o'], value: 5 }]);
     await pick(line('disk')); expect(container.querySelector(point('q'))?.getAttribute('aria-disabled')).toBe('true');
