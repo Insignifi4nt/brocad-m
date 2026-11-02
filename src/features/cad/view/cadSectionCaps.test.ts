@@ -138,7 +138,8 @@ describe('section caps in the view', () => {
   const capIn = (object: THREE.Group): CadSectionCap => ({ fans: (object.children[0] as THREE.Mesh).geometry, fill: (object.children[2] as THREE.Mesh).geometry, groups: null });
 
   it('caps every cut body where it lies, far from the origin too, and none it does not cut or that is open', () => {
-    const made = createCadSectionCaps();
+    // Built in one go, so a slow runner moving a cap to a later slice can't fail the checks below, which run at once.
+    const made = createCadSectionCaps({ sliceMs: Infinity });
     const near = body(new THREE.BoxGeometry(10, 10, 10), [0, 0, 0]);
     // Far away, the body's vertices are near its own origin and the cap keeps their precision.
     const far = body(new THREE.BoxGeometry(2, 2, 2), [6000000, 0.005, 0.5]);
@@ -181,7 +182,8 @@ describe('section caps in the view', () => {
   });
 
   it('builds caps once for each plane and upload, keeps them while hidden, and draws nothing when no body is cut', () => {
-    const made = createCadSectionCaps();
+    // Built in one go: hiding a build still in progress drops it, which is the slicing test's subject, not this one's.
+    const made = createCadSectionCaps({ sliceMs: Infinity });
     made.setBodies([body(new THREE.BoxGeometry(10, 10, 10), [0, 0, 0])]);
     const plane = below(1);
     made.setPlane(plane); const first = shownCaps(made)[0];
@@ -225,6 +227,11 @@ describe('section caps in the view', () => {
     expect(drain()).toBeGreaterThan(3);
     expect(shownCaps(made)).toHaveLength(1); expect(zValues(capIn(shownCaps(made)[0]))).toEqual([2]); expect(made.group.visible).toBe(true);
     expect(onChange).toHaveBeenCalledTimes(1);
+    // A build finished in a later slice is kept while hidden, and showing the same plane again draws it, with nothing to build.
+    const finished = shownCaps(made)[0];
+    made.setPlane(null); expect(made.group.visible).toBe(false);
+    made.setPlane(below(2)); expect(queue.size).toBe(0);
+    expect(shownCaps(made)).toHaveLength(1); expect(shownCaps(made)[0]).toBe(finished); expect(made.group.visible).toBe(true);
     // The prepared body is kept for the next plane, which needs only the cut.
     made.setPlane(below(3)); drain(); expect(zValues(capIn(shownCaps(made)[0]))).toEqual([3]);
     // A new upload drops a build in progress for the old bodies.
