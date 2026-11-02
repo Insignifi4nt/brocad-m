@@ -157,7 +157,7 @@ export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: 
         : { ...common, kind: 'arc', centerPointId: addPoint(`${idPrefix}_c${index}`, edge.center), direction: edge.clockwise ? 'cw' : 'ccw' });
     });
   }
-  const graph = parseCadSketchGraph({ points, entities, relations: generated?.relations ?? [] }), compiled = compileCadSketchGraph(graph, {});
+  const graph = parseCadSketchGraph({ points, entities, relations: generated?.relations ?? [] }), compiled = compileCadSketchGraph(graph, parameters);
   if (compiled.cycles.length !== 1 || compiled.cycles[0].sourceRefs.length !== entities.length
     || compiled.openEntityIds.length || compiled.branchedEntityIds.length || compiled.arrangementEntityIds.length) return invalid('Copy needs one simple closed analytic cycle.');
   const byId = new Map(compiled.segments.map(segment => [segment.id, segment]));

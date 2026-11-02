@@ -63,6 +63,42 @@ describe('document-level independent profile copy preparation', () => {
     expect(prepared.sketchDiagnostics.find(entry => entry.sketchId === 'copy')?.diagnostics).toMatchObject({ status: 'success', conflictingIds: [], redundantIds: [], partiallyRedundantIds: [] });
   });
 
+  // A copied relation keeps its expression, so the copy is checked with the document's parameters, as the source was.
+  const square = [[0, 0], [10, 0], [10, 10], [0, 10]] as const;
+  const bound = (parameters: Readonly<Record<string, number>>, graph: CadSketchGraph) => parseCadDocument({ ...createCadDocument('Bound', 'cad_bound'), schemaVersion: 2, parameters,
+    features: [{ id: 'source', kind: 'sketch', name: 'Source', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph }] });
+  const prepared = (session: CadSession, edits: readonly CadEdit[]) => session.editPrepared(session.getSnapshot().version, async document => (await prepareCadEdits(document, edits, runtime)).document);
+  const copyOf = (session: CadSession) => session.getSnapshot().document.features.find((feature): feature is CadSketchFeature => feature.id === 'copy' && feature.kind === 'sketch');
+  const copyEdit = (profileId: string) => ({ kind: 'copy-sketch-profile', sourceSketchId: 'source', profileId, newSketchId: 'copy', name: 'Copy', idPrefix: 'copy' }) as const;
+
+  it('copies a linked offset whose angle is bound to a parameter, keeping the expression, and undoes the copy', async () => {
+    const session = new CadSession(bound({ theta: 90 }, {
+      points: square.map((position, index) => ({ id: `p${index}`, position: [...position] })),
+      entities: square.map((_, index) => ({ id: `l${index}`, kind: 'line', construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })),
+      relations: [{ id: 'angle', kind: 'line-angle', rays: [{ lineId: 'l1', towardPointId: 'p2' }, { lineId: 'l0', towardPointId: 'p0' }], sense: 'ccw', value: 'theta' }] }));
+    await prepared(session, [{ kind: 'set-sketch-generator', sketchId: 'source', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
+      geometry: { kind: 'offset', chain: square.map((_, index) => ({ entityId: `l${index}`, reversed: false })), distance: 2 } } }]);
+    const offset = session.getSnapshot();
+    await prepared(session, [copyEdit('wall')]);
+    const copy = copyOf(session)!.graph!;
+    expect(copy.relations).toContainEqual(expect.objectContaining({ id: 'copy_r_angle', kind: 'line-angle', value: 'theta' }));
+    // The square grown by 2 on each side.
+    expect(Math.abs(cadAnalyticPathMetrics({ kind: 'path', segments: compileCadSketchGraph(copy, { theta: 90 }).cycles[0].path }).signedArea)).toBeCloseTo(14 * 14, 9);
+    session.undo();
+    expect(session.getSnapshot().document).toEqual(offset.document); expect(copyOf(session)).toBeUndefined();
+  });
+
+  it('copies a generated rectangle with a user relation bound to a parameter, keeping the expression, and undoes the copy', async () => {
+    const session = new CadSession(bound({ zero: 0 }, { points: [], entities: [], relations: [
+      { id: 'rect', kind: 'generator', idPrefix: 'rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } }] }));
+    await prepared(session, [{ kind: 'set-sketch-relation', sketchId: 'source', relation: { id: 'pin', kind: 'fixed-point', pointId: 'rect_p0', position: ['zero', 'zero'] } }]);
+    const pinned = session.getSnapshot();
+    await prepared(session, [copyEdit('rect')]);
+    expect(copyOf(session)!.graph!.relations).toContainEqual({ id: 'copy_u0', kind: 'fixed-point', pointId: 'copy_p0', position: ['zero', 'zero'] });
+    session.undo();
+    expect(session.getSnapshot().document).toEqual(pinned.document); expect(copyOf(session)).toBeUndefined();
+  });
+
   it('uses the preceding parameter intent and retains shared datum placement and existing source consumers', async () => {
     const base = profileCopySlotPart(), source = base.features[0]; if (source.kind !== 'sketch') throw new Error('Source missing.');
     const sketch = { ...source, plane: { kind: 'datum-plane', featureId: 'datum' } } as const;

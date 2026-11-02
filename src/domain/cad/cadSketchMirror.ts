@@ -119,7 +119,7 @@ export function prepareCadSketchMirror({ sketch, parameters, ...request }: CadSk
     for (const id of members.slice(1)) relations.push({ id: `${request.idPrefix}_j${relations.length}`, kind: 'coincident', pointIds: [mappedId(members[0]), mappedId(id)] });
   }
   const addition = parseCadSketchGraph({ points, entities, relations });
-  const copiedGeometry = compileCadSketchGraph(addition, {});
+  const copiedGeometry = compileCadSketchGraph(addition, parameters);
   const vector = (from: string, to: string, values = positions) => ({ x: position(to, values).x - position(from, values).x, y: position(to, values).y - position(from, values).y });
   const checkVector = (from: string, to: string) => {
     const old = vector(from, to), next = vector(from, to, reflected), offset = 2 * dot(old, normal);

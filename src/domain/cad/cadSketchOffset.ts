@@ -116,9 +116,9 @@ export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSk
         : { ...common, kind: 'line' });
     });
   }
-  const addition = parseCadSketchGraph({ points, entities, relations: [] }), issue = checkCadSketchGraph(addition, {})[0];
+  const addition = parseCadSketchGraph({ points, entities, relations: [] }), issue = checkCadSketchGraph(addition, parameters)[0];
   if (issue) return fail(`The offset does not preserve exact graph geometry: ${issue.message}`);
-  const isolated = compileCadSketchGraph(addition, {});
+  const isolated = compileCadSketchGraph(addition, parameters);
   if (isolated.cycles.length !== 1 || isolated.cycles[0].sourceRefs.length !== entities.length || isolated.arrangementEntityIds.length)
     return fail('The offset crosses, touches or overlaps itself; topology-changing offsets are not supported.');
   const result = appendCadSketchEntities({ sketch: structuredClone(sketch), geometry: addition });
