@@ -27,12 +27,12 @@ export function cadGeneratorRemovals(error: unknown): CadGeneratorRemovals | und
 export const sameCadGeneratorRemovals = (left: CadGeneratorRemovals | undefined, right: CadGeneratorRemovals | undefined) =>
   left === right || Boolean(left && right && left.relationIds.length === right.relationIds.length && left.relationIds.every((id, index) => id === right.relationIds[index]));
 
-/** The relation `relation` names in `document`, and how it is labelled: a generator by its name, another relation as its sketch lists it. */
-function removedRelation(document: CadDocument, relation: CadSketchGeneratorRemovedRelation) {
+/** How `relation` is labelled in `document`: a generator by its name, another relation as its sketch lists it, or as the refusal named it. */
+function removedRelationLabel(document: CadDocument, relation: CadSketchGeneratorRemovedRelation): string {
   const sketch = document.features.find(feature => feature.kind === 'sketch' && (relation.sketchId === undefined || feature.id === relation.sketchId)
     && feature.graph?.relations.some(value => value.id === relation.relationId));
   const graph = sketch?.kind === 'sketch' ? sketch.graph : undefined, value = graph?.relations.find(item => item.id === relation.relationId);
-  return { shape: value?.kind === 'generator', label: graph && value?.kind !== 'generator' ? describeCadSketchConstraintSource(graph, { kind: 'relation', id: relation.relationId }).label : relation.name };
+  return graph && value?.kind !== 'generator' ? describeCadSketchConstraintSource(graph, { kind: 'relation', id: relation.relationId }).label : relation.name;
 }
 
 /**
@@ -41,7 +41,7 @@ function removedRelation(document: CadDocument, relation: CadSketchGeneratorRemo
  */
 export function cadGeneratorRemovalText(document: CadDocument, removals: CadGeneratorRemovals): string {
   const { relations } = removals;
-  const labels = relations.slice(0, 3).map(relation => removedRelation(document, relation).label);
+  const labels = relations.slice(0, 3).map(relation => removedRelationLabel(document, relation));
   const omitted = relations.length - labels.length, shapes = new Set(relations.map(relation => `${relation.sketchId ?? ''}\u0000${relation.generator}`)).size;
   return `This removes ${relations.length === 1 ? 'one relation' : `${relations.length} relations`} on geometry the ${shapes === 1 ? 'shape' : 'shapes'} no longer ${shapes === 1 ? 'has' : 'have'}: ${labels.join('; ')}${omitted ? `; ${omitted} more` : ''}.`;
 }
@@ -53,17 +53,19 @@ export function cadGeneratorRemovalPrompt(document: CadDocument, removals: CadGe
 }
 
 /**
- * The notice a deletion's dialog shows while Delete confirms `removals`: the relations that use the geometry it deletes and the shapes made
- * from that geometry, the first few by their labels in `document`, which go with it unless Cancel keeps everything.
+ * The notice a deletion's dialog shows while Delete confirms `removals`, the shapes made from the geometry it deletes, the first few by
+ * their names, which go with it unless Cancel keeps everything. `from` stands for what is deleted. The relations on that geometry go
+ * with it unnamed, as they mean nothing without it.
  */
-export function cadDeletionRemovalPrompt(document: CadDocument, removals: CadGeneratorRemovals): string {
-  const found = removals.relations.map(relation => removedRelation(document, relation)), shapes = found.filter(item => item.shape).length;
-  const count = (value: number, noun: string) => value === 1 ? `one ${noun}` : `${value} ${noun}s`;
-  const parts = [...found.length > shapes ? [count(found.length - shapes, 'relation')] : [], ...shapes ? [count(shapes, 'shape')] : []];
-  const labels = found.slice(0, 3).map(item => item.label), omitted = found.length - labels.length, them = found.length === 1 ? 'it' : 'them';
-  return `This also removes ${parts.join(' and ')} that ${found.length === 1 ? 'uses' : 'use'} its geometry: ${labels.join('; ')}${omitted ? `; ${omitted} more` : ''}.`
-    + ` Delete removes ${them}, or Cancel keeps ${them}.`;
+function deletionPrompt(document: CadDocument, removals: CadGeneratorRemovals, from: 'it' | 'them'): string {
+  const labels = removals.relations.map(relation => removedRelationLabel(document, relation)), shown = labels.slice(0, 3);
+  return labels.length === 1 ? `This also removes the shape ${labels[0]} made from ${from}.`
+    : `This also removes ${labels.length} shapes made from ${from}: ${shown.join('; ')}${labels.length > shown.length ? `; ${labels.length - shown.length} more` : ''}.`;
 }
+/** The deletion notice when one shape or item is deleted. */
+export const cadDeletionRemovalPrompt = (document: CadDocument, removals: CadGeneratorRemovals) => deletionPrompt(document, removals, 'it');
+/** The deletion notice when several items are deleted together. */
+export const cadDeletionsRemovalPrompt = (document: CadDocument, removals: CadGeneratorRemovals) => deletionPrompt(document, removals, 'them');
 
 /** Why edits that remove `removals` cannot apply when none of them is an edit that can confirm the removal. */
 export function cadGeneratorRemovalRefusal(document: CadDocument, removals: CadGeneratorRemovals): string {

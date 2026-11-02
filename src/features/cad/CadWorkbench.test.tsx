@@ -455,7 +455,7 @@ describe('CAD sketch interaction', () => {
     expect(generated('off')).toEqual({ ...offset, geometry: { ...offset.geometry, distance: 'gap' } });
     close(at('off_j_l3'), 37, -3); close(at('off_j_l1'), 53, 13);
   });
-  it('asks before deleting a shape removes a relation or a shape made from it, from its tree row, canvas menu and the toolbar, in one undo step', async () => {
+  it('asks before deleting a shape removes a shape made from it, from its tree row, canvas menu and the toolbar, in one undo step', async () => {
     // A free point tied to the hexagon's first corner, and a linked offset of its edges.
     const hex = { id: 'hex', kind: 'generator', idPrefix: 'hex', name: 'Hex', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 6, directionId: '@h' } } as const;
     const off = { id: 'off', kind: 'generator', idPrefix: 'off', construction: false,
@@ -464,7 +464,7 @@ describe('CAD sketch interaction', () => {
       suppressed: false, profiles: [], graph: { points: [{ id: 'free', position: [10, 0] }], entities: [], relations: [hex, { id: 'tie', kind: 'coincident', pointIds: ['free', 'hex_v0'] }, off] } }] });
     await mount(initial, { build: null, buildState: 'idle' });
     const dialog = () => container.querySelector('[role="dialog"]');
-    const asked = 'Delete Hex?This also removes one relation and one shape that use its geometry: ';
+    const asked = 'Delete Hex?This also removes the shape Offset "off" made from it.';
     // The relations people placed, and the generators; their members' own relations are named in a generator's namespace.
     const ids = () => sketchGraph().relations.map(relation => relation.id).filter(id => !id.includes('_'));
     const treeDelete = async () => {
@@ -474,9 +474,9 @@ describe('CAD sketch interaction', () => {
       const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(entry => entry.textContent?.trim() === 'Delete shape'); if (!item) throw new Error('Delete shape missing.');
       await act(async () => item.click());
     };
-    // The tree row asks, naming the tie and the offset; Cancel and Escape keep everything.
+    // The tree row asks, naming only the offset, as the tie goes with the corner it is on; Cancel and Escape keep everything.
     await treeDelete();
-    expect(dialog()?.textContent).toBe(`${asked}Coincident relation 2 · Point 1 and Point 2; Offset "off". Delete removes them, or Cancel keeps them.Cancel Delete`);
+    expect(dialog()?.textContent).toBe(`${asked}Cancel Delete`);
     expect(currentDocument).toBe(initial);
     await click('Cancel'); expect(dialog()).toBeNull(); expect(currentDocument).toBe(initial);
     await treeDelete(); await act(async () => dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
@@ -511,28 +511,52 @@ describe('CAD sketch interaction', () => {
     await act(async () => currentSession.undo()); expect(ids()).toEqual(['hex', 'tie', 'off']);
     await act(async () => row().click()); await rowKey(); expect(dialog()?.textContent).toContain(asked); await click('Delete'); expect(ids()).toEqual([]);
     await act(async () => currentSession.undo()); expect(ids()).toEqual(['hex', 'tie', 'off']);
-    // A shape nothing else uses goes at once.
+    // A shape no other shape is made from goes at once, the tie on its corner with it, and one Undo brings both back.
     await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'off' }));
     await click('Delete selected feature or profile'); expect(dialog()).toBeNull(); expect(ids()).toEqual(['hex', 'tie']);
+    const tied = currentDocument;
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'hex' }));
+    await click('Delete selected feature or profile'); expect(dialog()).toBeNull(); expect(ids()).toEqual([]);
+    expect(sketchGraph().points.map(point => point.id)).toEqual(['free']);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(tied);
   });
-  it('asks before Delete on the Relations row of a shape whose mark is hidden removes a relation on it', async () => {
+  it('asks before Delete on the Relations row of a shape whose mark is hidden removes a shape made from it', async () => {
     const ring = { id: 'ring', kind: 'generator', idPrefix: 'ring', name: 'Ring', construction: false, geometry: { kind: 'circle', x: 30, y: 0, radius: 4 } } as const;
+    const rim = { id: 'rim', kind: 'generator', idPrefix: 'rim', construction: false, geometry: { kind: 'offset', chain: [{ entityId: 'ring_c0', reversed: false }], distance: 2 } } as const;
     const initial = parseCadDocument({ ...createCadDocument('Ring', 'ring-delete'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Ring', plane: 'XY', offset: 0,
-      suppressed: false, profiles: [], graph: { points: [{ id: 'pin', position: [30, 0] }], entities: [], relations: [ring, { id: 'hold', kind: 'coincident', pointIds: ['pin', 'ring_k0'] }] } }] });
+      suppressed: false, profiles: [], graph: { points: [{ id: 'pin', position: [30, 0] }], entities: [], relations: [ring, { id: 'hold', kind: 'coincident', pointIds: ['pin', 'ring_k0'] }, rim] } }] });
     await mount(initial, { build: null, buildState: 'idle' });
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
     const toggle = container.querySelector<HTMLButtonElement>('[data-cad-sketch-relation-list] .cad-sketch-relation-list-toggle');
     if (toggle?.getAttribute('aria-expanded') === 'false') await act(async () => toggle.click());
     const row = container.querySelector<HTMLButtonElement>('button[data-cad-sketch-relation-row="ring"]'); if (!row) throw new Error('Ring row missing.');
-    // With relation marks hidden, the row is the only thing that names the shape's relation.
+    // With relation marks hidden, the row is the only thing that names the shape; the offset made from it is named, the pin's tie is not.
     await act(async () => setCadPreferences({ ...getCadPreferences(), showRelations: false }));
     try {
       await act(async () => { row.focus(); row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })); });
-      expect(container.querySelector('[role="dialog"]')?.textContent).toContain('Delete Ring?This also removes one relation that uses its geometry: ');
+      expect(container.querySelector('[role="dialog"]')?.textContent).toBe('Delete Ring?This also removes the shape Offset "rim" made from it.Cancel Delete');
       expect(currentDocument).toBe(initial);
       await click('Delete');
       expect(sketchGraph().relations).toEqual([]); expect(sketchGraph().points.map(point => point.id)).toEqual(['pin']);
     } finally { setCadPreferences({ ...getCadPreferences(), showRelations: true }); }
+  });
+  it('asks before geometry Delete removes a shape made from what it deletes, naming it for all the items it deletes', async () => {
+    // A circle, a free point tied level with its centre, and an offset made from the circle.
+    const rim = { id: 'rim', kind: 'generator', idPrefix: 'rim', construction: false, geometry: { kind: 'offset', chain: [{ entityId: 'c', reversed: false }], distance: 2 } } as const;
+    const initial = parseCadDocument({ ...createCadDocument('Rim', 'rim-delete'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Rim', plane: 'XY', offset: 0,
+      suppressed: false, profiles: [], graph: { points: [{ id: 'k', position: [30, 0] }, { id: 'p', position: [40, 0] }],
+        entities: [{ id: 'c', kind: 'circle', construction: false, centerPointId: 'k', radius: 4 }], relations: [{ id: 'level', kind: 'horizontal', pointIds: ['k', 'p'] }, rim] } }] });
+    await mount(initial, { build: null, buildState: 'idle' });
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const dialog = () => container.querySelector('[role="dialog"]');
+    await act(async () => viewport().apply({ kind: 'select-sketch-geometry-set', selections: [{ kind: 'entity', id: 'c' }, { kind: 'point', id: 'p' }] }));
+    await click('Delete selected geometry');
+    expect(dialog()?.textContent).toBe('Delete 2 sketch items?This also removes the shape Offset "rim" made from them.Cancel Delete');
+    expect(currentDocument).toBe(initial);
+    // Delete takes the circle, the point, the level tie on it and the offset, and one Undo brings them all back.
+    await click('Delete'); expect(dialog()).toBeNull();
+    expect(sketchGraph().points.map(point => point.id)).toEqual(['k']); expect(sketchGraph().entities).toEqual([]); expect(sketchGraph().relations).toEqual([]);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
   });
   it('reopens a circular pattern of count 1, which draws no copy, from its tree row and its Relations row', async () => {
     const pattern = { id: 'pat', kind: 'generator', idPrefix: 'pat', construction: false, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 } } as const;
@@ -3406,16 +3430,17 @@ describe('CAD sketch interaction', () => {
       await act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: 'hole' } }));
       await press('angle', 'Backspace'); expect(ids()).toEqual(['diagonal', 'angle', 'x', 'measured']); expect(entities()).toEqual(['base', 'side', 'hole']);
       await press('angle', 'Delete'); expect(entities()).toEqual(['base', 'side']); expect(ids()).toEqual(['diagonal', 'angle', 'x', 'measured']);
-      // A selected point goes, not the focused edge. Its X dimension goes with it, so its dialog asks first.
-      const asked = () => container.querySelector('[role="dialog"]')?.textContent;
+      // A selected point goes, not the focused edge, with its X dimension and without asking, as no shape is made from it.
+      const dialog = () => container.querySelector('[role="dialog"]');
       await act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'point', id: 'o' } }));
-      await pressGeometry('[data-cad-sketch-entity="side"]', 'Delete'); expect(points()).toEqual(['a', 'b', 'c', 'o']);
-      expect(asked()).toBe('Delete this point?This also removes one relation that uses its geometry: Distance relation 3 · Point 4 and V axis. Delete removes it, or Cancel keeps it.Cancel Delete');
-      await click('Delete'); expect(entities()).toEqual(['base', 'side']); expect(points()).toEqual(['a', 'b', 'c']); expect(ids()).toEqual(['diagonal', 'angle', 'measured']);
-      // With nothing selected the focused label or edge is the one removed, the edge with the angle and measurement on it once asked.
+      await pressGeometry('[data-cad-sketch-entity="side"]', 'Delete'); expect(dialog()).toBeNull();
+      expect(entities()).toEqual(['base', 'side']); expect(points()).toEqual(['a', 'b', 'c']); expect(ids()).toEqual(['diagonal', 'angle', 'measured']);
+      // With nothing selected the focused label or edge is the one removed, the edge with the angle and measurement on it.
       await press('diagonal', 'Delete'); expect(ids()).toEqual(['angle', 'measured']);
-      await pressGeometry('[data-cad-sketch-entity="side"]', 'Delete'); expect(asked()).toContain('Delete this line?This also removes 2 relations that use its geometry: ');
-      await click('Delete'); expect(entities()).toEqual(['base']); expect(ids()).toEqual([]);
+      const before = currentDocument;
+      await pressGeometry('[data-cad-sketch-entity="side"]', 'Delete'); expect(dialog()).toBeNull(); expect(entities()).toEqual(['base']); expect(ids()).toEqual([]);
+      // One Undo brings back the edge and both relations.
+      await act(async () => currentSession.undo()); expect(currentDocument).toEqual(before);
     });
 
     it('selects, edits, converts, highlights and deletes a point to line distance the circle and line picks placed from its center', async () => {

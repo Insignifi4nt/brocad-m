@@ -3,7 +3,7 @@ import { cadFeatureActive } from '@/domain/cad/features/cadFeatureActivity';
 import { MenuItem, MenuSeparator, MenuSurface } from '@/components/ui/menu';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
-import { cadDeletionRemovalPrompt, cadGeneratorRemovalPrompt, cadGeneratorRemovals, type CadGeneratorRemovals } from './cadGeneratorRemovals';
+import { cadDeletionRemovalPrompt, cadDeletionsRemovalPrompt, cadGeneratorRemovalPrompt, cadGeneratorRemovals, type CadGeneratorRemovals } from './cadGeneratorRemovals';
 import { useCadGeneratorRemovalConfirmation } from './useCadGeneratorRemovalConfirmation';
 import type { CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
@@ -416,14 +416,16 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const [cancelSignal, setCancelSignal] = useState(0);
   const [deleteFeature, setDeleteFeature] = useState<CadFeature | null>(null);
   /**
-   * A sketch deletion that removes relations or shapes it was not given, held while its dialog asks through the shared removal
-   * confirmation. It holds only for the part it was prepared from, so a change of the part closes the dialog with nothing deleted.
+   * A sketch deletion that removes shapes made from what it deletes, held while its dialog asks through the shared removal confirmation;
+   * `several` when it deletes more than one item. It holds only for the part it was prepared from, so a change of the part closes the
+   * dialog with nothing deleted.
    */
   const [sketchDeletion, setSketchDeletion] = useState<{ readonly document: CadDocument; readonly version: string; readonly title: string;
-    readonly edits: readonly CadEdit[]; readonly accepted: () => void } | null>(null);
+    readonly several: boolean; readonly edits: readonly CadEdit[]; readonly accepted: () => void } | null>(null);
   const currentSketchDeletion = sketchDeletion?.document === document && sketchDeletion.version === props.documentVersion ? sketchDeletion : null;
   useLayoutEffect(() => { if (sketchDeletion && !currentSketchDeletion) setSketchDeletion(null); }, [sketchDeletion, currentSketchDeletion]);
-  const deletionConfirmation = useCadGeneratorRemovalConfirmation(document, currentSketchDeletion?.edits ?? null, cadDeletionRemovalPrompt);
+  const deletionConfirmation = useCadGeneratorRemovalConfirmation(document, currentSketchDeletion?.edits ?? null,
+    currentSketchDeletion?.several ? cadDeletionsRemovalPrompt : cadDeletionRemovalPrompt);
   const deleting = deleteFeature !== null || currentSketchDeletion !== null;
   const [inspectedParameter, setInspectedParameter] = useState<string | null>(null);
   const [inspectedInput, setInspectedInput] = useState<{ profileId: string; inputName: string } | null>(null);
@@ -1011,17 +1013,18 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   useEffect(() => { if (openingParameters && openFeatureId !== openingParameters.featureId) setOpeningParameters(null); }, [openFeatureId, openingParameters]);
   useEffect(() => { if (openingProfile && profileId !== openingProfile.profileId) setOpeningProfile(null); }, [profileId, openingProfile]);
   /**
-   * Deletes in a sketch as `prepare` prepares it, which every way of deleting a shape or sketch geometry shares: at once when it removes
-   * nothing it was not given, otherwise after its dialog names the relations and shapes that go with it. Delete removes them in the same
-   * undo step, as the edit lists them; Cancel, or any change of the part while it asks, deletes nothing.
+   * Deletes in a sketch as `prepare` prepares it, which every way of deleting a shape or sketch geometry shares. The relations on what it
+   * deletes go with it, as they mean nothing without it; it asks only when another shape is made from that geometry, naming the shapes
+   * that go too. Delete removes them in the same undo step, as the edit lists them; Cancel, or any change of the part while it asks,
+   * deletes nothing. `several` says the deletion takes more than one item.
    */
-  const deleteFromSketch = (prepare: () => { readonly edit: CadEdit; readonly removed: CadSketchDeletion['removed'] }, accepted: () => void) => {
+  const deleteFromSketch = (prepare: () => { readonly edit: CadEdit; readonly removed: CadSketchDeletion['removed'] }, accepted: () => void, several = false) => {
     let prepared: ReturnType<typeof prepare>;
     try { prepared = prepare(); } catch (cause) { setError(userFacingMessage(cause, 'The edit could not be completed.')); return; }
     if (!prepared.removed.length) { submitEdit(signal => props.onEdit(prepared.edit, signal), accepted); return; }
     const edits = [prepared.edit];
     deletionConfirmation.hold({ relationIds: [...new Set(prepared.removed.map(relation => relation.relationId))], relations: prepared.removed }, edits);
-    setSketchDeletion({ document, version: props.documentVersion, title: prepared.removed[0].generator, edits, accepted });
+    setSketchDeletion({ document, version: props.documentVersion, title: prepared.removed[0].generator, several, edits, accepted });
   };
   const confirmSketchDeletion = () => {
     const confirmation = currentSketchDeletion, edits = deletionConfirmation.notice ? deletionConfirmation.edits : null;
@@ -1580,7 +1583,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     }
     const kind = selections.length === 1 && (selections[0].kind === 'point' ? 'point' : sketch.graph?.entities.find(entity => entity.id === selections[0].id)?.kind);
     const pointIds = selections.filter(item => item.kind === 'point').map(item => item.id), entityIds = selections.filter(item => item.kind === 'entity').map(item => item.id);
-    deleteFromSketch(() => prepareCadSketchDeletion({ sketch, pointIds, entityIds, relationIds: [], name: kind ? `this ${kind}` : `${selections.length} sketch items` }), () => selectGraph(null));
+    deleteFromSketch(() => prepareCadSketchDeletion({ sketch, pointIds, entityIds, relationIds: [], name: kind ? `this ${kind}` : `${selections.length} sketch items` }), () => selectGraph(null), selections.length > 1);
   };
   /**
    * Delete without annotations, or from the menu of a selected one, removes every selected dimension and relation; with another dimension
@@ -1599,11 +1602,11 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       setGraphPick(current => current?.dimensions?.some(pick => ids.includes(pick.id)) ? null : current);
       setRelationRowPick(current => current?.relationIds.some(id => ids.includes(id)) ? null : current);
     };
-    // Shapes' rows go as their shapes do, naming first what goes with them. A selection mixing shapes with other relations removes
-    // exactly what it lists, so it refuses while anything else depends on those shapes.
+    // Shapes' rows go as their shapes do, naming first the other shapes that go with them. A selection mixing shapes with other relations
+    // removes exactly what it lists, so it refuses while anything else depends on those shapes.
     if (ids.every(id => graph.relations.some(relation => relation.id === id && relation.kind === 'generator'))) {
       deleteFromSketch(() => ids.length === 1 ? prepareCadSketchShapeDeletion(sketch, ids[0])
-        : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [], relationIds: ids, name: `${ids.length} shapes` }), removed);
+        : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [], relationIds: ids, name: `${ids.length} shapes` }), removed, ids.length > 1);
       return;
     }
     submitEdit(signal => props.onEditMany(ids.map(id => ({ kind: 'remove-sketch-relation' as const, sketchId: sketch.id, relationId: id })), signal), removed, SKETCH_RELATION_FAILURE);

@@ -6,7 +6,6 @@ import { cadSketchLinearPatternForSelection } from './cadSketchLinearPattern';
 import { cadSketchGeneratorDeletion } from './sketch-generators/cadSketchGeneratorEdits';
 import type { CadEdit } from './cadOperations';
 import { cadSketchGeneratorName, cadSketchGeneratorOwner, type CadSketchGeneratorRemovedRelation } from './sketch-generators/cadSketchGenerators';
-import { cadSketchRelationDefinition } from './sketch-relations/cadSketchRelationRegistry';
 import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRelationCopy } from './sketch-relations/cadSketchRelationRemap';
 
 /** Structural intent only. The shared preparation stage solves before complete-part acceptance. */
@@ -89,11 +88,10 @@ export function deleteCadSketchElements({ sketch, pointIds, entityIds, relationI
 }
 
 /**
- * A deletion of `pointIds`, `entityIds` and `relationIds` prepared to ask before it removes more than it was given. `edit` deletes them
- * with the curves on deleted points and the members of deleted generators, without cascade, so it applies only while the sketch removes
- * nothing else. `removed` lists what else a cascade would remove: each user relation that uses geometry going, and each generator made
- * from it, with its own members. Confirming them lists their IDs among the edit's relationIds, the exact set it removes; with nothing
- * listed the edit needs no confirmation.
+ * A deletion of `pointIds`, `entityIds` and `relationIds` prepared to ask before it removes another shape. `edit` deletes them with the
+ * curves on deleted points, the members of deleted generators and the user relations on any geometry that goes, which mean nothing
+ * without it, as one exact set without cascade. `removed` lists each generator made from that geometry, which a cascade would remove
+ * with its members: confirming them lists their IDs among the edit's relationIds too, and with none listed the edit applies as it is.
  */
 export interface CadSketchDeletion {
   readonly edit: Extract<CadEdit, { readonly kind: 'delete-sketch-elements' }>;
@@ -109,15 +107,12 @@ export function prepareCadSketchDeletion({ sketch, pointIds, entityIds, relation
   // Members leave with their generator, which a deletion that names the generator lists alone.
   const member = (id: string) => { const owner = cadSketchGeneratorOwner(graph, id); return owner !== undefined && !keptRelations.has(owner.id); };
   const asked = new Set(relationIds);
-  const removed = graph.relations.filter(relation => !keptRelations.has(relation.id) && !asked.has(relation.id) && !member(relation.id)).map(relation => {
-    const generated = relation.kind === 'generator', definition = generated ? undefined : cadSketchRelationDefinition(relation);
-    return { sketchId: sketch.id, relationId: relation.id, generator: name,
-      name: generated ? cadSketchGeneratorName(relation) : `${definition!.nameOf?.(relation) ?? definition!.name} "${relation.id}"`,
-      reason: generated ? 'It is generated from geometry this deletes.' : 'It uses geometry this deletes.' };
-  });
+  const going = graph.relations.filter(relation => !keptRelations.has(relation.id) && !asked.has(relation.id) && !member(relation.id));
+  const removed = going.flatMap(relation => relation.kind !== 'generator' ? [] : [{ sketchId: sketch.id, relationId: relation.id, generator: name,
+    name: cadSketchGeneratorName(relation), reason: 'It is generated from geometry this deletes.' }]);
   const edit = { kind: 'delete-sketch-elements' as const, sketchId: sketch.id, pointIds: [...pointIds],
     entityIds: [...entityIds, ...graph.entities.flatMap(entity => !keptEntities.has(entity.id) && !entityIds.includes(entity.id) && !member(entity.id) ? [entity.id] : [])],
-    relationIds: [...relationIds], cascade: false };
+    relationIds: [...relationIds, ...going.flatMap(relation => relation.kind === 'generator' ? [] : [relation.id])], cascade: false };
   // The confirmed set is exact: a deletion it cannot make, such as a linear pattern seeded by a generated circle, refuses here rather than after asking.
   deleteCadSketchElements({ sketch, pointIds: edit.pointIds, entityIds: edit.entityIds, relationIds: [...edit.relationIds, ...removed.map(relation => relation.relationId)], cascade: false });
   return { edit, removed };

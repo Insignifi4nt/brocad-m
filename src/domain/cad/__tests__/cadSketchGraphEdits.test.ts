@@ -81,25 +81,39 @@ describe('sketch graph authoring intent', () => {
     expect(JSON.stringify(source)).toBe(before);
   });
 
-  it('prepares a deletion that names the relations it would remove besides its own, and applies only while they are exactly those', () => {
+  it('prepares a deletion that takes the relations on what it deletes as an exact set, and applies only while they are exactly those', () => {
     const source = appendCadSketchEntities({ sketch: sketch(), geometry: {
       points: [{ id: 'b', position: [10, 0] }, { id: 'c', position: [0, 10] }],
       entities: [{ id: 'ab', kind: 'line', startPointId: 'a', endPointId: 'b', construction: false }, { id: 'bc', kind: 'line', startPointId: 'b', endPointId: 'c', construction: false }],
       relations: [{ id: 'horizontal', kind: 'horizontal', pointIds: ['a', 'b'] }, { id: 'distance', kind: 'distance', pointIds: ['b', 'c'], value: 14 }]
     } });
-    // Point a takes the line on it; the horizontal relation uses both, so it is named, while the distance stays.
+    // Point a takes the line on it and the horizontal relation that uses both, unasked, while the distance stays.
     const prepared = prepareCadSketchDeletion({ sketch: source, pointIds: ['a'], entityIds: [], relationIds: [], name: 'this point' });
-    expect(prepared.edit).toEqual({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: ['a'], entityIds: ['ab'], relationIds: [], cascade: false });
-    expect(prepared.removed).toEqual([{ sketchId: 'sketch', relationId: 'horizontal', name: 'Horizontal "horizontal"', generator: 'this point', reason: 'It uses geometry this deletes.' }]);
+    expect(prepared.edit).toEqual({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: ['a'], entityIds: ['ab'], relationIds: ['horizontal'], cascade: false });
+    expect(prepared.removed).toEqual([]);
     const { kind: _kind, sketchId: _sketchId, ...edit } = prepared.edit;
-    expect(() => deleteCadSketchElements({ ...edit, sketch: source })).toThrow('depend');
-    const confirmed = { ...edit, sketch: source, relationIds: ['horizontal'] };
-    expect(deleteCadSketchElements(confirmed)).toEqual(deleteCadSketchElements({ sketch: source, pointIds: ['a'], entityIds: [], relationIds: [], cascade: true }));
-    // A relation on the line added since it asked is one it did not name, so the confirmed set no longer applies.
+    expect(deleteCadSketchElements({ ...edit, sketch: source })).toEqual(deleteCadSketchElements({ sketch: source, pointIds: ['a'], entityIds: [], relationIds: [], cascade: true }));
+    // A relation on the line added since it was prepared is one the set does not list, so the set no longer applies.
     const grown = appendCadSketchEntities({ sketch: source, geometry: { points: [], entities: [], relations: [{ id: 'level', kind: 'horizontal', pointIds: ['b', 'a'] }] } });
-    expect(() => deleteCadSketchElements({ ...confirmed, sketch: grown })).toThrow('depend');
-    // Nothing besides what it was given goes, so nothing is named.
-    expect(prepareCadSketchDeletion({ sketch: source, pointIds: [], entityIds: ['bc'], relationIds: [], name: 'this line' }).removed).toEqual([]);
+    expect(() => deleteCadSketchElements({ ...edit, sketch: grown })).toThrow('depend');
+  });
+
+  it('names only the shapes made from what a deletion deletes, which go only once their IDs are listed too', () => {
+    const part = applyCadEdits(parseCadDocument({ ...createCadDocument('Part', 'part'), schemaVersion: 2, parameters: {},
+      features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+        points: [{ id: 'k', position: [15, 0] }, { id: 'm', position: [25, 0] }], entities: [{ id: 'c', kind: 'circle', construction: false, centerPointId: 'k', radius: 2 }],
+        relations: [{ id: 'level', kind: 'horizontal', pointIds: ['k', 'm'] }] } }] }), [
+      { kind: 'set-sketch-generator', sketchId: 'sketch', generator: { id: 'spin', kind: 'generator', idPrefix: 'spin', construction: false,
+        geometry: { kind: 'circular-pattern', seedIds: ['c'], centerId: '@origin', count: 2, angle: 360 } } }
+    ]);
+    const source = part.features[0] as CadSketchFeature;
+    const prepared = prepareCadSketchDeletion({ sketch: source, pointIds: ['k'], entityIds: [], relationIds: [], name: 'this point' });
+    expect(prepared.edit).toEqual({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: ['k'], entityIds: ['c'], relationIds: ['level'], cascade: false });
+    expect(prepared.removed).toEqual([{ sketchId: 'sketch', relationId: 'spin', name: 'Circular pattern "spin"', generator: 'this point', reason: 'It is generated from geometry this deletes.' }]);
+    const { kind: _kind, sketchId: _sketchId, ...edit } = prepared.edit;
+    expect(() => deleteCadSketchElements({ ...edit, sketch: source })).toThrow('generated from the selected geometry');
+    expect(deleteCadSketchElements({ ...edit, sketch: source, relationIds: [...edit.relationIds, 'spin'] }))
+      .toEqual(deleteCadSketchElements({ sketch: source, pointIds: ['k'], entityIds: [], relationIds: [], cascade: true }));
   });
 
   it('refuses before asking a deletion its confirmed set could not make, such as a linear pattern seeded by a circle a circular pattern copies', () => {
