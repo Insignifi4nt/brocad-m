@@ -11,6 +11,12 @@ import type { CadSelectionFilter } from '@/domain/cad/selection/cadSelectionFilt
 
 const renderers = vi.hoisted((): { domElement: HTMLCanvasElement; render: ReturnType<typeof vi.fn<(scene: Scene, camera: Camera) => void>> }[] => []);
 vi.mock('@/features/editor/captureEditorPreview', () => ({ captureCanvas: vi.fn(() => ({ dataUrl: 'data:image/png;base64,AA==', width: 800, height: 600, source: '3d' })) }));
+// Caps are built in one go, as in their own tests: under the view's time slice a slow runner could still be building one when caps are
+// hidden, which drops it, and the checks that it is kept would fail. Slicing is cadSectionCaps.test.ts's subject.
+vi.mock('./view/cadSectionCaps', async importOriginal => {
+  const original = await importOriginal<typeof import('./view/cadSectionCaps')>();
+  return { ...original, createCadSectionCaps: (options: Parameters<typeof original.createCadSectionCaps>[0] = {}) => original.createCadSectionCaps({ ...options, sliceMs: Infinity }) };
+});
 vi.mock('three', async importOriginal => {
   const original = await importOriginal<typeof import('three')>();
   return { ...original, WebGLRenderer: class {
