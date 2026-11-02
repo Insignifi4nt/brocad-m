@@ -573,12 +573,13 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document;
     // A generator proposal is read as its edit is prepared, through the solver; a Trim or Extend query beside it is refused unprepared.
-    let query = captured;
+    let query = captured, source = document;
     if (captured.proposal?.generator !== undefined && captured.trimAt === undefined && captured.extendAt === undefined) {
-      query = { ...captured, proposal: await prepareCadSketchRegionProposal(document, sketchId, captured.proposal, await getSketchSolver(), signal) };
+      const prepared = await prepareCadSketchRegionProposal(document, sketchId, captured.proposal, await getSketchSolver(), signal);
+      query = { ...captured, proposal: prepared.proposal }; source = prepared.document;
       signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     }
-    const result = inspectCadSketchRegions(document, sketchId, query);
+    const result = inspectCadSketchRegions(source, sketchId, query);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(); return result;
   }
   async function readSketchRegionReference(sketchId: string, target: CadSketchRegionReadTarget, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, proposal?: CadSketchRegionProposal) {
@@ -598,12 +599,12 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       let text = cache.texts.get(targetKey);
       if (text === undefined) {
         // A generator proposal is read as its edit is prepared, through the solver.
-        let prepared = capturedProposal;
+        let prepared = { document, proposal: capturedProposal };
         if (capturedProposal.generator !== undefined) {
           prepared = await prepareCadSketchRegionProposal(document, sketchId, capturedProposal, await getSketchSolver(), signal);
           signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
         }
-        text = JSON.stringify(readCadSketchRegionReference(document, sketchId, capturedTarget, prepared));
+        text = JSON.stringify(readCadSketchRegionReference(prepared.document, sketchId, capturedTarget, prepared.proposal));
         signal?.throwIfAborted(); cache.texts.set(targetKey, text);
         proposedRegionReferenceTexts.current = cache;
       }

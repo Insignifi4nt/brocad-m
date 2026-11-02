@@ -11,6 +11,11 @@ import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTe
 
 const solver = createCadSketchTestSolver();
 const prepare = (document: CadDocument, proposal: CadSketchRegionProposal) => prepareCadSketchRegionProposal(document, 'sketch', proposal, solver);
+/** The graph cells of `proposal`, read from the part its preparation leaves. */
+const read = async (document: CadDocument, proposal: CadSketchRegionProposal, sketchId = 'sketch') => {
+  const prepared = await prepareCadSketchRegionProposal(document, sketchId, proposal, solver);
+  return inspectCadSketchRegions(prepared.document, sketchId, { mode: 'graph-cells', proposal: prepared.proposal });
+};
 const refusal = async (work: Promise<unknown>) => {
   const error = await work.then(() => { throw new Error('Expected a refusal.'); }, (caught: unknown) => caught as Error & Record<string, unknown>);
   return { ...error, message: error.message };
@@ -40,16 +45,17 @@ describe('generator region proposals', () => {
     const moved = applied.features[0]; if (moved.kind !== 'sketch') throw new Error('Missing wider plate.');
     expect(moved.graph?.points.find(point => point.id === 'free')?.position).toEqual([30, 0]);
     expect(moved.graph?.relations.some(relation => relation.id === 'tie')).toBe(true);
-    expect(prepared).toEqual({ sketch: moved });
+    expect(prepared.proposal).toEqual({ sketch: moved });
+    expect(prepared.document.features).toEqual([moved]);
     expect(() => prepareCadSketchCells(moved, applied.parameters, 'graph-cells').resolve(stock)).toThrowError(expect.objectContaining({ code: 'stale-sketch-region' }));
     for (const mode of ['contours', 'graph-cells'] as const) {
-      const proposed = inspectCadSketchRegions(document, 'sketch', { mode, proposal: prepared });
+      const proposed = inspectCadSketchRegions(prepared.document, 'sketch', { mode, proposal: prepared.proposal });
       expect(proposed.proposed).toBe(true);
       expect(proposed.items).toEqual(inspectCadSketchRegions(applied, 'sketch', { mode }).items);
     }
     const [bore, cell] = inspectCadSketchRegions(applied, 'sketch', { mode: 'graph-cells' }).items.sort((x, y) => x.areaMm2 - y.areaMm2);
     expect([bore.areaMm2, cell.areaMm2]).toEqual([expect.closeTo(4 * Math.PI, 9), expect.closeTo(300 - 4 * Math.PI, 9)]);
-    expect(readCadSketchRegionReference(document, 'sketch', { cellIds: [cell.cellId] }, prepared))
+    expect(readCadSketchRegionReference(prepared.document, 'sketch', { cellIds: [cell.cellId] }, prepared.proposal))
       .toEqual(readCadSketchRegionReference(applied, 'sketch', { cellIds: [cell.cellId] }));
   });
 
@@ -65,8 +71,8 @@ describe('generator region proposals', () => {
         entities: [...corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })),
           { id: 's', kind: 'line', construction: true, startPointId: 'a', endPointId: 'b' }],
         relations: [offset, pattern, { id: 'tie', kind: 'coincident', pointIds: ['u', 'pat_i3_b'] }] } }] });
-    const areas = async (proposal?: CadSketchRegionProposal) => inspectCadSketchRegions(document, 'sketch', { mode: 'graph-cells',
-      ...proposal ? { proposal: await prepare(document, proposal) } : {} }).items.map(item => item.areaMm2).sort((x, y) => x - y);
+    const areas = async (proposal?: CadSketchRegionProposal) => (proposal ? await read(document, proposal) : inspectCadSketchRegions(document, 'sketch', { mode: 'graph-cells' }))
+      .items.map(item => item.areaMm2).sort((x, y) => x - y);
     expect(await areas()).toEqual([196 - 100, 100]);
     // A parameter value and a changed distance are read as the edit reads them.
     const wider = { generator: { generator: { ...offset, geometry: { ...offset.geometry, distance: 'gap + 1' } } }, parameterValues: { gap: 3 } };
@@ -77,7 +83,7 @@ describe('generator region proposals', () => {
       plane: 'XY', offset: 5, profiles: [], graph: { points: [{ id: 'm', position: [0, 0] }, { id: 'n', position: [2, 0] }], entities: [],
         relations: [{ id: 'm-fixed', kind: 'fixed-point', pointId: 'm', position: [0, 0] }, { id: 'n-fixed', kind: 'fixed-point', pointId: 'n', position: [2, 0] }, { id: 'span', kind: 'distance', pointIds: ['m', 'n'], value: 'gap' }] } }] });
     await expect(prepareCadEdits(later, [{ kind: 'set-parameter', name: 'gap', value: 3 }, { kind: 'set-sketch-generator', sketchId: 'sketch', ...wider.generator }], solver)).rejects.toBeInstanceOf(CadSketchPreparationError);
-    expect(inspectCadSketchRegions(later, 'sketch', { mode: 'graph-cells', proposal: await prepare(later, wider) }).items.map(item => item.areaMm2).sort((x, y) => x - y))
+    expect((await read(later, wider)).items.map(item => item.areaMm2).sort((x, y) => x - y))
       .toEqual([100, 324 - 100]);
     // Three occurrences leave the fourth, which the free point is tied to: the proposal refuses as the edit does, with its details.
     const fewer = { ...pattern, geometry: { ...pattern.geometry, count: 3 } };
@@ -93,6 +99,40 @@ describe('generator region proposals', () => {
     // The edit with the same fields gives the cells the proposal showed.
     const applied = (await prepareCadEdits(document, [{ kind: 'set-sketch-generator', sketchId: 'sketch', ...confirmed.generator }], solver)).document;
     expect(inspectCadSketchRegions(applied, 'sketch', { mode: 'graph-cells' }).items)
-      .toEqual(inspectCadSketchRegions(document, 'sketch', { mode: 'graph-cells', proposal: await prepare(document, confirmed) }).items);
+      .toEqual((await read(document, confirmed)).items);
+  });
+  it("read a sketch that uses a preceding sketch's line with that sketch as the edit leaves it, solved for the parameter values", async () => {
+    // The layout's line runs from (50, 0) to (span, 0). The target uses it as a reference, and a free triangle's base is tied to its ends.
+    // The layout itself uses a line of an earlier sketch, so the target needs that sketch through the layout.
+    const blank = parseCadDocument({ ...createCadDocument('Linked', 'linked-proposal'), schemaVersion: 2, parameters: { span: 60 }, features: [
+      { id: 'base', kind: 'sketch', name: 'Base', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+        points: [{ id: 'c', position: [0, -20] }, { id: 'd', position: [10, -20] }], entities: [{ id: 'axis', kind: 'line', construction: true, startPointId: 'c', endPointId: 'd' }], relations: [] } },
+      { id: 'layout', kind: 'sketch', name: 'Layout', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+        points: [{ id: 'a', position: [50, 0] }, { id: 'b', position: ['span', 0] }], entities: [{ id: 'line', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }], relations: [] } },
+      { id: 'target', kind: 'sketch', name: 'Target', suppressed: false, plane: 'XY', offset: 5, profiles: [], graph: {
+        points: [], entities: [], relations: [plate(20)] } }] });
+    const document = (await prepareCadEdits(blank, [{ kind: 'use-sketch-entity', sketchId: 'layout', sourceSketchId: 'base', sourceEntityId: 'axis', idPrefix: 'axis' },
+      { kind: 'use-sketch-entity', sketchId: 'target', sourceSketchId: 'layout', sourceEntityId: 'line', idPrefix: 'ref' },
+      { kind: 'append-sketch-entities', sketchId: 'target', geometry: { points: [{ id: 'm', position: [50, 0] }, { id: 'apex', position: [55, 10] }, { id: 'n', position: [60, 0] }],
+        entities: [['up', 'm', 'apex'], ['down', 'apex', 'n'], ['base', 'n', 'm']].map(([id, startPointId, endPointId]) => ({ id, kind: 'line' as const, construction: false, startPointId, endPointId })),
+        relations: [{ id: 'at-m', kind: 'coincident', pointIds: ['m', 'ref_p0'] }, { id: 'at-n', kind: 'coincident', pointIds: ['n', 'ref_p1'] }] } }], solver)).document;
+    const cells = (from: CadDocument) => inspectCadSketchRegions(from, 'target', { mode: 'graph-cells' }).items;
+    expect(cells(document).map(item => item.areaMm2).sort((x, y) => x - y)).toEqual([expect.closeTo(50, 9), expect.closeTo(200, 9)]);
+    // A complete proposal of the sketch as it is reads as the sketch does.
+    const target = document.features[2]; if (target.kind !== 'sketch') throw new Error('Missing target.');
+    expect(inspectCadSketchRegions(document, 'target', { mode: 'graph-cells', proposal: { sketch: target } }).items).toEqual(cells(document));
+    const wider = { generator: { generator: plate(30) } }, moved = { ...wider, parameterValues: { span: 70 } };
+    for (const [proposal, edits] of [[wider, []], [moved, [{ kind: 'set-parameter', name: 'span', value: 70 }]]] as const) {
+      const applied = (await prepareCadEdits(document, [...edits, { kind: 'set-sketch-generator', sketchId: 'target', ...proposal.generator }], solver)).document;
+      const read = await prepareCadSketchRegionProposal(document, 'target', proposal, solver);
+      const proposed = inspectCadSketchRegions(read.document, 'target', { mode: 'graph-cells', proposal: read.proposal });
+      expect(proposed.items).toEqual(cells(applied));
+      for (const item of proposed.items) expect(readCadSketchRegionReference(read.document, 'target', { cellIds: [item.cellId] }, read.proposal))
+        .toEqual(readCadSketchRegionReference(applied, 'target', { cellIds: [item.cellId] }));
+    }
+    // With span 70 the layout's line is 20 long, so the triangle on it doubles, as the edit makes it.
+    const read = await prepareCadSketchRegionProposal(document, 'target', moved, solver);
+    expect(inspectCadSketchRegions(read.document, 'target', { mode: 'graph-cells', proposal: read.proposal }).items.map(item => item.areaMm2).sort((x, y) => x - y))
+      .toEqual([expect.closeTo(100, 9), expect.closeTo(300, 9)]);
   });
 });
