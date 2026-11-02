@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseCadSketchGraph, type CadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import {
-  cadSketchDimensionIds, cadSketchDimensionPick, cadSketchDimensionSelectionStatus, cadSketchDrawnAnnotations, cadSketchRelationHighlight, createCadSketchDimensionKeys, createCadSketchHighlightStore,
+  cadSketchAnnotationCount, cadSketchDimensionIds, cadSketchDimensionPick, cadSketchDimensionSelectionStatus, cadSketchDrawnAnnotations, cadSketchRelationHighlight, createCadSketchDimensionKeys, createCadSketchHighlightStore,
   isCadSketchDimensionPickCurrent, isCadSketchDimensionRelation, isCadSketchGlyphRelation, keepCadSketchDimensionPicks, NO_SKETCH_DIMENSION_IDS, NO_SKETCH_DIMENSIONS,
   reconcileCadSketchDimensionSelection, selectCadSketchAnnotations, selectCadSketchDimension, type CadSketchDimensionPick
 } from './cadSketchDimensionSelection';
@@ -257,6 +257,20 @@ describe('sketch dimension selection', () => {
     expect(cadSketchDimensionSelectionStatus(zero, ['away', 'cy'])).toBe('1 dimension and 1 relation selected · Delete removes them');
     expect(cadSketchDimensionSelectionStatus(graph, ['length', 'x', 'y'])).toBe('3 dimensions selected · Delete removes them');
     expect(cadSketchDimensionSelectionStatus(zero, ['parallel-free', 'x', 'y'])).toBe('3 relations selected · Delete removes them');
+  });
+
+  it('counts a selection of shapes, dimensions and relations as Delete and its dialog name it', () => {
+    // A generator counts as the shape it deletes, and a source reference, which Delete detaches, as the relation it is.
+    const shaped: CadSketchGraph = { ...graph, relations: [...graph.relations,
+      { id: 'ring', kind: 'generator', idPrefix: 'ring', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 4 } },
+      { id: 'disc', kind: 'generator', idPrefix: 'disc', construction: false, geometry: { kind: 'circle', x: 20, y: 0, radius: 2 } },
+      { id: 'link', kind: 'external-reference', entityId: 'hole', sourceSketchId: 'layout', source: { kind: 'circle', entityId: 'circle', centerPointId: 'center' } }] };
+    expect(cadSketchAnnotationCount(shaped, ['ring', 'parallel-free'])).toBe('1 shape and 1 relation');
+    expect(cadSketchAnnotationCount(shaped, ['parallel-free', 'disc', 'length', 'ring'])).toBe('2 shapes, 1 dimension and 1 relation');
+    expect(cadSketchAnnotationCount(shaped, ['ring', 'disc'])).toBe('2 shapes');
+    expect(cadSketchAnnotationCount(shaped, ['link', 'parallel-free'])).toBe('2 relations');
+    expect(cadSketchAnnotationCount(shaped, ['size', 'rise'])).toBe('2 dimensions');
+    expect(cadSketchDimensionSelectionStatus(shaped, ['ring', 'parallel-free'])).toBe('1 shape and 1 relation selected · Delete removes them');
   });
 
   it('selects the relations of one glyph together: a click replaces the selection, Shift adds them or, when all are selected, removes them', () => {

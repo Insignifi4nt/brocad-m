@@ -575,11 +575,18 @@ describe('CAD sketch interaction', () => {
         await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
       }
       // With a relation elsewhere selected too, an offset made from the hexagon is outside the selection, so it is named first, in either
-      // order; Cancel keeps everything, and Delete takes the shape, the tie on it, the level and the offset in one undo step.
+      // order, from the Delete key or the row menu, which counts the shape as the dialog does; Cancel keeps everything, and Delete takes the
+      // shape, the tie on it, the level and the offset in one undo step.
       const offset = part([hex, tie, level, off]);
       await open(offset);
-      for (const [first, second] of [['hex', 'level'], ['level', 'hex']]) {
-        await selectRows(first, second); await pressDelete(second);
+      const deleteFromMenu = async (id: string) => {
+        await act(async () => row(id).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })));
+        const remove = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(entry => entry.textContent?.trim().startsWith('Delete'));
+        expect(remove?.textContent?.trim()).toBe('Delete 1 shape and 1 relation');
+        await act(async () => remove?.click());
+      };
+      for (const [first, second, from] of [['hex', 'level', pressDelete], ['level', 'hex', deleteFromMenu]] as const) {
+        await selectRows(first, second); await from(second);
         expect(dialog()?.textContent).toBe('Delete 1 shape and 1 relation?This also removes the shape Offset "off" made from them.Cancel Delete');
         await click('Cancel'); expect(currentDocument).toBe(offset);
       }

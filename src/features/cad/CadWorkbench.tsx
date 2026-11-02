@@ -1606,9 +1606,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     // mix shapes with other relations go together as one exact set, so the order they were selected in never matters.
     const shapes = ids.filter(id => graph.relations.some(relation => relation.id === id && relation.kind === 'generator'));
     if (shapes.length) {
-      const others = ids.filter(id => !shapes.includes(id)), named = `${shapes.length} ${shapes.length === 1 ? 'shape' : 'shapes'}`;
-      deleteFromSketch(() => ids.length === 1 ? prepareCadSketchShapeDeletion(sketch, ids[0]) : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [],
-        relationIds: ids, name: others.length ? `${named} and ${cadSketchAnnotationCount(graph, others)}` : named }), removed, ids.length > 1);
+      deleteFromSketch(() => ids.length === 1 ? prepareCadSketchShapeDeletion(sketch, ids[0])
+        : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [], relationIds: ids, name: cadSketchAnnotationCount(graph, ids) }), removed, ids.length > 1);
       return;
     }
     submitEdit(signal => props.onEditMany(ids.map(id => ({ kind: 'remove-sketch-relation' as const, sketchId: sketch.id, relationId: id })), signal), removed, SKETCH_RELATION_FAILURE);
