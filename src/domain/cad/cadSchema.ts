@@ -9,7 +9,8 @@ import { cadImportDataFields, isCadImportData } from './cadImportData';
 import { MAX_CAD_PATTERN_INSTANCES } from './cadPatterns';
 import { CadLabelSchema, CadNumberSchema } from './cadPrimitives';
 import type { CadResolvedFrame } from './cadDatumPlanes';
-import { cadConsumedBodyIds, cadFeatureInputs, cadFeatureProducesBody } from './cadFeatureInputs';
+import { cadFeatureInputs, cadFeatureProducesBody } from './cadFeatureInputs';
+import { createCadBodyLineage } from './cadBodies';
 import { validateCadSketchConstraints } from './cadSketchConstraints';
 import { assertNoReservedCadSketchIds, cadSketchGraphWithPlacements } from './cadSketchGraph';
 import { sameCadSketchGeometryParameters } from './cadSketchParameterReads';
@@ -161,7 +162,8 @@ export function parseCadDocument(value: unknown): CadDocument {
   }
   const previous = new Map<string, CadFeature>();
   const datumFrames = new Map<string, CadResolvedFrame>();
-  const visibleBodies = new Set<string>();
+  // Stored targets name the feature whose result a body is; they resolve to bodies by key through the lineage.
+  const bodies = createCadBodyLineage();
   const expandedInstances = new Map<string, number>();
   let instanceBudget = 0;
   // Kept only once the whole document is accepted, with every feature they name.
@@ -217,7 +219,7 @@ export function parseCadDocument(value: unknown): CadDocument {
       if (!cadFeatureProducesBody(referenced)) throw new CadError('invalid-reference', `A solid operation cannot target ${referenced.kind === 'sketch' ? 'a sketch' : referenced.kind === 'curve' ? 'a reference curve' : 'a datum plane'}.`);
     }
     if (active) for (const id of inputs.bodyIds) {
-      if (!visibleBodies.has(id)) throw new CadError('unavailable-body', `Feature "${feature.name}" references suppressed or already consumed body "${id}". Select its current successor.`);
+      if (!bodies.has(id)) throw new CadError('unavailable-body', `Feature "${feature.name}" references suppressed or already consumed body "${id}". Select its current successor.`);
     }
     const operandInstances = inputs.bodyIds.reduce((total, id) => total + (expandedInstances.get(id) ?? 1), 0);
     for (const { name, field } of layout.checked) {
@@ -238,8 +240,7 @@ export function parseCadDocument(value: unknown): CadDocument {
     }
     previous.set(feature.id, feature);
     expandedInstances.set(feature.id, instances);
-    cadConsumedBodyIds(feature, document).forEach(id => visibleBodies.delete(id));
-    if (active && cadFeatureProducesBody(feature)) visibleBodies.add(feature.id);
+    bodies.apply(feature, document);
   }
   // Detach from callers, then freeze the complete history so neither a caller's
   // edit payload nor a UI/tool snapshot can mutate an accepted revision later.

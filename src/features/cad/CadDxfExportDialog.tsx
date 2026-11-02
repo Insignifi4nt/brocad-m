@@ -11,6 +11,7 @@ import type { DxfEntity } from '@/domain/dxf/types';
 import { cadSketchToEntities } from '@/domain/cad/cadSketchGeometry';
 import { resolveCadCurveGeometry } from '@/domain/cad/cadCurve';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
+import { cadBodyFeatureId, cadBodyLineage } from '@/domain/cad/cadBodies';
 import { CadContextHelp } from './CadContextHelp';
 import { CadSectionPreview } from './CadSectionDialog';
 import { cadSectionMiddleOffset } from './cadSectionMidpoint';
@@ -37,7 +38,12 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
   const sketches = cadDocument.features.filter(feature => feature.kind === 'sketch' && cadFeatureActive(feature, cadDocument));
   const curves = cadDocument.features.filter(feature => feature.kind === 'curve' && cadFeatureActive(feature, cadDocument));
   const initialFeature = cadDocument.features.find(feature => feature.id === initialFeatureId);
-  const initialBody = bodies.find(body => body.featureId === initialFeatureId) ?? bodies[0];
+  // The body the initial feature leads to by key, wherever that feature is in the body's history; a mesh without a key by the feature that
+  // made the body what it is now; with neither, the first body.
+  const initialState = useMemo(() => initialFeatureId === undefined ? undefined : cadBodyLineage(cadDocument.features, cadDocument).of(initialFeatureId), [cadDocument, initialFeatureId]);
+  const initialOf = (list: readonly CadMesh[]) => (initialState && (list.find(body => body.bodyKey === initialState.key)
+    ?? list.find(body => body.featureId === cadBodyFeatureId(initialState)))) ?? list[0];
+  const initialBody = initialOf(bodies);
   const [kind, setKind] = useState<SourceKind>(initialFeature?.kind === 'curve' && cadFeatureActive(initialFeature, cadDocument) ? 'curve'
     : initialFeature?.kind === 'sketch' && cadFeatureActive(initialFeature, cadDocument) ? 'sketch'
       : initialBody ? 'section' : sketches.length ? 'sketch' : 'curve');
@@ -55,12 +61,12 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
   useEffect(() => { if (stale) pending.current?.abort(); }, [stale]);
   useLayoutEffect(() => {
     if (stale || bodies.some(body => body.featureId === bodyId)) return;
-    const next = bodies.find(body => body.featureId === initialFeatureId) ?? bodies[0];
+    const next = initialOf(bodies);
     if (!next) return;
     // A same-version build can finish while a sketch export dialog is already open.
     // Preserve valid selections and custom heights; initialize only a missing body.
     setBodyId(next.featureId); setOffset(cadSectionMiddleOffset(next, plane)); setReview(null); setError(null);
-  }, [bodies, bodyId, plane, initialFeatureId, stale]);
+  }, [bodies, bodyId, plane, initialState, stale]);
   const source = useMemo<{ entities: readonly DxfEntity[]; error: string | null }>(() => {
     try {
       if (kind === 'section') { evaluateCadScalar(offset, cadDocument.parameters); return { entities: [], error: null }; }

@@ -355,7 +355,7 @@ export function cadSiteTools(getController: () => CadController) {
     }, false),
     tool('cad_build', 'Evaluate current CAD history in the exact solid kernel and inspect paginated body volume (mm³), bounds (mm), native solidCount (null if unavailable) and feature diagnostics. Use each returned featureId as bodyId in section and topology tools. One body can contain multiple solids. Follow nextBodyOffset with offset/limit on the same version. Lazy kernel initialization may take several seconds. Does not save or create CAM output.', object({ ...version, ...pageFields }), async (cad, input, signal) => {
       const result = await cad.inspectBuild(input.expectedVersion, signal);
-      const bodies = page(result.meshes, input, mesh => ({ featureId: mesh.featureId, name: mesh.name, volumeMm3: mesh.volume, solidCount: mesh.solidCount ?? null, boundsMm: mesh.bounds, triangles: mesh.indices.length / 3,
+      const bodies = page(result.meshes, input, mesh => ({ featureId: mesh.featureId, ...(mesh.bodyKey ? { bodyKey: mesh.bodyKey } : {}), name: mesh.name, volumeMm3: mesh.volume, solidCount: mesh.solidCount ?? null, boundsMm: mesh.bounds, triangles: mesh.indices.length / 3,
         previewFaces: new Set(mesh.faceGroups.map(group => group.key)).size, previewEdges: new Set(mesh.edgeGroups.map(group => group.key)).size }));
       return { version: input.expectedVersion, buildId: result.buildId, durationMs: result.durationMs, ...diagnosticSummary(result.diagnostics),
         bodies: bodies.items, totalBodies: bodies.total, nextBodyOffset: bodies.nextOffset };

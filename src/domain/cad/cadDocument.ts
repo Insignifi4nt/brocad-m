@@ -6,6 +6,7 @@ import type { CadParameterGroup, CadParameterMetadata } from './cadParameters';
 import type { CadSketchDimensionConstraint } from './cadSketchConstraints';
 import type { CadSketchRegionSelection } from './cadSketchRegionSelection';
 import type { CadSketchGraph } from './cadSketchGraph';
+import type { CadBodyIssue, CadBodyKey, CadBodyState } from './cadBodies';
 
 /** Millimetres and degrees. Strings are arithmetic expressions over named parameters. */
 export type CadScalar = number | string;
@@ -93,6 +94,8 @@ export interface CadDiagnostic { readonly code: string; readonly message: string
 export interface CadMeshTopologyGroup { readonly start: number; readonly count: number; readonly key: string }
 export interface CadMesh {
   readonly featureId: string; readonly name: string;
+  /** The key of the body drawn (`cadBodies.ts`), which stays the same while features modify it; absent in older build DTOs. */
+  readonly bodyKey?: CadBodyKey;
   readonly positions: readonly number[]; readonly normals: readonly number[]; readonly indices: readonly number[];
   readonly edges: readonly number[];
   readonly faceGroups: readonly CadMeshTopologyGroup[]; readonly edgeGroups: readonly CadMeshTopologyGroup[];
@@ -110,5 +113,9 @@ export interface CadBuildResult {
   readonly buildId: string;
   readonly meshes: readonly CadMesh[];
   readonly diagnostics: readonly CadDiagnostic[];
+  /** The identity of each current body, in mesh order: key, kind, creator, modifiers and pieces; absent in older build DTOs. */
+  readonly bodies?: readonly CadBodyState[];
+  /** Body parts the rebuild could not tell apart, lost or stopped tracking, feature by feature; absent in older build DTOs. */
+  readonly bodyIssues?: readonly CadBodyIssue[];
   readonly durationMs: number;
 }

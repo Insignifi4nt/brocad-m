@@ -195,6 +195,11 @@ export interface CadAnyFeatureDefinition {
   /** What an inactive feature leaves. F0's body identity reads this. */
   readonly suppression: CadFeatureSuppression;
   /**
+   * The occurrence a new body's key adds after the feature's id: `mirror` for a mirror image of its source. Body identity (`cadBodies.ts`)
+   * reads it. A pattern's copies are `inst(i,j)` parts of the body it modifies instead, from the copies the kernel says it made.
+   */
+  readonly occurrence?: 'mirror';
+  /**
    * Where the feature is evaluated and the version of that evaluation. E0's rebuild cache keys on it; raise the version whenever the
    * same stored feature would evaluate differently.
    */
