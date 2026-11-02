@@ -3,7 +3,7 @@ import { Value } from '@sinclair/typebox/value';
 import { CadError } from '../cadError';
 import type { CadEdit } from '../cadOperations';
 import type { CadSketchGenerator, CadSketchGraph } from '../cadSketchGraph';
-import { deleteCadSketchElements } from '../cadSketchGraphEdits';
+import { prepareCadSketchDeletion, type CadSketchDeletion } from '../cadSketchGraphEdits';
 import { cadSketchGeneratorPrefixFor } from './cadSketchGeneratorEdits';
 import type { CadPluginPackage } from '../plugins/cadPlugins';
 import { cadSketchGeneratorKind, cadSketchGeneratorName, cadSketchGeneratorOutlines, cadSketchGeneratorOwner, cadSketchGenerators } from './cadSketchGenerators';
@@ -204,12 +204,14 @@ export function cadSketchProfileEdits(sketch: CadSketchFeature, next: CadSketchP
 }
 
 /**
- * The sketch without the shape `profileId`: a legacy profile goes alone, a generator of any kind with its members and the relations on
- * them.
+ * The deletion of the shape `profileId`, which every way of deleting a shape shares: a legacy profile goes alone, with an update of the
+ * sketch, and a generator of any kind with its members, through the prepared deletion that lists the user relations on them and the
+ * generators made from them as `removed`, to be confirmed before they go.
  */
-export function withoutCadSketchProfile(sketch: CadSketchFeature, profileId: string): CadSketchFeature {
-  if (!cadSketchWholeGenerator(sketch, profileId)) return { ...sketch, profiles: sketch.profiles.filter(entry => entry.id !== profileId) };
-  return deleteCadSketchElements({ sketch, pointIds: [], entityIds: [], relationIds: [profileId], cascade: true });
+export function prepareCadSketchShapeDeletion(sketch: CadSketchFeature, profileId: string): { readonly edit: CadEdit; readonly removed: CadSketchDeletion['removed'] } {
+  const generator = cadSketchWholeGenerator(sketch, profileId);
+  if (!generator) return { edit: { kind: 'update-feature', feature: { ...sketch, profiles: sketch.profiles.filter(entry => entry.id !== profileId) } }, removed: [] };
+  return prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [], relationIds: [profileId], name: cadSketchShapeName(generator) });
 }
 
 /**

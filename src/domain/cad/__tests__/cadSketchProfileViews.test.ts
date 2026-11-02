@@ -6,7 +6,7 @@ import { createCadDocument, parseCadDocument } from '../cadSchema';
 import type { CadSketchGenerator } from '../cadSketchGraph';
 import { storedCadDocument } from '../cadStoredDocument';
 import { cadSketchGeneratorPrefixFor } from '../sketch-generators/cadSketchGeneratorEdits';
-import { cadSketchProfileEdits, cadSketchProfileViews, cadSketchShapeEdits, refuseNewCadSketchProfiles, withCadSketchProfile, withoutCadSketchProfile } from '../sketch-generators/cadSketchProfileViews';
+import { cadSketchProfileEdits, cadSketchProfileViews, cadSketchShapeEdits, prepareCadSketchShapeDeletion, refuseNewCadSketchProfiles, withCadSketchProfile } from '../sketch-generators/cadSketchProfileViews';
 import { expandCadSketchGenerators } from '../sketch-generators/cadSketchGenerators';
 import { CAD_STAR_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugins';
 
@@ -39,8 +39,10 @@ describe('generators seen as the profiles they replace', () => {
     expect(unchanged.graph?.relations[0]).toEqual({ ...plate, construction: true });
     const renamed = withCadSketchProfile(sketch, { ...shown, name: 'Plate' });
     expect(renamed.graph?.relations[0]).toEqual({ ...plate, name: 'Plate' });
-    expect(withoutCadSketchProfile(sketch, 'bore').graph?.relations.map(relation => relation.id)).toEqual(['plate']);
-    expect(withoutCadSketchProfile(sketch, 'bore').graph?.points.some(point => point.id.startsWith('bore_'))).toBe(false);
+    const deletion = prepareCadSketchShapeDeletion(sketch, 'bore'), without = sketchOf(applyCadEdits(generated(), [deletion.edit]));
+    expect(deletion.removed).toEqual([]);
+    expect(without.graph?.relations.map(relation => relation.id)).toEqual(['plate']);
+    expect(without.graph?.points.some(point => point.id.startsWith('bore_'))).toBe(false);
   });
 
   it('move a handle and translate shapes through their records, regenerating the members as one edit', () => {
@@ -92,9 +94,30 @@ describe('generators seen as the profiles they replace', () => {
     // A profile source names a saved profile only; a generated shape's loop is a graph cycle.
     expect(refusal(() => applyCadEdits(document, [{ kind: 'offset-sketch-loop', sketchId: 'sketch', source: { kind: 'profile', profileId: 'star' }, distance: 1, idPrefix: 'copy' }])))
       .toMatchObject({ code: 'unsupported-sketch-offset', message: 'Star profile "star" is sketch geometry, not a saved profile. Offset its loop with a graph-cycle source, the sourceRefs of its contour in the region reference.' });
-    const without = withoutCadSketchProfile(sketchOf(document), 'hex');
+    const without = sketchOf(applyCadEdits(document, [prepareCadSketchShapeDeletion(sketchOf(document), 'hex').edit]));
     expect(without.graph?.relations.map(relation => relation.id)).toEqual(['plate', 'star']);
     expect(without.graph?.points.some(point => point.id.startsWith('hex_'))).toBe(false); expect(without.graph?.entities.some(entity => entity.id.startsWith('hex_'))).toBe(false);
+  });
+});
+
+describe('deleting a shape', () => {
+  it('names the user relations on its members and the shapes made from them, which go only once listed', () => {
+    const hex: CadSketchGenerator = { id: 'hex', kind: 'generator', idPrefix: 'hex', name: 'Hex', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 6, directionId: '@h' } };
+    const off: CadSketchGenerator = { id: 'off', kind: 'generator', idPrefix: 'off', construction: false,
+      geometry: { kind: 'offset', chain: [0, 1, 2, 3, 4, 5].map(index => ({ entityId: `hex_e${index}`, reversed: false })), distance: 2 } };
+    const document = documentWith({ graph: { points: [{ id: 'free', position: [10, 0] }], entities: [], relations: [hex, { id: 'tie', kind: 'coincident', pointIds: ['free', 'hex_v0'] }, off] } });
+    const { edit, removed } = prepareCadSketchShapeDeletion(sketchOf(document), 'hex');
+    // The polygon's own members and relations, and the offset's, go with their generators unnamed.
+    expect(edit).toEqual({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: [], entityIds: [], relationIds: ['hex'], cascade: false });
+    expect(removed).toEqual([
+      { sketchId: 'sketch', relationId: 'tie', name: 'Coincident "tie"', generator: 'Hex', reason: 'It uses geometry this deletes.' },
+      { sketchId: 'sketch', relationId: 'off', name: 'Offset "off"', generator: 'Hex', reason: 'It is generated from geometry this deletes.' }]);
+    expect(refusal(() => applyCadEdits(document, [edit]))).toMatchObject({ code: 'dependent-sketch-element' });
+    if (edit.kind !== 'delete-sketch-elements') throw new Error('A generator deletes through its sketch graph.');
+    const deleted = sketchOf(applyCadEdits(document, [{ ...edit, relationIds: ['hex', 'tie', 'off'] }]));
+    expect(deleted.graph).toEqual({ points: [{ id: 'free', position: [10, 0] }], entities: [], relations: [] });
+    // The offset alone has nothing on it, so it names nothing.
+    expect(prepareCadSketchShapeDeletion(sketchOf(document), 'off').removed).toEqual([]);
   });
 });
 
