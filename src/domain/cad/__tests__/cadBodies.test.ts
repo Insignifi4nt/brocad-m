@@ -340,6 +340,24 @@ describe('body parts', () => {
       .toEqual([undefined, 2 ** 12, `pad${'/split(0)'.repeat(12)}`, `pad${'/split(1)'.repeat(12)}`]);
   });
 
+  it('never reads the keys of a removed piece that stays in a group, which can take more steps than the work bound', () => {
+    // Two nested splits of 2,000 pieces each, in any kernel order. A key naming an inner piece may take any of 2,000 indices at each of its
+    // two steps; after the first it may name any of the 2,000 outer pieces, before the feature and after it, and each index of the second
+    // reads them all. So reading the keys of one removed inner piece takes about 2 * 2,000 ** 2 steps, past MAX_CAD_BODY_ORDER_WORK (2 ** 22),
+    // while the body keeps 4,000 keys, within the list limit. The steps are the search's own count, so no clock decides the outcome.
+    const width = 2000, outer = Array.from({ length: width }, (_, k) => `pad/split(${k})`), inner = outer.map(part => part.replace('pad', outer[0]));
+    const before = [...inner, ...outer.slice(1)], orders = [outer, inner], gone = inner[1];
+    const kept = before.flatMap((_, solid): (readonly Entry[])[] => solid === 1 ? [] : [[[0, solid, 1]]]);
+    // Removed alone, none of its keys is lost, since each names a sibling left in another order, but finding that passes the bound.
+    expect(parts({ before, orders, facts: facts(kept.length, kept) })).toMatchObject({ untracked: true, overflowed: true });
+    // In a group that a piece left descends from, its key stays, naming that piece, so no key naming it can be lost and none is read.
+    const carried = parts({ before, orders, ambiguous: [[inner[0], gone]], facts: facts(kept.length, kept) });
+    expect([carried.untracked, carried.lost, carried.ambiguous, carried.pieces?.length]).toEqual([undefined, [], [[inner[0], gone]], kept.length]);
+    // So in the group a solid keeping no face, which may be it, makes with every piece continued alone.
+    const unknown = parts({ before, orders, facts: facts(kept.length + 1, [...kept, []]) });
+    expect([unknown.untracked, unknown.lost, unknown.ambiguous?.map(group => [group.length, group.at(-1)])]).toEqual([undefined, [], [[kept.length + 2, gone]]]);
+  });
+
   it('records an order only for siblings the kernel ordered at their own split, and keeps it while a key it numbers leads to one the body keeps', () => {
     const traded = { before: [A, B], orders: [[A, B]] };
     // B's halves are ambiguous through B, which extends B's issue, but its faces ordered them: only A and B could have traded keys.
