@@ -362,6 +362,43 @@ describe('owned consumed-sketch draft', () => {
     expect(sketchOf(final).source).toEqual(sketchOf(base.document).source); expect(main.getSnapshot()).toBe(base);
   });
 
+  it('creates, edits and detaches a generator of the owned sketch through preview, local undo/redo and Finish, and keeps its plugin package', async () => {
+    const star: CadSketchGenerator = { id: 'star', kind: 'generator', idPrefix: 'star', construction: true, geometry: createCadPluginProfile(CAD_STAR_PLUGIN) };
+    const original = source(), owned = sketchOf(original);
+    const document = parseCadDocument({ ...original, features: original.features.map(feature => feature.id === 'sketch'
+      ? { ...owned, graph: { ...owned.graph!, relations: [...owned.graph!.relations, star] } } : feature) });
+    const main = new CadSession(document), base = main.getSnapshot(), draft = new CadSketchEditDraft(base, 'sketch');
+    const hole = (radius: number): CadSketchGenerator => ({ id: 'hole', kind: 'generator', idPrefix: 'hole', construction: false, geometry: { kind: 'circle', x: 10, y: 5, radius } });
+    const steps: CadEdit[][] = [[{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: hole(2) }],
+      [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: hole(3) }], [{ kind: 'detach-sketch-generator', sketchId: 'sketch', generatorId: 'hole' }]];
+    const states = [draft.getSnapshot()];
+    for (const edits of steps) {
+      // The preview the sketch editor shows prepares the same edits against the draft, and the edit accepts exactly that.
+      draft.validateEdits(edits);
+      const preview = await prepare(draft.getSnapshot().document, edits);
+      await draft.editPrepared(edits, prepare);
+      expect(draft.getSnapshot().document).toEqual(preview);
+      states.push(draft.getSnapshot());
+    }
+    const graph = (index: number) => sketchOf(states[index].document).graph!;
+    expect(graph(1).entities.find(entity => entity.id === 'hole_c0')).toMatchObject({ kind: 'circle' });
+    expect(graph(2).relations.find(relation => relation.id === 'hole')).toMatchObject({ geometry: { radius: 3 } });
+    expect(graph(3).relations.some(relation => relation.id === 'hole')).toBe(false);
+    expect(graph(3).entities.find(entity => entity.id === 'hole_c0')).toMatchObject({ kind: 'circle' });
+    draft.undo(); expect(draft.getSnapshot().document).toBe(states[2].document);
+    draft.undo(); expect(draft.getSnapshot().document).toBe(states[1].document);
+    draft.redo(); draft.redo(); expect(draft.getSnapshot().document).toBe(states[3].document);
+    // Only the owned sketch's generators, and a plugin keeps the package it was placed with.
+    for (const edits of [[{ kind: 'set-sketch-generator', sketchId: 'later', generator: hole(2) }], [{ kind: 'detach-sketch-generator', sketchId: 'later', generatorId: 'plugin' }],
+      [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...star, geometry: { ...star.geometry, package: { ...(star.geometry as { package: object }).package, name: 'Replaced package' } } } }]] as CadEdit[][])
+      await expect(draft.editPrepared(edits, prepare)).rejects.toMatchObject({ code: 'SKETCH_DRAFT_SCOPE' });
+    expect(draft.getSnapshot().document).toBe(states[3].document);
+    const finish = draft.finishEdits(base), final = await prepare(base.document, finish.edits);
+    expect(finish.edits.map(edit => edit.kind === 'update-feature' ? edit.feature.id : edit.kind)).toEqual(['sketch']);
+    expect(sketchOf(final)).toEqual(sketchOf(states[3].document));
+    expect(main.getSnapshot()).toBe(base);
+  });
+
   it('lets an earlier generator regenerate under a changed parameter, removing only the relations the draft confirms, through Finish', async () => {
     const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
       geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
