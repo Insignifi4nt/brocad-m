@@ -1746,19 +1746,25 @@ describe('CAD sketch interaction', () => {
     const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
       geometry: { kind: 'rectangle', x: 20, y: 20, width: 50, height: 40, cornerRadius: 0 } } as const;
     const hole = { id: 'hole', kind: 'generator', idPrefix: 'hole', name: 'Hole', construction: false, geometry: { kind: 'circle', x: 30, y: 30, radius: 2 } } as const;
+    // A regular polygon has no profile view: the canvas picks it by the outline it draws.
+    const hex = { id: 'hex', kind: 'generator', idPrefix: 'hex', name: 'Hex', construction: false, geometry: { kind: 'regular-polygon', x: 100, y: 40, radius: 10, sides: 6, directionId: '@h' } } as const;
     const initial = parseCadDocument({ ...createCadDocument('Plate', 'generated-menu'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
-      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate, hole] } }] });
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate, hole, hex] } }] });
     const begin = vi.fn((id: string) => id);
     await mount(initial, { build: null, buildState: 'idle', onBeginSketchEdit: begin });
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
-    const canvas = container.querySelector<SVGSVGElement>('[aria-label="Sketch drawing canvas"]'); if (!canvas) throw new Error('Sketch canvas missing.');
-    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, toJSON: () => ({}) });
+    // The open sketch's canvas, measured as a 600 by 400 box; opening another sketch replaces it.
     let captured = false;
-    Object.assign(canvas, { setPointerCapture: () => { captured = true; }, hasPointerCapture: () => captured, releasePointerCapture: () => { captured = false; } });
+    const sketchCanvas = () => {
+      const canvas = container.querySelector<SVGSVGElement>('[aria-label="Sketch drawing canvas"]'); if (!canvas) throw new Error('Sketch canvas missing.');
+      vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, toJSON: () => ({}) });
+      Object.assign(canvas, { setPointerCapture: () => { captured = true; }, hasPointerCapture: () => captured, releasePointerCapture: () => { captured = false; } });
+      return canvas;
+    };
     const items = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map(item => item.textContent);
     const title = () => document.querySelector('.cad-context-menu')?.getAttribute('aria-label')?.replace(/ actions$/, '');
     const rightClick = async ([x, y]: readonly [number, number]) => {
-      const state = viewport().getState().view; if (!state || state.mode === 'solid') throw new Error('Sketch frame missing.');
+      const state = viewport().getState().view, canvas = sketchCanvas(); if (!state || state.mode === 'solid') throw new Error('Sketch frame missing.');
       const viewWidth = Number(canvas.getAttribute('viewBox')?.split(' ')[2]);
       for (const type of ['pointerdown', 'pointerup']) {
         const event = new MouseEvent(type, { button: 2, buttons: type === 'pointerup' ? 0 : 2, bubbles: true, cancelable: true,
@@ -1796,6 +1802,23 @@ describe('CAD sketch interaction', () => {
     const copy = currentDocument.features.at(-1); if (copy?.kind !== 'sketch' || !copy.graph || copy.id === 'sketch') throw new Error('Copied sketch missing.');
     expect(copy.graph.relations.filter(relation => relation.kind === 'generator')).toEqual([]); expect(copy.graph.entities).toHaveLength(4);
     expect(begin.mock.calls).toEqual([['sketch'], [copy.id]]);
+    // The polygon's menu edits its inputs, switches the generator to construction in one step, deletes it with its members, and copies its outline.
+    await act(async () => replaceDocument(initial)); await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    await rightClick([100, 40]);
+    expect(title()).toBe('Hex'); expect(items()).toEqual(['Copy outline to editable sketch', 'Edit shape', 'Toggle construction', 'Delete shape']);
+    await click('Toggle construction');
+    expect(generated('hex')).toEqual({ ...hex, construction: true });
+    expect(sketchGraph().entities.filter(entity => entity.id.startsWith('hex_')).map(entity => entity.construction)).toEqual([true, true, true, true, true, true]);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    await rightClick([100, 40]); await click('Edit shape');
+    expect(field('Radius').value).toBe('10'); expect(viewport().getState().selectedProfileId).toBe('hex'); expect(currentDocument).toEqual(initial);
+    await rightClick([100, 40]); await click('Delete shape');
+    expect(generated('hex')).toBeUndefined(); expect(sketchGraph().points.some(point => point.id.startsWith('hex_'))).toBe(false);
+    expect(currentDocument.features).toHaveLength(1);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    await rightClick([100, 40]); await click('Copy outline to editable sketch'); await click('Apply');
+    const outline = currentDocument.features.at(-1); if (outline?.kind !== 'sketch' || !outline.graph || outline.id === 'sketch') throw new Error('Copied outline missing.');
+    expect(outline.graph.relations.filter(relation => relation.kind === 'generator')).toEqual([]); expect(outline.graph.entities).toHaveLength(6);
   });
 
   it('moves, rounds, dimensions and switches a selected generated rectangle from the toolbar through its inputs, one undo step each', async () => {
@@ -1899,6 +1922,178 @@ describe('CAD sketch interaction', () => {
     await select({ kind: 'point', id: 'plate_p0' });
     expect(button('Sketch corner tools').disabled).toBe(true); expect(button('Sketch corner tools').getAttribute('aria-description')).toBe(owned);
     expect(button('Move selection').disabled).toBe(true);
+  });
+
+  it('keeps each toolbar command on a whole generated shape of every kind working, or off with the reason', async () => {
+    const shape = (id: string, geometry: unknown) => ({ id, kind: 'generator', idPrefix: id, construction: false, geometry });
+    const corners = [[400, 0], [410, 0], [410, 10], [400, 10]] as const;
+    const initial = parseCadDocument({ ...createCadDocument('Kinds', 'generated-kinds'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Shapes',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: {
+        points: [{ id: 'a', position: [300, 0] }, { id: 'b', position: [305, 0] }, ...corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] }))],
+        entities: [{ id: 's', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' },
+          ...corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` }))],
+        relations: [shape('plate', { kind: 'rectangle', x: 500, y: 0, width: 20, height: 10, cornerRadius: 0 }), shape('hole', { kind: 'circle', x: 100, y: 100, radius: 2 }),
+          shape('slot', { kind: 'slot', x: 150, y: 0, length: 10, width: 4, angle: 0 }), shape('hex', { kind: 'regular-polygon', x: 0, y: 100, radius: 5, sides: 6, directionId: '@h' }),
+          shape('tri', { kind: 'polygon', points: [[200, 0], [210, 0], [205, 8]] }),
+          shape('round', { kind: 'path', segments: [{ kind: 'arc', center: [250, 0], radius: 3, startAngle: 0, sweep: 180 }, { kind: 'arc', center: [250, 0], radius: 3, startAngle: 180, sweep: 180 }] }),
+          shape('spokes', { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 }),
+          shape('wall', { kind: 'offset', chain: ['l0', 'l1', 'l2', 'l3'].map(entityId => ({ entityId, reversed: false })), distance: 2 }),
+          shape('star', createCadPluginProfile(CAD_STAR_PLUGIN))] } }] });
+    await mount(initial);
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const owned = (name: string) => `${name} generates this geometry. Edit the generator's inputs, or detach it, before editing generated geometry.`;
+    const free = 'Linear pattern repeats one selected free circle.', move = 'Move selected geometry without releasing dimensions';
+    const offset = 'Create an independent copy of one closed nonconstruction loop', mirror = 'Mirror selected edges, then choose a line in the sketch. The copy is independent.';
+    const construction = () => { const found = container.querySelector<HTMLInputElement>('.cad-sketch-options input'); if (!found) throw new Error('Construction control missing.'); return found; };
+    const state = (control: HTMLElement & { disabled: boolean }) => control.disabled ? control.getAttribute('aria-description') : 'on';
+    // Each command is on, or off with what its description says; a command that is on keeps its own description.
+    const row = () => ({ move: state(button('Move profile')), offset: state(button('Offset loop')), mirror: state(button('Mirror copy')),
+      pattern: state(button('Pattern')), corners: state(button('Sketch corner tools')), construction: construction().disabled ? construction().getAttribute('aria-description') : construction().checked });
+    const rows: Record<string, ReturnType<typeof row>> = {};
+    for (const id of ['plate', 'hole', 'slot', 'hex', 'tri', 'round', 'spokes', 'wall', 'star']) {
+      await act(async () => viewport().apply({ kind: 'select-profile', profileId: id }));
+      expect(viewport().getState().selectedProfileId, id).toBe(id);
+      rows[id] = row();
+      if (!button('Move profile').disabled) expect(button('Move profile').getAttribute('aria-description'), id).toBe(move);
+      if (!button('Offset loop').disabled) expect(button('Offset loop').getAttribute('aria-description'), id).toBe(offset);
+      if (!button('Mirror copy').disabled) expect(button('Mirror copy').getAttribute('aria-description'), id).toBe(`${mirror} (M)`);
+    }
+    const on = 'on';
+    expect(rows).toEqual({
+      plate: { move: on, offset: on, mirror: on, pattern: free, corners: on, construction: false },
+      hole: { move: on, offset: on, mirror: on, pattern: owned('Circle "hole"'), corners: 'Circle "hole" has no corners to round.', construction: false },
+      slot: { move: on, offset: on, mirror: on, pattern: free, corners: 'Slot "slot" has no corners to round.', construction: false },
+      hex: { move: 'Regular polygon "hex" is placed by its centre. Set its Center X and Y inputs to move it.', offset: on, mirror: on, pattern: free,
+        corners: owned('Regular polygon "hex"'), construction: false },
+      tri: { move: on, offset: on, mirror: on, pattern: free, corners: owned('Polygon "tri"'), construction: false },
+      round: { move: on, offset: on, mirror: on, pattern: free, corners: owned('Path "round"'), construction: false },
+      spokes: { move: 'Circular pattern "spokes" follows its seeds and centre. Move those to move it.',
+        offset: 'Circular pattern "spokes" does not make one closed loop of its own edges. Select an edge of the loop to offset.', mirror: on, pattern: free,
+        corners: owned('Circular pattern "spokes"'), construction: false },
+      wall: { move: 'Offset "wall" follows the loop it offsets. Move that loop to move it.', offset: on, mirror: on, pattern: free, corners: owned('Offset "wall"'), construction: false },
+      star: { move: 'Move a generated plugin contour through its placement configuration.', offset: on, mirror: on, pattern: free, corners: owned('Star profile "star"'), construction: false },
+    });
+    // Mirror copy on a whole shape copies all its edges, as plain geometry, about the line chosen; here the regular polygon's about the pattern's seed.
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'hex' }));
+    await click('Mirror copy');
+    const canvas = container.querySelector<SVGSVGElement>('[aria-label="Sketch drawing canvas"]');
+    const axis = container.querySelector<SVGGElement>('[data-cad-sketch-entity="s"]'); if (!canvas || !axis) throw new Error('Seed line missing.');
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, toJSON: () => ({}) });
+    await act(async () => { axis.focus(); axis.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); });
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === 'Use as mirror line')?.click());
+    await click('Apply');
+    const seeded = initial.features[0].kind === 'sketch' ? initial.features[0].graph : undefined; if (!seeded) throw new Error('Seeded graph missing.');
+    const copied = sketchGraph().points.filter(point => !seeded.points.some(existing => existing.id === point.id));
+    expect(sketchGraph().entities.length - seeded.entities.length).toBe(6);
+    // The hexagon about (0, 100) lands about (0, -100), below the seed's line.
+    expect(copied).toHaveLength(6); for (const point of copied) expect(Math.hypot(Number(point.position[0]), Number(point.position[1]) + 100)).toBeCloseTo(5, 6);
+    expect(sketchGraph().relations.filter(relation => relation.kind === 'generator')).toHaveLength(9);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // Delete with a whole shape selected removes that shape with its members, and never the sketch.
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'hex' }));
+    await click('Delete selected feature or profile');
+    expect(currentDocument.features).toHaveLength(1);
+    expect(sketchGraph().relations.some(relation => relation.id === 'hex')).toBe(false);
+    expect(sketchGraph().points.some(point => point.id.startsWith('hex_'))).toBe(false);
+    expect(viewport().getState().selectedProfileId).toBeNull();
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+  });
+
+  it('switches a regular polygon and a linked offset to construction from the toolbar or their form, one undo step each, without changing the drawing default', async () => {
+    const hex = { id: 'hex', kind: 'generator', idPrefix: 'hex', name: 'Hex', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 5, sides: 6, directionId: '@h' } } as const;
+    const wall = { id: 'wall', kind: 'generator', idPrefix: 'wall', name: 'Wall', construction: false,
+      geometry: { kind: 'offset', chain: ['l0', 'l1', 'l2', 'l3'].map(entityId => ({ entityId, reversed: false })), distance: 2 } } as const;
+    const spokes = { id: 'spokes', kind: 'generator', idPrefix: 'spokes', name: 'Spokes', construction: false,
+      geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 3, angle: 360 } } as const;
+    const corners = [[40, 0], [50, 0], [50, 10], [40, 10]] as const;
+    const initial = parseCadDocument({ ...createCadDocument('Generated', 'generated-construction'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: {
+        points: [{ id: 'a', position: [0, -20] }, { id: 'b', position: [5, -20] }, ...corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] }))],
+        entities: [{ id: 's', kind: 'line', construction: true, startPointId: 'a', endPointId: 'b' },
+          ...corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` }))],
+        relations: [hex, wall, spokes] } }] });
+    await mount(initial);
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const toolbar = () => { const found = container.querySelector<HTMLInputElement>('.cad-sketch-options input'); if (!found) throw new Error('Construction control missing.'); return found; };
+    const formBox = (name: string) => {
+      const form = [...container.querySelectorAll('form')].find(entry => entry.getAttribute('aria-label') === name);
+      const found = [...form?.querySelectorAll('label.cad-check') ?? []].find(label => label.textContent?.includes('Construction geometry'))?.querySelector<HTMLInputElement>('input');
+      if (!found) throw new Error(`${name} construction box missing.`); return found;
+    };
+    const generated = (id: string) => sketchGraph().relations.find(relation => relation.id === id);
+    const members = (prefix: string) => sketchGraph().entities.filter(entity => entity.id.startsWith(`${prefix}_`)).map(entity => entity.construction);
+    for (const [record, name] of [[hex, 'Regular polygon "hex"'], [wall, 'Offset "wall"']] as const) {
+      // Selected as a whole, the toolbar and the form show the shape's flag, not the drawing default.
+      await act(async () => viewport().apply({ kind: 'select-profile', profileId: record.id }));
+      expect(toolbar().checked, record.id).toBe(false); expect(toolbar().disabled, record.id).toBe(false); expect(formBox(name).checked, record.id).toBe(false);
+      await act(async () => toolbar().click());
+      expect(generated(record.id), record.id).toEqual({ ...record, construction: true });
+      expect(members(record.id).length, record.id).toBeGreaterThan(0); expect(members(record.id).every(Boolean), record.id).toBe(true);
+      expect(toolbar().checked, record.id).toBe(true); expect(formBox(name).checked, record.id).toBe(true);
+      await act(async () => currentSession.undo()); expect(currentDocument, record.id).toEqual(initial);
+      expect(toolbar().checked, record.id).toBe(false); expect(formBox(name).checked, record.id).toBe(false);
+      // The form's box applies the same edit, and the toolbar shows it.
+      await act(async () => formBox(name).click()); expect(currentDocument, record.id).toEqual(initial);
+      await click('Apply');
+      expect(generated(record.id), record.id).toEqual({ ...record, construction: true }); expect(toolbar().checked, record.id).toBe(true);
+      await act(async () => currentSession.undo()); expect(currentDocument, record.id).toEqual(initial); expect(toolbar().checked, record.id).toBe(false);
+    }
+    // The drawing default stays off: with nothing selected, the box shows it.
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'hex' })); await act(async () => toolbar().click());
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: null }));
+    expect(toolbar().checked).toBe(false); await click('Line'); expect(toolbar().checked).toBe(false);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // A pattern of construction seeds makes construction copies, so both boxes are on and locked, and say why.
+    await click('Select');
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'spokes' }));
+    const locked = 'Circular pattern "spokes" copies construction seeds, so its copies stay construction. Change the seeds instead.';
+    expect(toolbar().checked).toBe(true); expect(toolbar().disabled).toBe(true); expect(toolbar().getAttribute('aria-description')).toBe(locked);
+    expect(formBox('Circular pattern "spokes"').checked).toBe(true); expect(formBox('Circular pattern "spokes"').disabled).toBe(true);
+  });
+
+  it('offsets a regular polygon and a linked offset picked whole or by an edge, independently or linked to its edges', async () => {
+    const hex = { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 6, directionId: '@h' } } as const;
+    const wall = { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
+      geometry: { kind: 'offset', chain: ['l0', 'l1', 'l2', 'l3'].map(entityId => ({ entityId, reversed: false })), distance: 2 } } as const;
+    const corners = [[40, 0], [60, 0], [60, 20], [40, 20]] as const;
+    const initial = parseCadDocument({ ...createCadDocument('Generated', 'generated-offsets'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: {
+        points: corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] })),
+        entities: corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })),
+        relations: [hex, wall] } }] });
+    await mount(initial);
+    const seeded = sketchGraph();
+    for (const record of [hex, wall]) {
+      const edges = seeded.entities.filter(entity => entity.id.startsWith(`${record.id}_`)).map(entity => entity.id);
+      expect(edges.length, record.id).toBeGreaterThanOrEqual(4);
+      const picks = {
+        whole: () => act(async () => viewport().apply({ kind: 'select-profile', profileId: record.id })),
+        edge: () => act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: edges[1] } })),
+      };
+      for (const [pick, choose] of Object.entries(picks)) for (const linked of [false, true]) {
+        const label = `${record.id} ${pick} ${linked ? 'linked' : 'independent'}`;
+        await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' })); await choose();
+        expect(button('Offset loop').disabled, label).toBe(false);
+        await click('Offset loop');
+        // The loop offset is exactly the shape's own edges.
+        for (const entity of seeded.entities) expect(container.querySelector(`[data-cad-sketch-entity="${entity.id}"]`)?.classList.contains('is-relation-highlighted'), `${label} ${entity.id}`).toBe(edges.includes(entity.id));
+        await input(field('Offset distance'), '1'); await click('Inside');
+        if (linked) await click('Linked');
+        await click('Apply');
+        const graph = sketchGraph(), copy = graph.entities.filter(entity => !seeded.entities.some(existing => existing.id === entity.id));
+        expect(copy.length, label).toBe(edges.length);
+        expect(viewport().getState().selectedSketchGeometrySet, label).toEqual(copy.map(entity => ({ kind: 'entity', id: entity.id })));
+        const added = graph.relations.filter(relation => relation.kind === 'generator' && relation.id !== 'hex' && relation.id !== 'wall');
+        if (linked) {
+          expect(added, label).toHaveLength(1);
+          const chain = added[0].kind === 'generator' && added[0].geometry.kind === 'offset' ? added[0].geometry.chain.map(link => link.entityId).sort() : [];
+          expect(chain, label).toEqual([...edges].sort());
+        } else expect(added, label).toEqual([]);
+        expect(generated(record.id), label).toEqual(record);
+        await act(async () => currentSession.undo()); expect(currentDocument, label).toEqual(initial);
+      }
+    }
+    function generated(id: string) { return sketchGraph().relations.find(relation => relation.id === id); }
   });
 
   it('renders an existing feature candidate while preserving accepted geometry and restores the original model on Cancel', async () => {

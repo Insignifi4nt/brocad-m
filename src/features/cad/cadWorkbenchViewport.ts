@@ -10,7 +10,7 @@ import { validateTopologySelection, type CadPickMode } from './cadTopologyPickin
 import { cadSketchGraphSelectionSet } from './cadSketchGraphSelection';
 import type { CadSectionView } from './view/cadViewState';
 import { cadSameReferencePlane } from './cadViewportReferences';
-import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { cadSketchProfileViews, cadSketchWholeGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 export interface CadViewportBindings extends Omit<CadViewportState, 'documentId' | 'view' | 'selectedSketchGeometry'> {
   readonly document: CadDocument;
@@ -91,7 +91,8 @@ export function createCadWorkbenchViewportControls(getBindings: () => CadViewpor
           case 'select-profile': {
             const sketch = bindings.document.features.find((feature) => feature.kind === 'sketch' && feature.id === bindings.sketchId);
             if (sketch?.kind !== 'sketch') throw new ToolError('WRONG_VIEW', 'Open the sketch editor before selecting a profile.');
-            if (command.profileId !== null && !cadSketchProfileViews(sketch).some((profile) => profile.id === command.profileId)) throw new ToolError('NOT_FOUND', 'Profile does not exist in the active sketch.');
+            // A profile, or a generator of any kind selected as a whole shape, as the canvas selects one by its interior.
+            if (command.profileId !== null && !cadSketchProfileViews(sketch).some((profile) => profile.id === command.profileId) && !cadSketchWholeGenerator(sketch, command.profileId)) throw new ToolError('NOT_FOUND', 'Profile does not exist in the active sketch.');
             bindings.selectProfile(command.profileId); return;
           }
           case 'select-sketch-geometry':

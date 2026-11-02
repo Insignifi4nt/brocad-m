@@ -8,16 +8,16 @@ import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
 import type { CadSketchOffsetSource } from '@/domain/cad/cadSketchOffset';
 import { cadSketchGeneratorMembers } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CAD_SKETCH_OFFSET_LINKS_MAX } from '@/domain/cad/sketch-generators/cadSketchGeneratorSchema';
-import { cadSketchProfileGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { cadSketchWholeGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { ScalarField } from './CadFields';
 import { cadPreviewMarks, useCadPreparedPreview, type CadPrepareEdits } from './useCadPreparedPreview';
 import { CadSketchCommandForm, useCadSketchCommandSession, type CadSketchCommandSessionProps } from './useCadSketchCommandSession';
 
 /**
- * A selected edge identifies its exact whole compiler cycle; points and multiple loops do not guess a source. A generated shape selected
- * by its interior or from the tree names the cycle made of exactly its edges, so it offsets as a selected edge of it would; a saved
- * profile names itself.
+ * A selected edge identifies its exact whole compiler cycle; points and multiple loops do not guess a source. A generated shape of any
+ * kind selected as a whole, by its interior, profile button or tree row, names the cycle made of exactly its edges, so it offsets as a
+ * selected edge of it would; a saved profile names itself.
  */
 export function cadSketchOffsetSource(sketch: CadSketchFeature, parameters: CadDocument['parameters'], selection: readonly CadSketchGraphSelection[], profileId: string | null): CadSketchOffsetSource | null {
   const cycle = (matches: (refs: readonly { readonly entityId: string }[]) => boolean): CadSketchOffsetSource | null => {
@@ -30,10 +30,10 @@ export function cadSketchOffsetSource(sketch: CadSketchFeature, parameters: CadD
     const ids = selection.map(item => item.id);
     return cycle(refs => ids.every(id => refs.some(ref => ref.entityId === id)));
   }
-  const generator = profileId ? cadSketchProfileGenerator(sketch, profileId) : undefined;
+  const generator = profileId ? cadSketchWholeGenerator(sketch, profileId) : undefined;
   if (generator) {
-    // A construction shape's cycle is construction, so it names none, as a construction profile does not. Every kind draws one loop, a
-    // plugin's outline too, so a shape the sketch leaves unbranched has exactly one.
+    // A construction shape's cycle is construction, so it names none, as a construction profile does not. Every kind but a circular
+    // pattern draws one loop, a plugin's outline and a linked offset's too, so a shape the sketch leaves unbranched has exactly one.
     if (!sketch.graph) return null;
     const edges = new Set(cadSketchGeneratorMembers(sketch.graph, generator).entityIds);
     return cycle(refs => refs.length === edges.size && refs.every(ref => edges.has(ref.entityId)));

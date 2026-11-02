@@ -6,6 +6,7 @@ import type { CadDocument, CadScalar, CadSketchFeature } from '@/domain/cad/cadD
 import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 import { cadSketchGeneratorName } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { cadSketchGeneratorConstruction } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_ORIGIN_ID, CAD_SKETCH_V_AXIS_ID } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
 import { userFacingMessage } from '@/lib/userMessage';
 import { ScalarField, SelectField } from './CadFields';
@@ -108,6 +109,8 @@ export function CadSketchGeneratorInputsEditor({ generator, sketch, document, on
     fields = scalar('Distance', geometry.distance, 'distance');
   }
   const title = cadSketchGeneratorName(generator);
+  // A pattern of construction seeds makes construction copies whatever its own flag says, so the box shows that and says why.
+  const constructionLock = graph ? cadSketchGeneratorConstruction(graph, generator).reason : null;
   return <form className="cad-property-form" aria-label={title} aria-busy={submission.applying || undefined}
     onKeyDown={event => { if (event.key === 'Escape' && changed && !submission.applying && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); submission.cancel(); onCancel(); } }}
     onSubmit={event => {
@@ -126,7 +129,7 @@ export function CadSketchGeneratorInputsEditor({ generator, sketch, document, on
       <label className="cad-field"><span>Name</span><Input value={draft.name ?? ''} onChange={event => {
         const { name: _name, ...rest } = draft; update(event.target.value.trim() ? { ...rest, name: event.target.value } : rest);
       }} /></label>
-      <label className="cad-check"><Input type="checkbox" checked={draft.construction} onChange={event => update({ ...draft, construction: event.target.checked })} /> Construction geometry</label>
+      <label className="cad-check"><Input type="checkbox" checked={constructionLock ? true : draft.construction} disabled={Boolean(constructionLock)} title={constructionLock ?? undefined} onChange={event => update({ ...draft, construction: event.target.checked })} /> Construction geometry</label>
       {fields}
     </fieldset>
     {error && <p role="alert" className="cad-error">{error}</p>}
