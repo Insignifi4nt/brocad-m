@@ -382,7 +382,9 @@ export function cadSiteTools(getController: () => CadController) {
       // At most eight warnings, as other edit diagnostics are listed, with how many there were.
       return { ...context(cad), ...(warnings.length ? { sketchWarnings: { items: warnings.slice(0, 8), count: warnings.length, omittedCount: Math.max(0, warnings.length - 8) } } : {}) };
     }, false, object({ ...version, edits: Type.Array(CadToolEditEnvelope, { minItems: 1, maxItems: 128 }) }), input => {
-      // The domain's own reasons for edits its schema refuses, such as a generator's count bound, come before the bare schema refusal.
+      // The domain's own reasons for edits its schema refuses, such as a generator's count bound, come before the bare schema refusal. An
+      // envelope that is no object, or edits that are no list, have no such reason, so the schema check names what is wrong.
+      if (typeof input !== 'object' || input === null || Array.isArray(input)) return;
       const edits = (input as { readonly edits?: unknown }).edits;
       if (Array.isArray(edits)) refuseCadEditsBeforeSchema(edits);
     }),

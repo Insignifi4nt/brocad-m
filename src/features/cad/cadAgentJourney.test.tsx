@@ -264,6 +264,20 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(h.session.getSnapshot()).toBe(seeded);
   });
 
+  it('refuses an edit envelope that is no object, or edits that are no list, with the schema issue and changes nothing', async () => {
+    const h = await mount(), before = h.session.getSnapshot();
+    const cases: readonly [unknown, string, string][] = [
+      [null, '/', 'Expected object'], [[], '/', 'Expected object'], [7, '/', 'Expected object'], ['edits', '/', 'Expected object'], [true, '/', 'Expected object'],
+      [{ expectedVersion: before.version, edits: null }, '/edits', 'Expected array'], [{ expectedVersion: before.version, edits: 'set-parameter' }, '/edits', 'Expected array'],
+      [{ expectedVersion: before.version, edits: { kind: 'set-parameter', name: 'n', value: 1 } }, '/edits', 'Expected array']
+    ];
+    for (const [args, path, message] of cases) {
+      const response = object(await h.call('cad_edit_document', args));
+      expect(response, JSON.stringify(args)).toMatchObject({ ok: false, error: { code: 'INVALID_ARGUMENT', details: { issues: expect.arrayContaining([{ path, message }]) } } });
+    }
+    expect(h.session.getSnapshot()).toBe(before);
+  });
+
   it('keeps initial CAD discovery below 50 KiB without repeating complete plugin recipe schemas', () => {
     const tools = cadSiteTools(() => { throw new Error('Registration must not invoke a controller'); });
     const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
