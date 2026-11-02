@@ -5,7 +5,8 @@ import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadSketchGraph, CadSketchGraphRelation, CadSketchReferenceDimension } from '@/domain/cad/cadSketchGraph';
 import { prepareCadEdits } from './cadEditPreparation';
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
-import { cadSketchDimensionPickEligibility, cadSketchDimensionPickTargets, planCadSketchDimension, type CadSketchDimensionOperand } from './cadSketchDimensionPlacement';
+import { cadSketchDimensionBatchAt, cadSketchDimensionCandidateAt, cadSketchDimensionPickEligibility, cadSketchDimensionPickTargets, planCadSketchDimension,
+  type CadSketchDimensionOperand } from './cadSketchDimensionPlacement';
 import { cadSketchDimensionToDriving } from './cadSketchDimensionCommands';
 
 const solver = createCadSketchTestSolver();
@@ -29,6 +30,7 @@ function bottomOf(graph: CadSketchGraph) {
 }
 const point = (id: string): CadSketchDimensionOperand => ({ kind: 'point', id }), entity = (id: string): CadSketchDimensionOperand => ({ kind: 'entity', id });
 let ids = 0;
+const SIZED = 'Rectangle "plate" generates all of this geometry, so its inputs set this size. Change its inputs, or measure it with a reference dimension.';
 const newId = () => `dimension-${++ids}`;
 
 describe('dimensions anchored on generated geometry', () => {
@@ -75,8 +77,34 @@ describe('dimensions anchored on generated geometry', () => {
     const drive = (id: string) => cadSketchDimensionToDriving(withReferences, {}, withReferences.relations.find(relation => relation.id === id)!);
     expect(drive('height')).toMatchObject({ reason: null, relation: { id: 'height', kind: 'point-line-distance', pointId: 'p', lineId: bottom.id, value: 15 } });
     expect(drive('across')).toMatchObject({ reason: null, relation: { id: 'across', kind: 'distance' } });
-    const owned = 'Rectangle "plate" generates this geometry. Edit the generator\'s inputs, or detach it, before editing generated geometry.';
-    expect(drive('span')).toEqual({ relation: null, reason: owned });
-    expect(drive('length')).toEqual({ relation: null, reason: owned });
+    expect(drive('span')).toEqual({ relation: null, reason: SIZED });
+    expect(drive('length')).toEqual({ relation: null, reason: SIZED });
+    // Nor one from a generated corner to an axis, which is fixed as well.
+    const top = graph.points.find(item => item.id.startsWith('plate_') && item.position[1] === 10)!;
+    const fromAxis = { ...withReferences, relations: [...withReferences.relations, reference('rise', { kind: 'point-line-distance', pointId: top.id, lineId: '@h' })] };
+    expect(cadSketchDimensionToDriving(fromAxis, {}, fromAxis.relations.at(-1)!)).toEqual({ relation: null, reason: SIZED });
+  });
+
+  it('offer only a reference for picks a generator makes alone, or with the origin or an axis, whose driving dimension an edit refuses', async () => {
+    const document = part(), graph = graphOf(document), bottom = bottomOf(graph), targets = cadSketchDimensionPickTargets(graph);
+    const top = graph.points.find(item => item.id.startsWith('plate_') && item.position[1] === 10)!;
+    const plan = (...operands: CadSketchDimensionOperand[]) => planCadSketchDimension(graph, {}, operands, newId, targets.sizedEntityIds);
+    // The two ends of a generated edge: no driving distance, but its reference, which placing adds.
+    const ends = plan(point(bottom.startPointId), point(bottom.endPointId));
+    expect(ends.candidates.map(candidate => [candidate.form, candidate.state])).toEqual([['aligned', 'blocked'], ['horizontal', 'blocked'], ['vertical', 'blocked']]);
+    expect(ends.candidates[0]).toMatchObject({ reason: SIZED, reference: { kind: 'reference-dimension', measurement: { kind: 'point-distance', pointIds: [bottom.startPointId, bottom.endPointId] } } });
+    expect(ends.candidates[1]).toMatchObject({ reason: SIZED });
+    expect(cadSketchDimensionBatchAt(ends, cadSketchDimensionCandidateAt(ends, null)!, null)).toMatchObject({ added: [{ kind: 'reference-dimension' }], reason: null });
+    // A generated corner from its own edge, from the origin and from an axis, and a generated edge with an axis: none drives.
+    for (const operands of [[point(top.id), entity(bottom.id)], [point(top.id), point('@origin')], [point(top.id), entity('@h')], [entity(bottom.id), entity('@v')]])
+      expect(plan(...operands).candidates.filter(candidate => candidate.state === 'available')).toEqual([]);
+    expect(plan(point(top.id), entity(bottom.id)).candidates[0]).toMatchObject({ state: 'blocked', reason: SIZED, reference: { measurement: { kind: 'point-line-distance' } } });
+    // Free geometry with a generated anchor still drives.
+    expect(plan(point('p'), point(top.id)).candidates[0]).toMatchObject({ state: 'available' });
+    // The same distance sent as an edit is refused, naming the generator, and so is a hold on a generated corner's coordinate.
+    await expect(prepareCadEdits(document, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'span', kind: 'distance', pointIds: [bottom.startPointId, bottom.endPointId], value: 20 } }], solver))
+      .rejects.toMatchObject({ code: 'owned-sketch-generator', message: `Distance "span" cannot drive generated geometry alone. ${SIZED}` });
+    await expect(prepareCadEdits(document, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'rise', kind: 'fixed-axis', pointId: top.id, axis: 'y', value: 10 } }], solver))
+      .rejects.toMatchObject({ code: 'owned-sketch-generator' });
   });
 });

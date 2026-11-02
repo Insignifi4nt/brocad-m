@@ -1,7 +1,7 @@
 import type { CadSketchGraph, CadSketchGraphRelation, CadSketchReferenceDimension } from '@/domain/cad/cadSketchGraph';
 import { cadSketchReferenceDimensionToDriving, resolveCadSketchReferenceDimension } from '@/domain/cad/cadSketchReferenceDimensions';
 import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
-import { cadSketchGeneratorLockReason } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { cadSketchGeneratedSizeReason } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
 import { resolveCadSketchPointIdentities } from '@/domain/cad/cadSketchGraphJoints';
 import { withCadSketchCarriedPlacement } from '@/domain/cad/cadSketchPlacedDimensions';
@@ -65,9 +65,10 @@ export function cadSketchReferenceDrivingLock(graph: CadSketchGraph, relation: C
   const selections = target.kind === 'distance' ? target.pointIds.map(id => ({kind:'point' as const,id}))
     : target.kind === 'point-line-distance' ? [{kind:'point' as const,id:target.pointId}, {kind:'entity' as const,id:target.lineId}] : [{kind:'entity' as const,id:target.entityId}];
   const owned = selections.map(atom => cadSketchLinearPatternLockReason(graph,atom)).find(Boolean); if (owned) return owned;
-  // Generated geometry keeps what its generator makes, so it anchors a dimension whose other geometry is free to move, but takes none alone.
-  const generated = selections.map(atom => cadSketchGeneratorLockReason(graph, atom));
-  if (generated.every(Boolean)) return generated[0];
+  // Generated geometry keeps what its generator makes, so it anchors a dimension whose other geometry is free to move, but takes none alone,
+  // nor with the origin or an axis.
+  const generated = cadSketchGeneratedSizeReason(graph, selections.map(atom => atom.id));
+  if (generated) return generated;
   if (target.kind === 'point-line-distance') {
     // A distance from an axis is stored as the coordinate it holds, so a hold on that coordinate already drives it.
     const identity = resolveCadSketchPointIdentities(graph), lineId = target.lineId, point = identity(target.pointId);

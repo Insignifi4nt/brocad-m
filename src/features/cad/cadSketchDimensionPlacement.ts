@@ -10,7 +10,7 @@ import { measureCadSketchReferenceDimension } from '@/domain/cad/cadSketchRefere
 import { userFacingMessage } from '@/lib/userMessage';
 import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
 import { cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
-import { cadSketchGeneratorLockReason } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { cadSketchGeneratedSizeReason, cadSketchGeneratorLockReason } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CAD_SKETCH_NO_REFERENCE_HOLD, cadSketchDistanceForPair, cadSketchMatchingReference, cadSketchPointLineDistanceFor, cadSketchRadialRelationForEntity, cadSketchSameIdentityPair } from './cadSketchDimensionCommands';
 import { isCadSketchDimensionRelation } from './cadSketchDimensionSelection';
 import type { CadSketchGraphSelection } from './cadSketchGraphSelection';
@@ -248,8 +248,13 @@ export function planCadSketchDimension(graph: CadSketchGraph, parameters: Readon
   if (geometry.length !== lines.length + curves.length + points.length) return NO_SKETCH_DIMENSION_PLAN;
   // The origin and the axes are fixed together, so they take a dimension only with one point or edge of the sketch.
   if (geometry.length < operands.length && (operands.length !== 2 || geometry.length !== 1)) return NO_SKETCH_DIMENSION_PLAN;
+  // Picks a generator makes, with the origin or an axis, are held where its inputs put them, so a driving dimension on them alone drives
+  // nothing: each form that would add one offers its reference form instead, where it has one.
+  const generated = cadSketchGeneratedSizeReason(graph, operands.map(operand => operand.id));
+  const held = (candidate: CadSketchDimensionCandidate): CadSketchDimensionCandidate => generated && candidate.state === 'available'
+    ? { form: candidate.form, label: candidate.label, state: 'blocked', reason: generated, ...candidate.reference ? { reference: candidate.reference } : {}, preview: candidate.preview } : candidate;
   const plan = (candidates: readonly CadSketchDimensionCandidate[], defaultForm: CadSketchDimensionForm, pair: readonly [Point2, Point2] | null = null): CadSketchDimensionPlan =>
-    Object.freeze({ operands, candidates, pair, defaultForm, graph, parameters });
+    Object.freeze({ operands, candidates: generated ? candidates.map(held) : candidates, pair, defaultForm, graph, parameters });
   try {
     if (axis) return lines.length ? linePairPlan([lines[0].id, axis]) : plan([pointFromAxis(points[0] ?? curves[0].centerPointId, axis)], 'point-line');
     if (geometry.length === 1 && operands.length === 2) {

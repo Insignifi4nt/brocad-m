@@ -12,7 +12,7 @@ import type { CadSketchGraphSelection } from '../cadSketchGraphSelection';
 import { applyCadSketchRemapOutcomes, remapCadSketchRelations } from '../sketch-relations/cadSketchRelationRemap';
 import { cadSketchRelationDefinition } from '../sketch-relations/cadSketchRelationRegistry';
 import type { CadSketchRelationOwnership } from '../sketch-relations/cadSketchRelationTypes';
-import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_V_AXIS_ID } from '../sketch-relations/cadSketchVirtualElements';
+import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_V_AXIS_ID, isCadSketchVirtualId } from '../sketch-relations/cadSketchVirtualElements';
 import {
   CAD_SKETCH_GENERATOR_KINDS, type CadSketchGeneratedGeometry, type CadSketchGeneratorContext, type CadSketchGeneratorEvaluation,
   type CadSketchGeneratorKind
@@ -298,6 +298,35 @@ function assertStoredOutsideMembers(stored: Split, index: GeneratorIndex): void 
     const namespace = cadSketchIdNamespace(pointId), generator = namespace === undefined ? undefined : index.byPrefix.get(namespace);
     if (generator) throw invalid(`Sketch edge "${entity.id}" cannot end at "${pointId}", which ${cadSketchGeneratorName(generator)} generates. Connect to it with a coincident relation instead.`);
   }
+  for (const relation of stored.relations) {
+    if (!DRIVING_DIMENSION_KINDS.has(relation.kind)) continue;
+    const definition = cadSketchRelationDefinition(relation), reason = generatedSizeReason(index, definition.operands(relation));
+    if (reason) throw owned(`${definition.nameOf?.(relation) ?? definition.name} "${relation.id}" cannot drive generated geometry alone. ${reason}`);
+  }
+}
+
+/** The relations that drive a size or a place from their operands' geometry: the driving dimensions. */
+const DRIVING_DIMENSION_KINDS: ReadonlySet<CadSketchGraphRelation['kind']> = new Set(['distance', 'axis-distance', 'point-line-distance', 'line-angle', 'radial-size', 'fixed-axis']);
+/** Why a driving dimension on `ids` drives nothing: each is a member of a generator in `index`, or the origin or an axis. */
+function generatedSizeReason(index: GeneratorIndex, ids: readonly string[]): string | null {
+  const owners: CadSketchGenerator[] = [];
+  for (const id of ids) {
+    if (isCadSketchVirtualId(id)) continue;
+    const namespace = cadSketchIdNamespace(id), owner = namespace === undefined ? undefined : index.byPrefix.get(namespace);
+    if (!owner) return null;
+    if (!owners.includes(owner)) owners.push(owner);
+  }
+  if (!owners.length) return null;
+  const one = owners.length === 1, their = one ? 'its' : 'their';
+  return `${listed(owners.map(cadSketchGeneratorName))} ${one ? 'generates' : 'generate'} all of this geometry, so ${their} inputs set this size. Change ${their} inputs, or measure it with a reference dimension.`;
+}
+/**
+ * Why a driving dimension on the geometry `ids` would drive nothing, naming the generators that set it: every one is a generator's member,
+ * or the origin or an axis, all of which the solve holds. Null when any is free geometry, which the dimension moves, or none is generated.
+ */
+export function cadSketchGeneratedSizeReason(graph: CadSketchGraph, ids: readonly string[]): string | null {
+  const index = generatorIndex(graph);
+  return index.generators.length ? generatedSizeReason(index, ids) : null;
 }
 
 /**

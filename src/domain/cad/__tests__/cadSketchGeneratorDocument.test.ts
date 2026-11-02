@@ -35,6 +35,15 @@ describe('sketch generators in a document', () => {
     expect(storedCadDocumentText(parseCadDocument(JSON.parse(JSON.stringify(document))))).toBe(text);
   });
 
+  it('refuse a driving dimension between two generators\' members, naming both, and keep one that reaches free geometry', () => {
+    const other: CadSketchGenerator = { id: 'other', kind: 'generator', idPrefix: 'g-other', construction: false, geometry: { kind: 'rectangle', x: 30, y: 0, width: 5, height: 10, cornerRadius: 0 } };
+    const gap = { id: 'gap', kind: 'distance', pointIds: ['g-rect_p1', 'g-other_p0'], value: 10 };
+    expect(refusal(() => documentWith({ points: [], entities: [], relations: [rectangle(), other, gap] }))).toMatchObject({ code: 'owned-sketch-generator',
+      message: 'Distance "gap" cannot drive generated geometry alone. Rectangle "rect" and Rectangle "other" generate all of this geometry, so their inputs set this size. Change their inputs, or measure it with a reference dimension.' });
+    const free = documentWith({ points: [{ id: 'u', position: [30, 0] }], entities: [], relations: [rectangle(), other, { ...gap, pointIds: ['g-rect_p1', 'u'] }] });
+    expect(graphOf(free).relations.map(relation => relation.id)).toContain('gap');
+  });
+
   it('refuse a stored document whose carried members differ from what its generator makes, naming the generator', () => {
     const carried = JSON.parse(JSON.stringify(documentWith({ points: [], entities: [], relations: [rectangle()] })));
     carried.features[0].graph.points.find((point: { id: string }) => point.id === 'g-rect_p2').position = [21, 10];
