@@ -1,6 +1,6 @@
 // TypeScript 7 ships no compiler API yet; AST tooling uses the TypeScript 6 package.
 import ts from '@typescript/typescript6';
-import { bareExpression, methodUse, type CadDiagnosticReach, type CadMemberRead, type CadSourceIndex } from './cadDiagnosticReach';
+import { bareExpression, isCadErrorFactory, methodUse, type CadDiagnosticReach, type CadMemberRead, type CadSourceIndex } from './cadDiagnosticReach';
 
 /**
  * Every member read, by name or by element, in the code a walk entered, found apart from the walk: each entered node's code but its types
@@ -49,13 +49,16 @@ function runsWhen(node: ts.Node, use: ReturnType<typeof methodUse>): boolean {
 /**
  * The member reads a walk skipped silently, as `file: text` and why: each read of the walked code (`cadMemberReads`) it left without an
  * outcome, and each it says runs nothing of the source (`no-code`, `outside`) although a declaration TypeScript gives it holds code that
- * the read runs (`codeDeclarationsAt`). A read reported as unexpanded is listed among the walk's unexpanded sites too.
+ * the read runs (`codeDeclarationsAt`). A read reported as unexpanded is listed among the walk's unexpanded sites too. A read of a
+ * `CadError` factory that runs it, which the walk neither reported nor read the code of (`factoryReads`), skipped a code.
  */
 export function cadSkippedMemberReads(index: CadSourceIndex, reach: CadDiagnosticReach): readonly string[] {
   const skipped: string[] = [];
   for (const { file, read } of cadMemberReads(reach)) {
     const outcome = reach.accesses.get(read), at = `${file}: ${read.getText()}`;
     if (outcome === undefined) skipped.push(`${at}, without an outcome`);
+    else if (outcome !== 'unexpanded' && !reach.factoryReads.has(read) && index.codeDeclarationsAt(read).some(({ node }) => isCadErrorFactory(node) && runsWhen(node, methodUse(read))))
+      skipped.push(`${at}, a CadError factory whose code the walk did not read`);
     else if (outcome === 'unexpanded' && !reach.unexpanded.some(site => site.startsWith(`${at}, `))) skipped.push(`${at}, unexpanded but not reported`);
     else if (outcome === 'no-code' || outcome === 'outside') {
       const use = methodUse(read), running = index.codeDeclarationsAt(read).filter(({ node }) => runsWhen(node, use));

@@ -24,10 +24,14 @@ import ts from '@typescript/typescript6';
  * spread, may have any method called, so it runs them all. An overload signature stands for its implementation. A destructuring read
  * runs the getters it reads.
  *
- * It collects the first argument of each `CadError` raised (`new CadError(…)`, `CadError.checked(…)`, `CadError.received(…)`, or the
- * `super(…)` of a class extending `CadError`) and the `code` of each object literal, written plainly, quoted or as a computed literal
- * key, which carries a refusal to the `CadError` an inspection raises. The bodies of the two factories are not walked: they raise the
- * code their caller gave, which is read at the call. A code is read through:
+ * It collects the first argument of each `CadError` raised and the `code` of each object literal, written plainly, quoted or as a computed
+ * literal key, which carries a refusal to the `CadError` an inspection raises. A raise is known by the declaration its callee resolves to,
+ * however it is named: a `new` or a call of the `CadError` class, a call of one of its two factories (`checked`, `received`), or the
+ * `super(…)` of a class extending it. The class and the factories are reached through any name: their own, a constant that holds them,
+ * a member read by name or by a literal element, a namespace import's member. The factories' bodies are not walked: each call's first
+ * argument is read instead, since they raise the code their caller gave. A raise whose code is missing or spread, a factory or the class
+ * given on or destructured, a factory called through `call` or `apply`, and a factory reached any other way are reported. A code is read
+ * through:
  * - each branch of a conditional and each side of `??`, `||` and `&&`;
  * - constants, properties of object literals (from the last: a spread or a computed key it cannot tell may hold one, and an absent one
  *   holds none) and elements of list literals, by a literal key or, for a key it cannot tell, through every element and property;
@@ -54,6 +58,8 @@ export interface CadDiagnosticReach {
   readonly declarations: ReadonlySet<string>;
   /** What became of each member read in the walked code (`CadMemberOutcome`). */
   readonly accesses: ReadonlyMap<ts.Node, CadMemberOutcome>;
+  /** The member reads of a `CadError` factory whose code the walk read: at a call, or through a constant that holds the factory, at its calls. */
+  readonly factoryReads: ReadonlySet<CadMemberRead>;
   /** The code walked: each node entered, and for a constant object read only for its members, that object. */
   readonly entries: readonly CadDiagnosticEntry[];
 }
@@ -511,15 +517,16 @@ export class CadSourceIndex {
 export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDiagnosticRoot[], options: CadDiagnosticReachOptions = {}): CadDiagnosticReach {
   const { templates = {}, stop = new Set<string>(), receivers } = options;
   const codes = new Set<string>(), unexpanded = new Set<string>(), taken = new Set<string>(), walked = new Set<ts.Node>(), declarations = new Set<string>();
-  const walkedHeld = new Set<ts.Node>(), entries: CadDiagnosticEntry[] = [], accesses = new Map<ts.Node, CadMemberOutcome>();
+  const walkedHeld = new Set<ts.Node>(), entries: CadDiagnosticEntry[] = [], accesses = new Map<ts.Node, CadMemberOutcome>(), factoryReads = new Set<CadMemberRead>();
   const templated: { readonly file: string; readonly value: ts.TemplateExpression }[] = [];
   const queue: CadDiagnosticEntry[] = [...roots];
   /** Enters declaration `found`; `receiver` when it is read only for a member, so a constant object runs its methods only as they are read. */
   const push = ({ file, node }: CadDiagnosticRoot, receiver = false) => {
     const name = (node as { name?: ts.Node }).name;
     if (name && ts.isIdentifier(name) && stop.has(`${file}:${name.text}`)) return;
-    // A factory's caller gave the code it raises (`cadErrorCode`); its body only passes that code on.
-    if (isCadErrorFactory(node)) return;
+    // A factory's caller gives the code it raises, which is read at each call (`factoryRead`); its body only passes that code on. One
+    // reached another way may raise a code the walk never reads.
+    if (isCadErrorFactory(node)) { unexpanded.add(`${file}: ${(name as ts.Identifier).text}, a CadError factory reached where the walk cannot read its code`); return; }
     const named = name && propertyName(name as ts.PropertyName);
     if (named) declarations.add(`${file}:${named}`);
     // A variable's initializer and a class's constructor and field initializers are what using them runs.
@@ -684,6 +691,70 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     }
     return found;
   };
+  /** The raise `call` makes: its first argument is the code, which a missing or spread argument hides. */
+  const raisedAt = (file: string, call: ts.CallExpression | ts.NewExpression) => {
+    const first = call.arguments?.[0];
+    if (first && !ts.isSpreadElement(first)) codesOf(file, first);
+    else unexpanded.add(`${file}: ${call.getText()}, a CadError raised with a code the walk cannot read`);
+  };
+  const raisers = new Map<ts.Node, 'class' | 'factory' | undefined>();
+  /**
+   * What declaration `found` is: the `CadError` class, one of its factories held by a constant, or a constant that holds either in turn;
+   * undefined for anything else.
+   */
+  const raiser = ({ file, node }: CadDiagnosticRoot): 'class' | 'factory' | undefined => {
+    if (raisers.has(node)) return raisers.get(node);
+    raisers.set(node, undefined);
+    let found: 'class' | 'factory' | undefined;
+    if (isCadErrorClass(node)) found = 'class';
+    else if (ts.isVariableDeclaration(node) && isConstant(node) && node.initializer) {
+      const value = bareExpression(node.initializer);
+      if (ts.isIdentifier(value)) found = index.resolve(file, value).map(raiser).find(Boolean);
+      else if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+        const key = ts.isPropertyAccessExpression(value) ? value.name.text : keyText(file, value.argumentExpression);
+        if ((key === undefined || FACTORIES.has(key)) && index.codeDeclarationsAt(value).some(member => isCadErrorFactory(member.node))) found = 'factory';
+      }
+    }
+    raisers.set(node, found);
+    return found;
+  };
+  /** Where `read` gives what it names: past parentheses, assertions and non-null assertions. */
+  const outermost = (read: ts.Expression) => {
+    let outer: ts.Expression = read;
+    while (ts.isParenthesizedExpression(outer.parent) || ts.isNonNullExpression(outer.parent) || ts.isAsExpression(outer.parent) || ts.isSatisfiesExpression(outer.parent)) outer = outer.parent;
+    return outer;
+  };
+  /** Whether `outer` is what a constant is initialized to, so the constant holds what it gives. */
+  const heldByConstant = (outer: ts.Expression) => ts.isVariableDeclaration(outer.parent) && outer.parent.initializer === outer && ts.isIdentifier(outer.parent.name) && isConstant(outer.parent);
+  /**
+   * A read of a `CadError` factory, by name or through a constant that holds it: called, its first argument is the code; held by another
+   * constant, it is read at that constant's calls. A presence test or a write runs nothing; any other use is reported.
+   */
+  const factoryRead = (file: string, read: ts.Expression): CadMemberOutcome => {
+    const outer = outermost(read), parent = outer.parent;
+    if (ts.isCallExpression(parent) && parent.expression === outer) raisedAt(file, parent);
+    else if (!heldByConstant(outer)) {
+      const use = methodUse(read);
+      if (use === 'tested' || use === 'write' || use === 'update') return 'no-code';
+      unexpanded.add(`${file}: ${read.getText()}, a CadError factory ${use === 'called' ? 'called through call or apply' : 'given on'}, whose code the walk cannot read`);
+      if (!ts.isIdentifier(read)) factoryReads.add(read as CadMemberRead);
+      return 'unexpanded';
+    }
+    if (!ts.isIdentifier(read)) factoryReads.add(read as CadMemberRead);
+    return 'followed';
+  };
+  /**
+   * A read of the `CadError` class: constructed or called, its first argument is the code. Testing an instance's class, reading a member,
+   * extending it or a constant that holds it raises nothing here; any other use, destructuring it included, is reported, since what
+   * constructs it or calls its factories is unseen.
+   */
+  const classRead = (file: string, read: ts.Expression) => {
+    const outer = outermost(read), parent = outer.parent;
+    if ((ts.isNewExpression(parent) || ts.isCallExpression(parent)) && parent.expression === outer) { raisedAt(file, parent); return; }
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && parent.right === outer || isReceiver(outer)
+      || ts.isExpressionWithTypeArguments(parent) && ts.isHeritageClause(parent.parent) || heldByConstant(outer)) return;
+    unexpanded.add(`${file}: ${read.getText()}, the CadError class used as a value, which the walk cannot follow`);
+  };
   /** Whether member `node` runs when read with `use`: a getter on a read, a setter on a write, a function when called or given on. */
   const runs = (node: ts.Node, use: ReturnType<typeof methodUse>) => {
     if (ts.isGetAccessorDeclaration(node)) return use !== 'write';
@@ -708,6 +779,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       if (ts.isGetAccessorDeclaration(node)) { if (use !== 'write') follow(each); continue; }
       if (ts.isSetAccessorDeclaration(node)) { if (use === 'write' || use === 'update') follow(each); continue; }
       if (use === 'write' || use === 'update' || use === 'tested' || !ts.isMethodDeclaration(node) && !index.callable(access)) continue;
+      if (isCadErrorFactory(node)) {
+        if (factoryRead(file, access) === 'unexpanded') return 'unexpanded';
+        outcome = 'followed';
+        continue;
+      }
       if (use === 'other') { unexpanded.add(`${file}: ${access.getText()}, a method used as a value the walk does not follow`); return 'unexpanded'; }
       follow(each);
     }
@@ -732,8 +808,14 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         // A namespace's member is the export it names, used as any other name is.
         const found = names.flatMap(name => index.exported(namespace, name, new Set()));
         if (!found.length) { unexpanded.add(`${file}: ${access.getText()}, a namespace member the walk cannot find`); return 'unexpanded'; }
-        for (const declaration of found) push(declaration, isReceiver(access));
-        return 'followed';
+        let outcome: CadMemberOutcome = 'followed';
+        for (const declaration of found) {
+          const raises = raiser(declaration);
+          if (raises === 'class') classRead(file, access);
+          if (raises === 'factory' && factoryRead(file, access) === 'unexpanded') outcome = 'unexpanded';
+          push(declaration, isReceiver(access));
+        }
+        return outcome;
       }
       const objects = objectsOf(file, receiver);
       if (objects.length) {
@@ -789,11 +871,19 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     const heldObjects = new Set<ts.Node>(held ? [held] : []);
     const visit = (child: ts.Node) => {
       if (ts.isTypeNode(child) || ts.isInterfaceDeclaration(child) || ts.isTypeAliasDeclaration(child) || ts.isImportDeclaration(child)) return;
-      const raised = cadErrorCode(child);
-      if (raised) codesOf(file, raised);
-      else if (ts.isPropertyAssignment(child) && propertyName(child.name) === 'code') codesOf(file, child.initializer);
+      if (ts.isPropertyAssignment(child) && propertyName(child.name) === 'code') codesOf(file, child.initializer);
       else if (ts.isShorthandPropertyAssignment(child) && child.name.text === 'code') codesOf(file, child.name);
-      if (ts.isIdentifier(child) && isReference(child)) index.resolve(file, child).forEach(found => push(found, isReceiver(child)));
+      // The `super(…)` of a class extending `CadError` raises one.
+      if (ts.isCallExpression(child) && child.expression.kind === ts.SyntaxKind.SuperKeyword) {
+        const base = ts.findAncestor(child, ts.isClassLike)?.heritageClauses?.find(clause => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
+        if (base && ts.isIdentifier(base) && index.resolve(file, base).some(found => raiser(found) === 'class')) raisedAt(file, child);
+      }
+      if (ts.isIdentifier(child) && isReference(child)) for (const found of index.resolve(file, child)) {
+        const raises = raiser(found);
+        if (raises === 'class') classRead(file, child);
+        else if (raises === 'factory') factoryRead(file, child);
+        push(found, isReceiver(child));
+      }
       if (ts.isPropertyAccessExpression(child) || ts.isElementAccessExpression(child)) member(file, child);
       if (ts.isObjectBindingPattern(child)) destructuredGetters(file, child);
       if (ts.isSpreadAssignment(child)) index.getters(child.expression, undefined, true).forEach(found => push(found));
@@ -885,27 +975,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     }
     for (const variant of variants) codes.add(variant);
   }
-  return { codes, unexpanded: [...unexpanded].sort(), taken: [...taken].sort(), declarations, accesses, entries };
-}
-
-/**
- * The code a raise of a `CadError` gives as its first argument: `new CadError(…)`, `CadError(…)`, `CadError.checked(…)`,
- * `CadError.received(…)`, or the `super(…)` call of a class that extends `CadError`.
- */
-function cadErrorCode(node: ts.Node): ts.Expression | undefined {
-  if (!ts.isNewExpression(node) && !ts.isCallExpression(node)) return undefined;
-  const callee = node.expression, first = node.arguments?.[0];
-  if (!first) return undefined;
-  if (ts.isIdentifier(callee)) return callee.text === 'CadError' ? first : undefined;
-  if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(callee)) {
-    return ts.isIdentifier(callee.expression) && callee.expression.text === 'CadError' && (callee.name.text === 'checked' || callee.name.text === 'received') ? first : undefined;
-  }
-  if (ts.isCallExpression(node) && callee.kind === ts.SyntaxKind.SuperKeyword) {
-    const owner = ts.findAncestor(node, ts.isClassLike);
-    const base = owner?.heritageClauses?.find(clause => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
-    return base && ts.isIdentifier(base) && base.text === 'CadError' ? first : undefined;
-  }
-  return undefined;
+  return { codes, unexpanded: [...unexpanded].sort(), taken: [...taken].sort(), declarations, accesses, factoryReads, entries };
 }
 
 /** Whether `node` is read only for a member: the receiver of a member read. */
@@ -920,7 +990,7 @@ function isReceiver(node: ts.Expression): boolean {
  * `++` or `--`, which reads it too; `tested` for presence, as a condition, the operand of `!` or `typeof`, a side of a comparison or
  * the left side of `&&`, none of which gives the function on; or `other`.
  */
-export function methodUse(access: CadMemberRead): 'called' | 'passed' | 'write' | 'update' | 'tested' | 'other' {
+export function methodUse(access: ts.Expression): 'called' | 'passed' | 'write' | 'update' | 'tested' | 'other' {
   let outer: ts.Expression = access;
   while (ts.isParenthesizedExpression(outer.parent) || ts.isNonNullExpression(outer.parent) || ts.isAsExpression(outer.parent) || ts.isSatisfiesExpression(outer.parent)) outer = outer.parent;
   const parent = outer.parent;
@@ -942,10 +1012,14 @@ export function methodUse(access: CadMemberRead): 'called' | 'passed' | 'write' 
 }
 
 /** The name a function is called by and the declaration it resolves to: a function declaration, or a variable holding the function. */
-/** Whether `node` is `CadError.checked` or `CadError.received`, whose callers give the code they raise as their first argument. */
-function isCadErrorFactory(node: ts.Node): boolean {
-  return ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && (node.name.text === 'checked' || node.name.text === 'received')
-    && node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword) === true && ts.isClassDeclaration(node.parent) && node.parent.name?.text === 'CadError';
+/** The names of the `CadError` factories. */
+const FACTORIES: ReadonlySet<string> = new Set(['checked', 'received']);
+/** Whether declaration `node` is the `CadError` class. */
+function isCadErrorClass(node: ts.Node): boolean { return ts.isClassDeclaration(node) && node.name?.text === 'CadError'; }
+/** Whether declaration `node` is `CadError.checked` or `CadError.received`, whose callers give the code they raise as their first argument. */
+export function isCadErrorFactory(node: ts.Node): boolean {
+  return ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && FACTORIES.has(node.name.text)
+    && node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword) === true && isCadErrorClass(node.parent);
 }
 
 function functionName(owner: ts.FunctionLikeDeclaration): { readonly name: string; readonly declaration: ts.Node } | undefined {

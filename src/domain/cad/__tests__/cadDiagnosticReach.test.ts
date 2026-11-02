@@ -3,9 +3,15 @@ import { CadSourceIndex, cadDiagnosticReach, type CadDiagnosticReachOptions } fr
 import { cadSkippedMemberReads } from './cadMemberReads';
 
 const FILE = 'src/check.ts';
+/** The `CadError` class with its two factories, shaped as the application's, which a source that declares none raises. */
+const CAD_ERROR = `class CadError extends Error {
+  constructor(readonly code: string, message: string, readonly facts?: unknown) { super(message); }
+  static checked(code: string, message: string, facts?: unknown) { return facts === undefined ? new CadError(code, message) : new CadError(code, message, facts); }
+  static received(code: string, message: string, extra: object) { return CadError.checked(code, message); }
+}`;
 /** What the walk finds from `check`, the export of one source file, having checked that it followed or reported every member read. */
 const walk = (source: string, options?: CadDiagnosticReachOptions) => {
-  const index = new CadSourceIndex({ [FILE]: source });
+  const index = new CadSourceIndex({ [FILE]: /\bclass CadError\b/.test(source) ? source : `${source}\n${CAD_ERROR}` });
   const found = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()), options);
   expect(cadSkippedMemberReads(index, found), 'member reads skipped silently').toEqual([]);
   return found;
@@ -271,5 +277,49 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
     expect(reach(`${refusal} export function check() { const make = Refusal; throw new make('hidden'); }`).unexpanded).toEqual([`${FILE}: Refusal passed on`]);
     // A class that extends something else raises no CadError by its super call.
     expect(reach(`class Other extends Error { constructor(code: string) { super(code); } } export function check() { throw new Other('not-a-code'); }`).codes).toEqual([]);
+  });
+
+  it('knows the class and its factories by the declaration a name resolves to, and reads the code at each call however they are named', () => {
+    // By a literal element, through a constant holding the class or a factory or another such constant, and inherited by a subclass.
+    expect(reach(`export function check() { throw CadError['checked']('bracket-code', ''); }`)).toEqual({ codes: ['bracket-code'], unexpanded: [] });
+    expect(reach(`export function check() { throw CadError['received']('bracket-received', '', {}); }`)).toEqual({ codes: ['bracket-received'], unexpanded: [] });
+    expect(reach(`const Failure = CadError; export function check(raw: boolean) { throw raw ? new Failure('alias-new', '') : Failure.checked('alias-code', ''); }`))
+      .toEqual({ codes: ['alias-code', 'alias-new'], unexpanded: [] });
+    expect(reach(`const make = CadError.checked; export function check() { throw make('alias-make', ''); }`)).toEqual({ codes: ['alias-make'], unexpanded: [] });
+    expect(reach(`const make = CadError['received'], again = make; export function check() { throw again('alias-again', '', {}); }`)).toEqual({ codes: ['alias-again'], unexpanded: [] });
+    expect(reach(`class Sub extends CadError {} export function check() { throw Sub.checked('sub-code', ''); }`)).toEqual({ codes: ['sub-code'], unexpanded: [] });
+    // A namespace import's members.
+    const index = new CadSourceIndex({ 'src/errors.ts': `export ${CAD_ERROR} export const make = CadError.checked;`,
+      [FILE]: `import * as errors from './errors';
+        export function check(kind: number) { if (kind === 1) throw new errors.CadError('ns-new', ''); if (kind === 2) throw errors.make('ns-make', ''); throw errors.CadError.received('ns-received', '', {}); }` });
+    const namespaced = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()));
+    expect([[...namespaced.codes].sort(), namespaced.unexpanded, cadSkippedMemberReads(index, namespaced)]).toEqual([['ns-make', 'ns-new', 'ns-received'], [], []]);
+  });
+
+  it('reports a raise whose code it cannot read, and a factory or the class used where it cannot read the code', () => {
+    const cases: readonly (readonly [string, string])[] = [
+      [`export function check(args: [string, string]) { throw CadError.checked(...args); }`, `${FILE}: CadError.checked(...args), a CadError raised with a code the walk cannot read`],
+      [`export function check() { throw new CadError(); }`, `${FILE}: new CadError(), a CadError raised with a code the walk cannot read`],
+      [`export function check() { [CadError.checked].forEach(raise => { throw raise('given', ''); }); }`, `${FILE}: CadError.checked, a CadError factory given on, whose code the walk cannot read`],
+      [`export function check() { throw CadError.checked.call(null, 'called', ''); }`, `${FILE}: CadError.checked, a CadError factory called through call or apply, whose code the walk cannot read`],
+      [`const make = CadError.checked; export function check() { return [make]; }`, `${FILE}: make, a CadError factory given on, whose code the walk cannot read`],
+      [`export function check() { const { checked } = CadError; throw checked('destructured', ''); }`, `${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`],
+      [`export function check() { return [CadError]; }`, `${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`]
+    ];
+    for (const [source, site] of cases) expect(reach(source), source).toEqual({ codes: [], unexpanded: [site] });
+    // Testing for a factory runs it nothing.
+    expect(reach(`export function check() { if (!CadError.checked) throw new CadError('present', ''); }`)).toEqual({ codes: ['present'], unexpanded: [] });
+  });
+
+  it('catches, in its check of member reads, a factory read whose code the walk did not read', () => {
+    const index = new CadSourceIndex({ [FILE]: `${CAD_ERROR} const make = CadError.checked; export function check(kind: number) {
+      if (kind === 1) throw CadError['checked']('bracket-code', ''); if (kind === 2) throw make('alias-code', ''); throw CadError.received('received-code', '', {}); }` });
+    const found = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()));
+    expect(cadSkippedMemberReads(index, found)).toEqual([]);
+    // A walk that followed each read into its factory without reading the code, as one that suppressed the factory's body did.
+    expect(cadSkippedMemberReads(index, { ...found, factoryReads: new Set() })).toEqual([
+      `${FILE}: CadError.checked, a CadError factory whose code the walk did not read`,
+      `${FILE}: CadError.received, a CadError factory whose code the walk did not read`,
+      `${FILE}: CadError['checked'], a CadError factory whose code the walk did not read`]);
   });
 });
