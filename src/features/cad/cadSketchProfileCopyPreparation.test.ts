@@ -37,6 +37,17 @@ describe('document-level independent profile copy preparation', () => {
     expect(JSON.stringify(document)).toBe(before);
   });
 
+  it('copies a generated outline as the same editable sketch as the legacy profile it replaces', async () => {
+    const legacy = profileCopySlotPart(), source = legacy.features[0]; if (source.kind !== 'sketch') throw new Error('Profile source missing.');
+    const [profile] = source.profiles;
+    const generated = parseCadDocument({ ...legacy, schemaVersion: 2, features: [{ ...source, profiles: [], graph: { points: [], entities: [],
+      relations: [{ id: profile.id, kind: 'generator', idPrefix: profile.id, name: profile.name, construction: false, geometry: profile.geometry }] } }] });
+    const edit = { kind: 'copy-sketch-profile', ...slotProfileCopyRequest } as const;
+    const copied = (await prepareCadEdits(generated, [edit], runtime)).document;
+    expect(copied.features[0]).toEqual(generated.features[0]);
+    expect(copied.features[1]).toEqual((await prepareCadEdits(legacy, [edit], runtime)).document.features[1]);
+  });
+
   it('uses the preceding parameter intent and retains shared datum placement and existing source consumers', async () => {
     const base = profileCopySlotPart(), source = base.features[0]; if (source.kind !== 'sketch') throw new Error('Source missing.');
     const sketch = { ...source, plane: { kind: 'datum-plane', featureId: 'datum' } } as const;

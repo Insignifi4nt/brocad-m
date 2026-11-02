@@ -14,6 +14,7 @@ import { createArcSegment, createCircleSegment, createLineSegment } from '@/doma
 import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
+import { cadSketchProfileViews } from './sketch-generators/cadSketchProfileViews';
 
 export const CadSketchProfileCopyRequestSchema = Type.Object({
   sourceSketchId: CadIdentifierSchema, profileId: CadIdentifierSchema, newSketchId: CadIdentifierSchema,
@@ -69,7 +70,8 @@ export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: 
     return invalid('Copy requires a source profile, a new sketch identity and name, and an identifier prefix of at most 64 characters.');
   if (sketch.kind !== 'sketch' || sketch.id !== request.sourceSketchId || !cadFeatureActive(sketch, { parameters }) || request.newSketchId === sketch.id)
     return invalid('Choose an active source sketch and a distinct new sketch identity.');
-  const profiles = sketch.profiles.filter(profile => profile.id === request.profileId), profile = profiles[0];
+  // A generated outline is copied as the shape its generator makes, as a legacy profile is.
+  const profiles = cadSketchProfileViews(sketch).filter(profile => profile.id === request.profileId), profile = profiles[0];
   if (profiles.length !== 1 || !profile) return invalid('The selected source profile no longer exists uniquely. Select it again.');
   const offset = evaluateCadScalar(sketch.offset, parameters);
   if (!isCadImportData(sketch.plane) || !Value.Check(CadSketchPlaneSchema, sketch.plane) || !Value.Check(CadNumberSchema, offset))

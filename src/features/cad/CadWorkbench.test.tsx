@@ -330,6 +330,33 @@ describe('CAD sketch interaction', () => {
     expect(begin).toHaveBeenCalledExactlyOnceWith(copy.id); expect(viewport().getState().workflowOpen).toBe(false);
     expect(viewport().getState().sketchId).toBe(copy.id);
   });
+  it('switches a generated profile between construction and geometry from the tree, and copies its outline to an editable sketch', async () => {
+    const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
+      geometry: { kind: 'rectangle', x: 0, y: 0, width: 50, height: 40, cornerRadius: 0 } } as const;
+    const source = parseCadDocument({ ...createCadDocument('Plate', 'generated-plate'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate] } }] });
+    const begin = vi.fn((id: string) => id);
+    await mount(source, { build: null, buildState: 'idle', onBeginSketchEdit: begin });
+    await click('Expand Outline');
+    const choose = async (label: string) => {
+      await act(async () => button('Plate profile').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })));
+      const action = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === label);
+      if (!action) throw new Error(`${label} is missing.`); await act(async () => action.click());
+    };
+    const graph = () => { const sketch = currentDocument.features[0]; if (sketch.kind !== 'sketch' || !sketch.graph) throw new Error('Sketch missing.'); return sketch.graph; };
+    // The generator takes the flag, and its edges follow it.
+    await choose('Use as construction');
+    expect(graph().relations.find(relation => relation.id === 'plate')).toEqual({ ...plate, construction: true });
+    expect(graph().entities.map(entity => entity.construction)).toEqual([true, true, true, true]);
+    await choose('Use as geometry');
+    expect(graph().relations.find(relation => relation.id === 'plate')).toEqual(plate);
+    expect(graph().entities.map(entity => entity.construction)).toEqual([false, false, false, false]);
+    await choose('Copy outline to editable sketch'); await click('Apply');
+    const copy = currentDocument.features.at(-1); if (copy?.kind !== 'sketch' || !copy.graph || copy.id === 'sketch') throw new Error('Copied sketch missing.');
+    expect(copy.profiles).toEqual([]); expect(copy.graph.relations.filter(relation => relation.kind === 'generator')).toEqual([]);
+    expect(copy.graph.entities).toHaveLength(4);
+    expect(begin).toHaveBeenCalledExactlyOnceWith(copy.id);
+  });
   it('keeps its mirror axis chooser alive through an owned keyboard menu without replacing the copied source selection', async () => {
     const source = pairedBoreMirrorPart(); await mount(source);
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
