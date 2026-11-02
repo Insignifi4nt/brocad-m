@@ -116,14 +116,14 @@ interface GeneratorIndex {
   readonly byPrefix: ReadonlyMap<string, CadSketchGenerator>;
 }
 const EMPTY_INDEX: GeneratorIndex = Object.freeze({ generators: Object.freeze([]), byPrefix: new Map() });
-const generatorIndexes = new WeakMap<CadSketchGraph, GeneratorIndex>();
-/** The graph's generators in relation order, by prefix too; an accepted graph keeps its index. */
+const generatorIndexes = new WeakMap<readonly CadSketchGraphRelation[], GeneratorIndex>();
+/** The graph's generators in relation order, by prefix too; a frozen relation list, as an accepted graph and its acceptance have, keeps its index. */
 function generatorIndex(graph: CadSketchGraph): GeneratorIndex {
-  const kept = generatorIndexes.get(graph);
+  const kept = generatorIndexes.get(graph.relations);
   if (kept) return kept;
   const generators = graph.relations.filter((relation): relation is CadSketchGenerator => relation.kind === 'generator');
   const index = generators.length ? { generators, byPrefix: new Map(generators.map(generator => [generator.idPrefix, generator])) } : EMPTY_INDEX;
-  if (isAcceptedCadSketchGraph(graph)) generatorIndexes.set(graph, index);
+  if (Object.isFrozen(graph.relations)) generatorIndexes.set(graph.relations, index);
   return index;
 }
 export function cadSketchGenerators(graph: CadSketchGraph): readonly CadSketchGenerator[] {
@@ -217,7 +217,7 @@ function split(graph: CadSketchGraph, index: GeneratorIndex): Split {
   return { points, entities, relations, carried };
 }
 
-interface Generation { readonly generator: CadSketchGenerator; readonly members: CadSketchGeneratedGeometry; readonly key: string }
+interface Generation { readonly generator: CadSketchGenerator; readonly members: CadSketchGeneratedGeometry; readonly key: string; readonly evaluation: CadSketchGeneratorEvaluation }
 /**
  * Every generator's members in relation order, each reading the stored lines and those generated before it, up to the first generator
  * whose inputs do not evaluate or whose shape is refused: its refusal, naming it, ends them.
@@ -236,7 +236,7 @@ function generateEach(index: GeneratorIndex, stored: Split, parameters: Paramete
         : invalid(`${name}: ${error instanceof Error ? error.message : 'its geometry cannot be generated.'}`) };
     }
     lines.add(members.points, members.entities);
-    generations.push({ generator, members, key: `${generator.idPrefix}\u0000${generator.construction}\u0000${evaluation.key}` });
+    generations.push({ generator, members, key: `${generator.idPrefix}\u0000${generator.construction}\u0000${evaluation.key}`, evaluation });
   }
   return { generations };
 }
@@ -255,8 +255,12 @@ const sameParameters = (kept: Parameters, parameters: Parameters) => kept === pa
 const settledGraphs = new WeakMap<CadSketchGraph, { readonly keys: string; readonly parameters: Parameters }>();
 const keysOf = (generations: readonly Generation[]) => generations.map(item => item.key).join('\u0001');
 function markSettled(graph: CadSketchGraph, generations: readonly Generation[], parameters: Parameters) {
-  settledGraphs.set(graph, { keys: keysOf(generations), parameters: keptParameters(parameters) });
+  const kept = keptParameters(parameters);
+  settledGraphs.set(graph, { keys: keysOf(generations), parameters: kept });
+  evaluatedGraphs.set(graph, { parameters: kept, generations });
 }
+// The evaluations that generated a settled graph's members, until its outlines take their shapes instead of evaluating each generator again.
+const evaluatedGraphs = new WeakMap<CadSketchGraph, { readonly parameters: Parameters; readonly generations: readonly Generation[] }>();
 /**
  * Whether the graph's members are what its generators make from `parameters`, as generation left them: at once for the parameters they
  * were made from, since the graph cannot change, and otherwise when each generator still evaluates to the inputs it had.
@@ -531,6 +535,8 @@ export function withoutGeneratedCadSketchMembers(value: unknown, parameters: Rea
   if (!Array.isArray(graph.relations) || !graph.relations.some(relation => relation?.kind === 'generator')) return value;
   try {
     const index = generatorIndex(graph), stored = split(graph, index);
+    // Generators stored alone carry nothing to compare or strip.
+    if (!stored.carried.size) return value;
     for (const { generator, members } of generateAll(index, stored, parameters)) {
       const carried = stored.carried.get(generator.idPrefix);
       if (carried && !identical(carried, members)) return value;
@@ -662,13 +668,21 @@ export function cadSketchGeneratorOutlines(graph: CadSketchGraph, parameters: Pa
   if (!index.generators.length) return NO_OUTLINES;
   const kept = outlines.get(graph);
   if (kept && sameParameters(kept.parameters, parameters)) return kept.byPrefix;
-  const lines = new Lines(parameters), members = cadSketchGeneratedComponents(graph).byPrefix, byPrefix = new Map<string, CadSketchGeneratorOutline>();
-  lines.add(graph.points, graph.entities);
+  const byPrefix = new Map<string, CadSketchGeneratorOutline>();
+  // The generations that made the graph's members from these parameters give the shapes and the edges; a generator they did not make
+  // is evaluated here, and its edges read from the graph.
+  const evaluated = evaluatedGraphs.get(graph);
+  evaluatedGraphs.delete(graph);
+  const generations = new Map(evaluated && sameParameters(evaluated.parameters, parameters) ? evaluated.generations.map(item => [item.generator, item] as const) : []);
+  let lines: Lines | undefined, members: ReadonlyMap<string, CadSketchRelationOwnership> | undefined;
+  const context = () => { if (!lines) { lines = new Lines(parameters); lines.add(graph.points, graph.entities); } return lines.context(); };
   for (const generator of index.generators) {
+    const made = generations.get(generator);
     let shape: ResolvedCadProfile;
-    try { shape = cadSketchGeneratorKind(generator.geometry).evaluate(generator.geometry, lines.context(), cadSketchGeneratorName(generator)).shape(); }
+    try { shape = (made?.evaluation ?? cadSketchGeneratorKind(generator.geometry).evaluate(generator.geometry, context(), cadSketchGeneratorName(generator))).shape(); }
     catch { continue; }
-    byPrefix.set(generator.idPrefix, { generator, shape, entityIds: new Set(members.get(generator.idPrefix)?.entityIds ?? []) });
+    const entityIds = made ? made.members.entities.map(entity => entity.id) : (members ??= cadSketchGeneratedComponents(graph).byPrefix).get(generator.idPrefix)?.entityIds ?? [];
+    byPrefix.set(generator.idPrefix, { generator, shape, entityIds: new Set(entityIds) });
   }
   if (isAcceptedCadSketchGraph(graph)) outlines.set(graph, { parameters: keptParameters(parameters), byPrefix });
   return byPrefix;

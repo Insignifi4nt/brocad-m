@@ -196,6 +196,18 @@ export function* cadBoundaryCandidatePairs(boundaries: readonly Boundary[]): Gen
     active.push(entry);
   }
 }
+/** The indexes of the bounds that meet at least one other, as `cadBoundaryCandidatePairs` compares edge bounds. */
+function boundsMeetingOthers(bounds: readonly BoundaryBounds[]): ReadonlySet<number> {
+  const order = bounds.map((_, index) => index).sort((a, b) => bounds[a].minX - bounds[b].minX || a - b), meeting = new Set<number>();
+  let active: number[] = [];
+  for (const index of order) {
+    const entry = bounds[index];
+    active = active.filter(previous => bounds[previous].maxX >= entry.minX);
+    for (const previous of active) if (!(bounds[previous].maxY < entry.minY || entry.maxY < bounds[previous].minY)) { meeting.add(previous); meeting.add(index); }
+    active.push(index);
+  }
+  return meeting;
+}
 function cross(a: DxfPoint, b: DxfPoint) { return a.x * b.y - a.y * b.x; }
 function subtract(a: DxfPoint, b: DxfPoint) { return { x: a.x - b.x, y: a.y - b.y }; }
 function onCurve(entity: Boundary, point: DxfPoint): boolean {
@@ -345,7 +357,9 @@ export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: R
     return { profile, geometry, path, edges, bounds: contourBounds(edges) };
   });
   const contours = prepared.filter(item => !item.profile.construction);
-  const indexedEdges = contours.flatMap((contour, index) => contour.edges.map(edge => ({ edge, contourIndex: index })));
+  // An edge's bounds lie inside its contour's, so only contours whose bounds meet another's have edges in the pairs below, in the same order.
+  const meeting = boundsMeetingOthers(contours.map(contour => contour.bounds));
+  const indexedEdges = contours.flatMap((contour, index) => meeting.has(index) ? contour.edges.map(edge => ({ edge, contourIndex: index })) : []);
   for (const [i, j] of cadBoundaryCandidatePairs(indexedEdges.map(item => item.edge))) {
     const first = indexedEdges[i]; const second = indexedEdges[j];
     if (first.contourIndex === second.contourIndex) continue;

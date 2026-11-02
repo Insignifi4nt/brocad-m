@@ -223,17 +223,18 @@ export function detachCadSketchGraph(value: unknown): CadSketchGraph {
 export function acceptCadSketchGraph(graph: CadSketchGraph): CadSketchGraph {
   if (acceptedGraphs.has(graph)) return graph;
   const ids = new Set<string>(), points = new Set(graph.points.map(point => point.id));
-  for (const item of [...graph.points, ...graph.entities, ...graph.relations]) {
+  for (const list of [graph.points, graph.entities, graph.relations]) for (const item of list) {
     if (ids.has(item.id)) throw new CadError('duplicate-sketch-id', `Duplicate sketch graph identity "${item.id}".`);
     ids.add(item.id);
   }
   const references = (owner: string, refs: readonly string[]) => {
-    if (new Set(refs).size !== refs.length) throw new CadError('invalid-sketch-reference', `Sketch graph "${owner}" needs distinct point references.`);
+    // An edge names two or three points: a scan finds a repeat sooner than a set; a long list takes the set.
+    if (refs.length > 8 ? new Set(refs).size !== refs.length : refs.some((ref, at) => refs.indexOf(ref) !== at)) throw new CadError('invalid-sketch-reference', `Sketch graph "${owner}" needs distinct point references.`);
     for (const ref of refs) if (!points.has(ref)) throw new CadError('missing-sketch-point', `Sketch graph "${owner}" references missing point "${ref}".`);
   };
   for (const item of graph.entities) references(item.id, cadSketchEntityPointIds(item));
-  // The lists are final here: frozen now, the relation checks look operands up by id instead of scanning.
-  deepFreezeCadData(graph.points, { skipFrozen: true }); deepFreezeCadData(graph.entities, { skipFrozen: true });
+  // The lists are final here: frozen now, the relation checks look operands, identities and generators up instead of scanning.
+  deepFreezeCadData(graph.points, { skipFrozen: true }); deepFreezeCadData(graph.entities, { skipFrozen: true }); deepFreezeCadData(graph.relations, { skipFrozen: true });
   // Each kind's definition checks its operands: the slots that refuse missing or mistyped ones, then its own checks.
   for (const item of graph.relations) {
     checkCadSketchRelationOperands(graph, item);

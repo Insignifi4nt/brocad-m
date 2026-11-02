@@ -11,11 +11,11 @@ export function evaluateCadRecipeScalar(value: CadScalar, parameters: Readonly<R
   return evaluateScalar(value, parameters, true);
 }
 
+function finite(number: number): number {
+  if (!Number.isFinite(number) || Math.abs(number) > 1e9) throw new CadError('invalid-scalar', 'Dimensions must be finite and within one billion.');
+  return number;
+}
 function evaluateScalar(value: CadScalar, parameters: Readonly<Record<string, number>>, recipeMath: boolean): number {
-  const finite = (number: number): number => {
-    if (!Number.isFinite(number) || Math.abs(number) > 1e9) throw new CadError('invalid-scalar', 'Dimensions must be finite and within one billion.');
-    return number;
-  };
   if (typeof value === 'number') return finite(value);
   if (value.length > 512) throw new CadError('expression-limit', 'Expressions may contain at most 512 characters.');
   const tokens = value.match(/(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_][A-Za-z_0-9]*|[^\s]/g) ?? [];

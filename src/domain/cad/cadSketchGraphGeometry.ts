@@ -1,6 +1,6 @@
 import { CadError } from './cadError';
 import { evaluateCadScalar } from './cadExpression';
-import { cadAnalyticSegments, cadPathClosureTolerance, type ResolvedCadPathSegment } from './cadAnalyticSegments';
+import { cadAnalyticSegmentEnds, cadPathClosureTolerance, type ResolvedCadPathSegment } from './cadAnalyticSegments';
 import { checkCadSketchGraph, type CadSketchGraph, type CadSketchGraphEntity } from './cadSketchGraph';
 import { resolveCadSketchGraphJoints } from './cadSketchGraphJoints';
 import { createArcSegment, createCircleSegment, createLineSegment, mergeBounds } from '@/domain/path-intel/segments';
@@ -42,7 +42,7 @@ function extentPoints(segment: PathSegment): Point2[] {
   return [{ x: segment.bounds.minX, y: segment.bounds.minY }, { x: segment.bounds.maxX, y: segment.bounds.maxY }];
 }
 function checkCycleEncoding(path: readonly ResolvedCadPathSegment[]): void {
-  const encoded = cadAnalyticSegments(path).segments;
+  const encoded = cadAnalyticSegmentEnds(path);
   for (let index = 0; index < encoded.length; index++) {
     const end = encoded[index].end, start = encoded[(index + 1) % encoded.length].start;
     if (Math.hypot(end.x - start.x, end.y - start.y) > cadPathClosureTolerance([end, start])) {
@@ -89,7 +89,6 @@ export function compileCadSketchGraph(graph: CadSketchGraph, parameters: Readonl
   if (issues.length) throw new CadError('invalid-sketch-graph-geometry', `${issues[0].source.id}: ${issues[0].message}`);
   const points = new Map(graph.points.map(point => [point.id, { x: evaluateCadScalar(point.position[0], parameters), y: evaluateCadScalar(point.position[1], parameters) }]));
   const joint = resolveCadSketchGraphJoints(graph, points);
-  const jointEndpoints = (entity: CadSketchGraphEntity) => endpoints(entity).map(joint);
   const point = (id: string) => {
     const value = points.get(id);
     if (!value) throw new CadError('missing-sketch-point', `Sketch point "${id}" is missing.`);
@@ -105,45 +104,50 @@ export function compileCadSketchGraph(graph: CadSketchGraph, parameters: Readonl
   });
   const segments = prepared.map(item => item.segment), cycles: CadSketchGraphCycle[] = [], open: string[] = [], branched: string[] = [];
   for (const construction of [false, true]) {
-    const adjacency = new Map<string, Edge[]>(), edges: Edge[] = [];
+    // The pass's edges, each edge's two joints, and each joint's edges in edge order, all as indexes.
+    const edges: Edge[] = [], ends: number[] = [], vertexOf = new Map<string, number>();
+    const vertex = (id: string) => { let at = vertexOf.get(id); if (at === undefined) { at = vertexOf.size; vertexOf.set(id, at); } return at; };
     for (const item of prepared) {
       if (item.entity.construction !== construction) continue;
       if (item.entity.kind === 'circle') {
         cycles.push({ construction, sourceRefs: [{ entityId: item.entity.id, reversed: false }], path: [pathSegment(item.segment, false)] });
         continue;
       }
-      const edge: Edge = { entity: item.entity, segment: item.segment }; edges.push(edge);
-      const ids = jointEndpoints(edge.entity);
-      if (ids[0] === ids[1]) throw new CadError('sketch-graph-precision', 'An edge is too short: both of its ends meet at the same point. Delete or lengthen it.');
-      for (const id of ids) {
-        const list = adjacency.get(id) ?? []; list.push(edge); adjacency.set(id, list);
-      }
+      const entity = item.entity, start = joint(entity.startPointId), end = joint(entity.endPointId);
+      if (start === end) throw new CadError('sketch-graph-precision', 'An edge is too short: both of its ends meet at the same point. Delete or lengthen it.');
+      edges.push({ entity, segment: item.segment }); ends.push(vertex(start), vertex(end));
     }
-    const visited = new Set<string>();
-    for (const first of edges) {
-      if (visited.has(first.entity.id)) continue;
-      const component: Edge[] = [], vertices = new Set<string>(), queue = [first];
-      visited.add(first.entity.id);
-      for (let cursor = 0; cursor < queue.length; cursor++) {
-        const edge = queue[cursor]; component.push(edge);
-        for (const id of jointEndpoints(edge.entity)) {
-          if (vertices.has(id)) continue;
-          vertices.add(id);
-          for (const next of adjacency.get(id) ?? []) if (!visited.has(next.entity.id)) { visited.add(next.entity.id); queue.push(next); }
+    const vertices = vertexOf.size, degree = new Int32Array(vertices), offset = new Int32Array(vertices + 1);
+    for (const at of ends) degree[at]++;
+    for (let at = 0; at < vertices; at++) offset[at + 1] = offset[at] + degree[at];
+    const incident = new Int32Array(ends.length), filled = offset.slice(0, vertices);
+    for (let at = 0; at < ends.length; at++) incident[filled[ends[at]]++] = at >> 1;
+    const visited = new Uint8Array(edges.length), reached = new Uint8Array(vertices), queue = new Int32Array(edges.length);
+    for (let first = 0; first < edges.length; first++) {
+      if (visited[first]) continue;
+      let size = 1, branches = false, loose = false;
+      queue[0] = first; visited[first] = 1;
+      for (let cursor = 0; cursor < size; cursor++) {
+        for (let side = 0; side < 2; side++) {
+          const at = ends[2 * queue[cursor] + side];
+          if (reached[at]) continue;
+          reached[at] = 1;
+          if (degree[at] > 2) branches = true; else if (degree[at] < 2) loose = true;
+          for (let slot = offset[at]; slot < offset[at + 1]; slot++) { const next = incident[slot]; if (!visited[next]) { visited[next] = 1; queue[size++] = next; } }
         }
       }
-      if ([...vertices].some(id => (adjacency.get(id)?.length ?? 0) > 2)) { branched.push(...component.map(item => item.entity.id)); continue; }
-      if ([...vertices].some(id => adjacency.get(id)?.length !== 2)) { open.push(...component.map(item => item.entity.id)); continue; }
+      if (branches || loose) { const into = branches ? branched : open; for (let at = 0; at < size; at++) into.push(edges[queue[at]].entity.id); continue; }
       // Original endpoint ordering fixes orientation even when a new alias becomes the class key.
-      const start = joint(first.entity.startPointId < first.entity.endPointId ? first.entity.startPointId : first.entity.endPointId);
+      const head = edges[first].entity, start = ends[2 * first + (head.startPointId < head.endPointId ? 0 : 1)];
       let current = start, edge = first;
       const sourceRefs: CadSketchGraphSourceRef[] = [], path: ResolvedCadPathSegment[] = [];
-      for (let count = 0; count < component.length; count++) {
-        const reversed = joint(edge.entity.startPointId) !== current;
-        sourceRefs.push({ entityId: edge.entity.id, reversed }); path.push(pathSegment(edge.segment, reversed));
-        current = joint(reversed ? edge.entity.startPointId : edge.entity.endPointId);
-        const next = adjacency.get(current)?.find(item => item.entity.id !== edge.entity.id);
-        if (!next) throw new CadError('invalid-sketch-cycle', 'The identity-connected cycle is incomplete.');
+      for (let count = 0; count < size; count++) {
+        const reversed = ends[2 * edge] !== current;
+        sourceRefs.push({ entityId: edges[edge].entity.id, reversed }); path.push(pathSegment(edges[edge].segment, reversed));
+        current = ends[2 * edge + (reversed ? 0 : 1)];
+        let next = -1;
+        for (let slot = offset[current]; slot < offset[current + 1]; slot++) if (incident[slot] !== edge) { next = incident[slot]; break; }
+        if (next < 0) throw new CadError('invalid-sketch-cycle', 'The identity-connected cycle is incomplete.');
         edge = next;
       }
       if (current !== start) throw new CadError('invalid-sketch-cycle', 'The identity-connected cycle did not close.');

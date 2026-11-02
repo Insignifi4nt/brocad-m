@@ -10,6 +10,8 @@ import {
 } from '../sketch-generators/cadSketchGenerators';
 import { CAD_SKETCH_GENERATOR_KINDS } from '../sketch-generators/cadSketchGeneratorKinds';
 import { compileCadSketchEquations } from '../sketch-solver/compileCadSketchEquations';
+import { createCadDocument, parseCadDocument } from '../cadSchema';
+import { compileCadSketchGeometry } from '../compileCadSketchGeometry';
 
 const graphOf = (relations: readonly unknown[], points: readonly unknown[] = [], entities: readonly unknown[] = []) => ({ points, entities, relations });
 const rectangle = (cornerRadius: number | string = 0, width: number | string = 'w'): CadSketchGenerator => ({ id: 'rect', kind: 'generator', idPrefix: 'g-rect', construction: false,
@@ -227,6 +229,23 @@ describe('sketch generators', () => {
       expect(refused).toHaveLength(200);
       expect(refused.every(issue => issue.code === 'invalid-expression' && issue.message.includes('"h0"'))).toBe(true);
       expect(evaluate.mock.calls.length).toBeLessThanOrEqual(2);
+    } finally { evaluate.mockRestore(); }
+  });
+
+  it('are evaluated once each when a document that stores them alone loads, and its outlines read those evaluations', () => {
+    const hexagons = Array.from({ length: 200 }, (_, at): CadSketchGenerator => ({ id: `h${at}`, kind: 'generator', idPrefix: `g-h${at}`, construction: false,
+      geometry: { kind: 'regular-polygon', x: (at % 20) * 30, y: Math.floor(at / 20) * 30, radius: 'r', sides: 6, directionId: '@h' } }));
+    const stored = JSON.stringify({ ...createCadDocument('Hexagons', 'hexagons'), schemaVersion: 2, parameters: { r: 10 }, features: [{ id: 'sketch', kind: 'sketch',
+      name: 'Sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: graphOf(hexagons) }] });
+    const evaluate = vi.spyOn(CAD_SKETCH_GENERATOR_KINDS['regular-polygon'], 'evaluate');
+    try {
+      const document = parseCadDocument(JSON.parse(stored)), sketch = document.features[0];
+      if (sketch.kind !== 'sketch') throw new Error('Expected the sketch');
+      expect(evaluate).toHaveBeenCalledTimes(200);
+      evaluate.mockClear();
+      // The load checked each hexagon as its own shape, from the evaluation that generated it, and kept that for later readers.
+      expect(compileCadSketchGeometry(sketch, document.parameters).profiles.map(profile => profile.generatorId).sort()).toEqual(hexagons.map(hexagon => hexagon.id).sort());
+      expect(evaluate).not.toHaveBeenCalled();
     } finally { evaluate.mockRestore(); }
   });
 

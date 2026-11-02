@@ -18,17 +18,24 @@ export function resolveCadPathSegments(segments: readonly CadPathSegment[], para
     : Object.freeze({ kind: segment.kind, center: Object.freeze([e(segment.center[0]), e(segment.center[1])] as const), radius: e(segment.radius), startAngle: evaluateCadAngle(segment.startAngle, parameters), sweep: e(segment.sweep) })));
 }
 
+/** An arc's exact support and ends as its degrees encode them; refuses an arc that `cadAnalyticSegments` cannot prepare. */
+function encodedArc(segment: Extract<ResolvedCadPathSegment, { kind: 'arc' }>) {
+  if (segment.radius <= CAD_PRECISION.minimumLengthMm || segment.radius > CAD_PRECISION.modelExtentMm || Math.abs(segment.sweep) > 360 || segment.sweep === 0) throw new CadError('invalid-profile', 'Path arcs need a positive radius and a nonzero sweep of at most one turn.');
+  const angle = segment.startAngle * Math.PI / 180; const sweep = segment.sweep * Math.PI / 180;
+  // The sweep a prepared arc refuses, refused here too for callers that only read the ends.
+  if (!(Number.isFinite(sweep) && sweep !== 0 && Math.abs(sweep) <= Math.PI * 2)) throw new RangeError('Explicit arc sweep must be finite, nonzero, at most one turn, and match its direction.');
+  const center = { x: segment.center[0], y: segment.center[1] };
+  return { center, sweep, start: pointAtAngle(center, segment.radius, segment.startAngle, angle), end: pointAtAngle(center, segment.radius, segment.startAngle + segment.sweep, angle + sweep) };
+}
+
 /** Prepare exact primitives in supplied order without closing or orienting a chain. */
 export function cadAnalyticSegments(geometry: readonly ResolvedCadPathSegment[]) {
   const segments: PathSegment[] = geometry.map((segment, index) => {
     const source = { sourceEntityIndex: index, sourceEntityType: segment.kind, layer: null, exact: true };
     const id = `boundary_${index}`;
     if (segment.kind === 'line') return createLineSegment({ id, source, start: { x: segment.start[0], y: segment.start[1] }, end: { x: segment.end[0], y: segment.end[1] } });
-    if (segment.radius <= CAD_PRECISION.minimumLengthMm || segment.radius > CAD_PRECISION.modelExtentMm || Math.abs(segment.sweep) > 360 || segment.sweep === 0) throw new CadError('invalid-profile', 'Path arcs need a positive radius and a nonzero sweep of at most one turn.');
-    const angle = segment.startAngle * Math.PI / 180; const sweep = segment.sweep * Math.PI / 180;
-    const center = { x: segment.center[0], y: segment.center[1] };
-    const at = (degrees: number, radians: number) => pointAtAngle(center, segment.radius, degrees, radians);
-    return createArcSegment({ id, source, center, radius: segment.radius, start: at(segment.startAngle, angle), end: at(segment.startAngle + segment.sweep, angle + sweep), sweepRadians: sweep, clockwise: sweep < 0 });
+    const arc = encodedArc(segment);
+    return createArcSegment({ id, source, center: arc.center, radius: segment.radius, start: arc.start, end: arc.end, sweepRadians: arc.sweep, clockwise: arc.sweep < 0 });
   });
   const refs = segments.map(segment => ({ segmentId: segment.id, reversed: false }));
   const byId = new Map(segments.map(segment => [segment.id, segment]));
@@ -46,6 +53,11 @@ function pointAtAngle(center: Point2, radius: number, degrees: number, radians: 
   const [cos, sin] = turn === 0 ? [1, 0] : turn === 90 ? [0, 1] : turn === 180 ? [-1, 0] : turn === 270 ? [0, -1]
     : [Math.cos(radians), Math.sin(radians)];
   return { x: center.x + radius * cos, y: center.y + radius * sin };
+}
+
+/** The ends of the primitives `cadAnalyticSegments` prepares, in supplied order, without preparing them: it refuses the same segments. */
+export function cadAnalyticSegmentEnds(geometry: readonly ResolvedCadPathSegment[]): readonly { readonly start: Point2; readonly end: Point2 }[] {
+  return geometry.map(segment => segment.kind === 'line' ? { start: { x: segment.start[0], y: segment.start[1] }, end: { x: segment.end[0], y: segment.end[1] } } : encodedArc(segment));
 }
 
 export function cadOrderedCurveEntities(segments: readonly ResolvedCadPathSegment[], layer = 'CAD_CURVE'): readonly CadOrderedCurveEntity[] {
