@@ -5,7 +5,6 @@ import { CAD_SKETCH_MIRROR_COLLAPSE } from '@/domain/cad/cadSketchSymmetryRelati
 import type { CadSketchEditWarning } from './cadEditPreparation';
 import { cadSketchDiagnosticSubjects, describeCadSketchConstraintSource, type CadSketchConstraintFeedback, type CadSketchConstraintFeedbackSubject } from './cadSketchConstraintFeedback';
 import type { CadSketchSolveDiagnostics, CadSketchSolveResult } from './sketch-solver/cadSketchSolverTypes';
-import { cadSketchSolverRecoveryMessages } from './sketch-solver/cadSketchSolverMessages';
 
 /**
  * What is wrong with the sketch being edited, for its header and its relation rows: the sketch producer's adapter into the CAD issue model.
@@ -82,11 +81,10 @@ const ANALYSIS_MESSAGES: Record<NonNullable<CadSketchAnalysisIssues['reason']>, 
 };
 export const NO_CAD_SKETCH_ISSUES_BY_RELATION: ReadonlyMap<string, readonly CadSketchIssue[]> = new Map();
 
-/** The solver's failure an analysis reports: one it failed with, or a solver that could not load; null when the solver judged the sketch. */
+/** The solver's failure an analysis reports (`CadSketchSolverFailure`, as the cause `solver-unavailable`); null when the solver judged the sketch. */
 function solverFailure(analysis: CadSketchAnalysisInput): { readonly message: string; readonly kernelMessage?: string } | null {
-  if ('cause' in analysis && analysis.cause === 'solver-unavailable' && analysis.message) return { message: analysis.message, ...analysis.kernelMessage ? { kernelMessage: analysis.kernelMessage } : {} };
-  return analysis.kind === 'rejected' && 'reason' in analysis && analysis.reason === 'failed' && analysis.message && cadSketchSolverRecoveryMessages.has(analysis.message)
-    ? { message: analysis.message } : null;
+  return 'cause' in analysis && analysis.cause === 'solver-unavailable' && analysis.message
+    ? { message: analysis.message, ...analysis.kernelMessage ? { kernelMessage: analysis.kernelMessage } : {} } : null;
 }
 
 /** The accepted analysis worth keeping: its named identities and issues, or null when it names nothing. Reuses `previous` when equal. */

@@ -6,7 +6,7 @@ import { cadIssueListProblems, preparedCadIssueRepair } from '@/domain/cad/cadIs
 import { cadSketchAnalysisIssues, cadSketchIssues, noCadSketchIssues } from './cadSketchIssues';
 import type { CadSketchSolveDiagnostics } from './sketch-solver/cadSketchSolverTypes';
 import { CAD_SKETCH_SOLVER_STOPPED } from './sketch-solver/cadSketchSolverFailure';
-import { CAD_SKETCH_NATIVE_LOAD_FAILED } from './sketch-solver/cadSketchSolverMessages';
+import { CAD_SKETCH_NATIVE_LOAD_FAILED } from './sketch-solver/cadSketchSolverFailure';
 
 const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }, { id: 'c', position: [10, 10] }, { id: 'd', position: [5, -5] }, { id: 'e', position: [5, 15] }],
   entities: [{ id: 'ab', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }, { id: 'bc', kind: 'line', construction: false, startPointId: 'b', endPointId: 'c' },
@@ -101,11 +101,15 @@ describe('sketch issues in the CAD issue model', () => {
     const analysed = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', analysis: unavailable });
     expect(analysed.refusal).toMatchObject({ key: 'analysis/refusal', code: 'sketch-failed', message: CAD_SKETCH_SOLVER_STOPPED,
       details: { cause: 'solver-unavailable', subjectCount: 0, omittedSubjectCount: 0, kernelMessage: 'Uncaught RangeError: out of memory' } });
-    // A solver that could not load says how to recover, and names the same cause without words.
+    // A solver that could not load says how to recover, and names the same cause without words when it gave none.
     const unloaded = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1',
-      analysis: cadSketchAnalysisIssues({ kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_LOAD_FAILED, diagnostics: unjudged }) });
+      analysis: cadSketchAnalysisIssues({ kind: 'unavailable', message: CAD_SKETCH_NATIVE_LOAD_FAILED, cause: 'solver-unavailable', diagnostics: unjudged }) });
     expect(unloaded.refusal).toMatchObject({ message: CAD_SKETCH_NATIVE_LOAD_FAILED, details: { cause: 'solver-unavailable' } });
     expect('kernelMessage' in unloaded.refusal!.details).toBe(false);
+    // The cause decides, never the words: a judgement worded like a failure stays a judgement.
+    const worded = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1',
+      analysis: cadSketchAnalysisIssues({ kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_LOAD_FAILED, diagnostics: unjudged }) });
+    expect(worded.refusal).toMatchObject({ message: 'The sketch solver could not solve this sketch.', details: { cause: null } });
     // An analysis that is unavailable for another reason, or a solver that failed for a reason of the sketch, names no such cause.
     expect(cadSketchAnalysisIssues({ kind: 'unavailable', message: 'Constraint analysis is unavailable.', diagnostics: unjudged })).toBeNull();
     const judged = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', analysis: cadSketchAnalysisIssues({ kind: 'rejected', reason: 'failed', message: 'No.', diagnostics: unjudged }) });

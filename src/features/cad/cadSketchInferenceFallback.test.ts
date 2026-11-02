@@ -10,8 +10,9 @@ import { createCadPathDraftGraph } from './cadPathDraftGraph';
 import { createCadPathDraft, updateCadPathDraft, type CadPathDraftPick } from './cadPathDrawing';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { appendCadSketchGraphWithInferences, cadSketchInferenceNote } from './cadSketchInferenceFallback';
-import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
-import { CAD_SKETCH_SOLVER_STOPPED, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { createCadSketchTestSolver, loadCadSketchTestNativeSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
+import { createCadSketchNativeRuntime } from './sketch-solver/cadSketchNativeRuntime';
+import { CAD_SKETCH_NATIVE_FAILED, CAD_SKETCH_SOLVER_STOPPED, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
 
 let solves = 0;
@@ -109,6 +110,50 @@ describe('inferred line relations at commit', () => {
     expect(reported).toBeInstanceOf(CadSketchPreparationError);
     expect((reported as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable' });
     expect(attempts).toHaveLength(1); expect(onDropped).not.toHaveBeenCalled();
+  });
+
+  it('keeps every inference when a native instance traps, and the next drawing, on a fresh instance, keeps them too', async () => {
+    const document = part({ points: [], entities: [], relations: [] });
+    const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }],
+      entities: [{ id: 'e', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }], relations: [{ id: 'h', kind: 'horizontal', pointIds: ['a', 'b'] }] });
+    // A real failing instance, then a healthy one, in the runtime the solver worker runs.
+    let loads = 0;
+    const runtime = createCadSketchNativeRuntime({ loadNative: async () => ++loads === 1
+      ? { memoryBytes: () => 0, solve: () => { throw new WebAssembly.RuntimeError('unreachable'); } } : loadCadSketchTestNativeSolver() });
+    const draw = () => {
+      const attempts: CadSketchGraph[] = [], onDropped = vi.fn();
+      const result = Promise.resolve(appendCadSketchGraphWithInferences({ graph, inferredIds: ['h'], current: () => true, onDropped, submit: async next => {
+        attempts.push(next); return prepareCadEdits(document, [{ kind: 'append-sketch-entities', sketchId: 'sketch', geometry: next }], runtime);
+      } }));
+      return { attempts, onDropped, result };
+    };
+    const trapped = draw(), reported = await trapped.result.then(() => null, (error: unknown) => error);
+    expect(reported).toBeInstanceOf(CadSketchPreparationError);
+    expect(reported).toMatchObject({ code: 'sketch-failed', message: `Sketch: ${CAD_SKETCH_NATIVE_FAILED}`, kernelMessage: 'unreachable',
+      feedback: { reason: 'failed', cause: 'solver-unavailable', kernelMessage: 'unreachable' } });
+    expect(trapped.attempts).toHaveLength(1); expect(trapped.onDropped).not.toHaveBeenCalled();
+    const next = draw(), accepted = await next.result;
+    const sketch = accepted.document.features[0];
+    expect(sketch.kind === 'sketch' && sketch.graph?.relations.map(relation => relation.id)).toEqual(['h']);
+    expect(next.attempts).toHaveLength(1); expect(next.onDropped).not.toHaveBeenCalled(); expect(loads).toBe(2);
+  });
+
+  it('still drops the inferences a failed judgement blames, which a solver failure never is', async () => {
+    const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }],
+      entities: [{ id: 'e', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }], relations: [{ id: 'h', kind: 'horizontal', pointIds: ['a', 'b'] }] });
+    const unjudged = { status: null, degreesOfFreedom: null, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] };
+    // Worded as a solver failure, a judgement is still a judgement: the cause decides, never the words.
+    const judged = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Sketch', graph, rejection: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_FAILED, diagnostics: unjudged } });
+    const attempts: CadSketchGraph[] = [], onDropped = vi.fn();
+    expect(await appendCadSketchGraphWithInferences({ graph, inferredIds: ['h'], current: () => true, onDropped, submit: async next => {
+      attempts.push(next); if (attempts.length === 1) throw judged; return 'accepted';
+    } })).toBe('accepted');
+    expect(attempts).toHaveLength(2); expect(onDropped).toHaveBeenCalledWith([graph.relations[0]], 'failed');
+    const failed = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Sketch', graph, unavailable: { kernelMessage: 'unreachable' },
+      rejection: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_FAILED, diagnostics: unjudged } });
+    const kept: CadSketchGraph[] = [];
+    await expect(appendCadSketchGraphWithInferences({ graph, inferredIds: ['h'], current: () => true, onDropped, submit: async next => { kept.push(next); throw failed; } })).rejects.toBe(failed);
+    expect(kept).toHaveLength(1); expect(onDropped).toHaveBeenCalledTimes(1);
   });
 
   it('keeps every inference when the solver could not be loaded, though the next request would load it', async () => {

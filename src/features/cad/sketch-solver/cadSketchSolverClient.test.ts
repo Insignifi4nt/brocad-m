@@ -4,7 +4,8 @@ import { parseCadSketchGraph } from '../../../domain/cad/cadSketchGraph';
 import { CAD_SKETCH_SOLVE_TIMEOUT_MS, createCadSketchSolverClient, type CadSketchSolverTransport } from './cadSketchSolverClient';
 import { cadSketchSolverWireResult, type CadSketchSolverRequest } from './cadSketchSolverProtocol';
 import type { CadSketchSolveResult } from './cadSketchSolverTypes';
-import { CAD_SKETCH_SOLVER_ERROR, CAD_SKETCH_SOLVER_NOT_SENT, CAD_SKETCH_SOLVER_NOT_STARTED, CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CAD_SKETCH_SOLVER_UNREADABLE,
+import { CAD_SKETCH_NATIVE_FAILED, CAD_SKETCH_NATIVE_INCOMPATIBLE, CAD_SKETCH_NATIVE_LOAD_FAILED, CAD_SKETCH_SOLVER_ERROR, CAD_SKETCH_SOLVER_NOT_SENT, CAD_SKETCH_SOLVER_NOT_STARTED,
+  CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CAD_SKETCH_SOLVER_UNREADABLE,
   CadSketchSolverFailure } from './cadSketchSolverFailure';
 
 class Transport implements CadSketchSolverTransport {
@@ -128,6 +129,30 @@ describe('sketch solver worker lifetime', () => {
     expect(workers).toHaveLength(7);
     workers[6].onmessage?.(new MessageEvent('message', { data: { id: workers[6].messages[0].id, kind: 'result', result: reply } }));
     expect(await next).toEqual(result); expect(workers[6].terminated).toBe(false);
+    client.dispose();
+  });
+  it('fails a request whose worker names how the native solver failed as that failure, worded here, and keeps the worker for the request waiting', async () => {
+    const workers: Transport[] = [], client = createCadSketchSolverClient(() => { const worker = new Transport(); workers.push(worker); return worker; });
+    const failure = (pending: Promise<unknown>) => pending.then(() => { throw new Error('The solve did not fail.'); }, (error: unknown) => error as CadSketchSolverFailure);
+    for (const [failed, message] of [['load-failed', CAD_SKETCH_NATIVE_LOAD_FAILED], ['incompatible', CAD_SKETCH_NATIVE_INCOMPATIBLE], ['failed', CAD_SKETCH_NATIVE_FAILED]] as const) {
+      const pending = failure(client.solve({ graph, parameters: {} })), waiting = client.solve({ graph, parameters: {} }), worker = workers[0];
+      const posted = worker.messages.length;
+      worker.onmessage?.(new MessageEvent('message', { data: { id: worker.messages.at(-1)!.id, kind: 'error', failure: failed, message: 'unreachable' } }));
+      const error = await pending;
+      expect(error, failed).toBeInstanceOf(CadSketchSolverFailure);
+      expect({ code: error.code, message: error.message, native: error.native, kernelMessage: error.kernelMessage }, failed).toEqual({ code: 'sketch-failed', message, native: failed, kernelMessage: 'unreachable' });
+      // The worker dropped its failed instance; the request waiting goes to it.
+      expect(worker.terminated, failed).toBe(false); expect(worker.messages, failed).toHaveLength(posted + 1);
+      const next = worker.messages.at(-1)!;
+      worker.onmessage?.(new MessageEvent('message', { data: { id: next.id, kind: 'result', result: reply } }));
+      expect(await waiting).toEqual(result);
+    }
+    expect(workers).toHaveLength(1);
+    // A failure the workbench does not know is an unreadable reply, which stops the worker.
+    const pending = failure(client.solve({ graph, parameters: {} }));
+    workers[0].onmessage?.(new MessageEvent('message', { data: { id: workers[0].messages.at(-1)!.id, kind: 'error', failure: 'melted', message: 'Reload now!' } }));
+    expect(await pending).toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_UNREADABLE });
+    expect(workers[0].terminated).toBe(true);
     client.dispose();
   });
   it('cancels a waiting solve without disturbing the active worker', async () => {

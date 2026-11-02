@@ -12,8 +12,9 @@ import { parseCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { Value } from '@sinclair/typebox/value';
 import { CadToolEditDefinitions } from './cadToolSchemas';
 import { applyCadEdits } from '@/domain/cad/cadOperations';
-import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
-import { CAD_SKETCH_SOLVER_NOT_LOADED, CAD_SKETCH_SOLVER_UNREADABLE, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { createCadSketchTestSolver, loadCadSketchTestNativeSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
+import { createCadSketchNativeRuntime } from './sketch-solver/cadSketchNativeRuntime';
+import { CAD_SKETCH_NATIVE_FAILED, CAD_SKETCH_SOLVER_NOT_LOADED, CAD_SKETCH_SOLVER_UNREADABLE, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
 import type { CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import { cadSketchAnalysisIssues, cadSketchIssues } from './cadSketchIssues';
@@ -330,6 +331,15 @@ describe('accepted sketch constraint inspection', () => {
     load.mockResolvedValueOnce({ ...solver, dispose: () => undefined });
     expect((await inspectCadSketchConstraints(source(), 'sketch', loader.load)).analysis).not.toHaveProperty('cause');
     expect(load).toHaveBeenCalledTimes(2);
+    // A native instance that traps is the same failure, and the next inspection runs on a fresh instance.
+    let loads = 0;
+    const runtime = createCadSketchNativeRuntime({ loadNative: async () => ++loads === 1
+      ? { memoryBytes: () => 0, solve: () => { throw new WebAssembly.RuntimeError('unreachable'); } } : loadCadSketchTestNativeSolver() });
+    const trapped = await inspectCadSketchConstraints(source(), 'sketch', async () => runtime);
+    expect(trapped.analysis).toMatchObject({ kind: 'unavailable', message: CAD_SKETCH_NATIVE_FAILED, cause: 'solver-unavailable', kernelMessage: 'unreachable' });
+    expect(cadSketchIssues({ sketchId: 'sketch', graph: trapped.graph!, version: 'v1', analysis: cadSketchAnalysisIssues(trapped.analysis) }).refusal)
+      .toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_NATIVE_FAILED, details: { cause: 'solver-unavailable', kernelMessage: 'unreachable' } });
+    expect((await inspectCadSketchConstraints(source(), 'sketch', async () => runtime)).analysis.kind).toBe('solved'); expect(loads).toBe(2);
     // Any other failure, such as a full queue, stays an unavailable analysis without that cause, and no refusal.
     const other = await inspectCadSketchConstraints(source(), 'sketch', async () => ({ solve: async () => { throw new Error('The sketch solve queue is full.'); } }));
     expect(other.analysis).toMatchObject({ kind: 'unavailable', message: 'The sketch solve queue is full.' });

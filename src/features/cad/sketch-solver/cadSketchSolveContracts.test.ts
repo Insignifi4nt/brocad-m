@@ -190,7 +190,7 @@ describe('sketch solving', () => {
     // The setup files' check after each test; called here, it also clears what this test met.
     expect(expectNoUnexpectedNativeFailures).toThrow(/met 1 native failure/);
     expect(expectNoUnexpectedNativeFailures).not.toThrow();
-    expect(await createCadSketchTestSolver({ loadNative: trapping, allowNativeFailure: true }).solve({ graph, parameters: {} })).toMatchObject({ kind: 'rejected' });
+    await expect(createCadSketchTestSolver({ loadNative: trapping, allowNativeFailure: true }).solve({ graph, parameters: {} })).rejects.toMatchObject({ code: 'sketch-failed', native: 'failed' });
     expect(expectNoUnexpectedNativeFailures).not.toThrow();
   });
 });

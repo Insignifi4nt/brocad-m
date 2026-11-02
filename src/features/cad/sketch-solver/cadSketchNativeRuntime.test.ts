@@ -2,8 +2,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { cadSketchSolvedValues, checkCadSketchGraph, parseCadSketchGraph } from '../../../domain/cad/cadSketchGraph';
 import { createCadSolverDieInput } from '../benchmark/cadSolverWorkloadCases';
-import { CAD_SKETCH_NATIVE_FAILED, createCadSketchNativeRuntime, type CadSketchSolveRecord } from './cadSketchNativeRuntime';
-import { CAD_SKETCH_NATIVE_INCOMPATIBLE, CAD_SKETCH_NATIVE_LOAD_FAILED } from './cadSketchSolverMessages';
+import { createCadSketchNativeRuntime, type CadSketchSolveRecord } from './cadSketchNativeRuntime';
+import { CAD_SKETCH_NATIVE_FAILED, CAD_SKETCH_NATIVE_INCOMPATIBLE, CAD_SKETCH_NATIVE_LOAD_FAILED, CadSketchSolverFailure } from './cadSketchSolverFailure';
 import type { CadSketchSolveInput } from './cadSketchSolverTypes';
 import { CadSketchNativeProtocolError, loadCadSketchNativeSolver, type CadSketchNativeSolution, type CadSketchNativeSolver } from './native/cadSketchNativeSolver';
 import { createCadSketchNativeModuleLoader } from './native/cadSketchNativeModule';
@@ -366,36 +366,36 @@ describe('native instance loading and failures', () => {
     expect(records[0]).toMatchObject({ native: 'graph-check', loadAttempts: 3 });
   });
 
-  it('rejects a solve whose loads all fail, fails at once within a second of it, then tries again', async () => {
+  it('fails a solve whose loads all fail as the solver failing, tries once within a second of it, then three times again', async () => {
     let calls = 0;
-    const { solver, records, waits, loadNative, clock } = runtime(async () => { if (++calls <= 3) throw new TypeError('Failed to fetch'); return loadCadSketchTestNativeSolver(); });
-    const unloaded = { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_LOAD_FAILED, diagnostics: { status: null, degreesOfFreedom: null, conflictingIds: [] } };
-    expect(await solver.solve(input)).toMatchObject(unloaded);
+    const { solver, records, waits, loadNative, clock } = runtime(async () => { if (++calls <= 4) throw new TypeError('Failed to fetch'); return loadCadSketchTestNativeSolver(); });
+    const unloaded = { code: 'sketch-failed', native: 'load-failed', message: CAD_SKETCH_NATIVE_LOAD_FAILED, kernelMessage: 'Failed to fetch' };
+    const first = await solver.solve(input).then(() => null, (error: unknown) => error);
+    expect(first).toBeInstanceOf(CadSketchSolverFailure); expect(first).toMatchObject(unloaded);
     expect(records[0]).toMatchObject({ native: 'load-failed', loadAttempts: 3 }); expect(waits).toEqual([250, 1000]);
-    // A drag's next frames within the second fail without waiting or loading.
+    // A drag's next frame within the second tries once, without waiting: the failure is never kept.
     clock.now += 999;
-    expect(await solver.solve(input)).toMatchObject(unloaded);
-    expect(records[1]).toMatchObject({ native: 'load-failed', loadAttempts: 0 }); expect(loadNative).toHaveBeenCalledTimes(3); expect(waits).toHaveLength(2);
-    clock.now += 1;
+    await expect(solver.solve(input)).rejects.toMatchObject(unloaded);
+    expect(records[1]).toMatchObject({ native: 'load-failed', loadAttempts: 1 }); expect(loadNative).toHaveBeenCalledTimes(4); expect(waits).toHaveLength(2);
+    // The next frame loads.
     expect(await solver.solve(input)).toMatchObject({ kind: 'solved' });
-    expect(records[2]).toMatchObject({ native: 'answer', loadAttempts: 1 }); expect(loadNative).toHaveBeenCalledTimes(4);
+    expect(records[2]).toMatchObject({ native: 'answer', loadAttempts: 1 }); expect(loadNative).toHaveBeenCalledTimes(5);
   });
 
-  it('never loads again a module speaking another protocol', async () => {
+  it('fails a module speaking another protocol at once, as the solver failing, and tries it again on the next solve', async () => {
     // Refused at load, as a module without the solver's exports is.
     const withoutExports = runtime(async () => loadCadSketchNativeSolver(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])));
-    const incompatible = { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_INCOMPATIBLE };
-    expect(await withoutExports.solver.solve(input)).toMatchObject(incompatible);
-    withoutExports.clock.now += 60_000;
-    expect(await withoutExports.solver.solve(input)).toMatchObject(incompatible);
-    expect(withoutExports.loadNative).toHaveBeenCalledTimes(1); expect(withoutExports.waits).toEqual([]);
-    expect(withoutExports.records).toMatchObject([{ native: 'incompatible', loadAttempts: 1 }, { native: 'incompatible' }]);
-    // Refused on its first reply, as another protocol version is.
+    const incompatible = { code: 'sketch-failed', native: 'incompatible', message: CAD_SKETCH_NATIVE_INCOMPATIBLE };
+    await expect(withoutExports.solver.solve(input)).rejects.toMatchObject({ ...incompatible, kernelMessage: expect.stringContaining('unexpected exports') });
+    await expect(withoutExports.solver.solve(input)).rejects.toMatchObject(incompatible);
+    expect(withoutExports.loadNative).toHaveBeenCalledTimes(2); expect(withoutExports.waits).toEqual([]);
+    expect(withoutExports.records).toMatchObject([{ native: 'incompatible', loadAttempts: 1 }, { native: 'incompatible', loadAttempts: 1 }]);
+    // Refused on its first reply, as another protocol version is; the instance is dropped, and the next solve loads a fresh one.
     const versioned = runtime(async () => fakeNative(() => { throw new CadSketchNativeProtocolError('Other protocol.'); }));
-    expect(await versioned.solver.solve(input)).toMatchObject(incompatible);
-    expect(await versioned.solver.solve(input)).toMatchObject(incompatible);
-    expect(versioned.loadNative).toHaveBeenCalledTimes(1);
-    expect(versioned.records).toMatchObject([{ native: 'incompatible', nativeReset: 'failure' }, { native: 'incompatible' }]);
+    await expect(versioned.solver.solve(input)).rejects.toMatchObject({ ...incompatible, kernelMessage: 'Other protocol.' });
+    await expect(versioned.solver.solve(input)).rejects.toMatchObject(incompatible);
+    expect(versioned.loadNative).toHaveBeenCalledTimes(2);
+    expect(versioned.records).toMatchObject([{ native: 'incompatible', nativeReset: 'failure' }, { native: 'incompatible', nativeReset: 'failure' }]);
   });
 
   it('solves again on a fresh instance when a used one fails, and rejects a failure on a fresh one', async () => {
@@ -411,15 +411,18 @@ describe('native instance loading and failures', () => {
     // A fresh instance that fails is not tried again within the solve; the next solve loads another.
     instances = 0;
     const fresh = runtime(async () => ++instances === 1 ? fakeNative(() => { throw new WebAssembly.RuntimeError('unreachable'); }) : fakeNative(() => ({})));
-    expect(await fresh.solver.solve(input)).toMatchObject({ kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_FAILED });
+    await expect(fresh.solver.solve(input)).rejects.toMatchObject({ code: 'sketch-failed', native: 'failed', message: CAD_SKETCH_NATIVE_FAILED, kernelMessage: 'unreachable' });
     expect(fresh.records[0]).toMatchObject({ native: 'failed', nativeReset: 'failure' }); expect(fresh.loadNative).toHaveBeenCalledTimes(1);
     expect(await fresh.solver.solve(input)).toMatchObject({ kind: 'rejected', reason: 'invalid-solution' });
     expect(fresh.records[1]).toMatchObject({ native: 'graph-check' }); expect(fresh.records[1].nativeReset).toBeUndefined();
     // Failing again on the fresh instance it loaded, a used one's input is rejected.
     const always = runtime(async () => { let solves = 0; return fakeNative(() => { if (solves++ || always.loadNative.mock.calls.length > 1) throw new WebAssembly.RuntimeError('unreachable'); return {}; }); });
     await always.solver.solve(input);
-    expect(await always.solver.solve(input)).toMatchObject({ kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_FAILED });
+    await expect(always.solver.solve(input)).rejects.toMatchObject({ code: 'sketch-failed', native: 'failed', message: CAD_SKETCH_NATIVE_FAILED });
     expect(always.records[1]).toMatchObject({ native: 'failed', nativeReset: 'failure' }); expect(always.loadNative).toHaveBeenCalledTimes(2);
+    // An invalid result from the module fails the same way, with the decoder's words.
+    const invalid = runtime(async () => fakeNative(() => { throw new Error('The native sketch solver returned an invalid result.'); }));
+    await expect(invalid.solver.solve(input)).rejects.toMatchObject({ native: 'failed', kernelMessage: 'The native sketch solver returned an invalid result.' });
   });
 
   it('replaces an instance holding too much memory after its solve', async () => {
@@ -432,8 +435,8 @@ describe('native instance loading and failures', () => {
     let instances = 0;
     const { solver, records, loadNative } = runtime(async () => (instances += 1) === 1
       ? fakeNative(() => { throw new WebAssembly.RuntimeError('unreachable'); }) : loadCadSketchTestNativeSolver());
-    const [first, second] = await Promise.all([solver.solve(input), solver.solve(input)]);
-    expect(first).toMatchObject({ kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_FAILED });
+    const [first, second] = await Promise.all([solver.solve(input).catch((error: unknown) => error), solver.solve(input)]);
+    expect(first).toMatchObject({ code: 'sketch-failed', native: 'failed', message: CAD_SKETCH_NATIVE_FAILED });
     expect(second).toMatchObject({ kind: 'solved', diagnostics: { degreesOfFreedom: 3 } });
     expect(records).toMatchObject([{ native: 'failed', nativeReset: 'failure' }, { native: 'answer' }]);
     expect(loadNative).toHaveBeenCalledTimes(2);

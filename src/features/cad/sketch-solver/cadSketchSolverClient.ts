@@ -2,7 +2,7 @@ import type { CadSketchSolverClient } from './cadSketchSolverTypes';
 import { isCadSketchSolverEnvelope, parseCadSketchSolveInput, parseCadSketchSolverReply, type CadSketchSolverRequest } from './cadSketchSolverProtocol';
 import type { CadSketchSolveResult } from './cadSketchSolverTypes';
 import { CAD_SKETCH_SOLVER_ERROR, CAD_SKETCH_SOLVER_NOT_SENT, CAD_SKETCH_SOLVER_NOT_STARTED, CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CAD_SKETCH_SOLVER_UNREADABLE,
-  CadSketchSolverFailure } from './cadSketchSolverFailure';
+  CadSketchSolverFailure, cadSketchNativeFailure } from './cadSketchSolverFailure';
 
 export interface CadSketchSolverTransport {
   postMessage(message: CadSketchSolverRequest): void;
@@ -25,7 +25,9 @@ const canceled = () => new DOMException('Sketch solving canceled.', 'AbortError'
 /**
  * At most one worker, one in-flight request and four waiting requests; failures are never replayed automatically. A worker that cannot start,
  * refuses a request, fails, replies unreadably, replies with an error or runs past its time limit fails the request as a `CadSketchSolverFailure`
- * and is stopped, so the next request starts a new one; cancellation, disposal and a full queue stay their own errors.
+ * and is stopped, so the next request starts a new one; cancellation, disposal and a full queue stay their own errors. A reply naming how the
+ * native solver failed fails the request as that `CadSketchSolverFailure`, worded here with the reply's words as its kernel message, and keeps
+ * the worker, which already dropped the failed instance and loads a fresh one for the next request.
  */
 export function createCadSketchSolverClient(makeWorker: () => CadSketchSolverTransport = () => new Worker(new URL('./cadSketchSolver.worker.ts', import.meta.url), { type: 'module', name: 'wireedm-sketch-solver' })): CadSketchSolverClient {
   let worker: CadSketchSolverTransport | undefined, active: Job | undefined;
@@ -54,7 +56,9 @@ export function createCadSketchSolverClient(makeWorker: () => CadSketchSolverTra
         try { reply = parseCadSketchSolverReply(event.data, active.request.input); }
         catch (error) { fail(new CadSketchSolverFailure(CAD_SKETCH_SOLVER_UNREADABLE, error)); return; }
         if (reply.id !== active.request.id) return;
-        if (reply.kind === 'error') fail(new CadSketchSolverFailure(CAD_SKETCH_SOLVER_ERROR, reply.message)); else finish(reply.result);
+        if (reply.kind === 'result') finish(reply.result);
+        else if (reply.failure) finish(cadSketchNativeFailure(reply.failure, reply.message));
+        else fail(new CadSketchSolverFailure(CAD_SKETCH_SOLVER_ERROR, reply.message));
       };
       // An error event carries the worker's own words; a script that failed to load gives a plain event without them.
       transport.onerror = event => { if (worker === transport) fail(new CadSketchSolverFailure(CAD_SKETCH_SOLVER_STOPPED, (event as Partial<ErrorEvent> | null)?.message)); };
