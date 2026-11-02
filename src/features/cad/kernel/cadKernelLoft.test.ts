@@ -182,7 +182,7 @@ describe('native closed multi-section lofts', () => {
     const fail = vi.spyOn(cadKernelBuilders, 'fuse').mockImplementation((left, other) => { target = left; generated = other; return native(left, other); });
     try {
       built([...block, sketch('lower', 0), sketch('upper', 20), loft({ operation: 'join', targetId: 'block' })], model => {
-        expect(model.result.diagnostics[0].message).toBe('Interrupted loft join'); expect(model.result.meshes[0].featureId).toBe('block');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'join', input: { field: 'targetId', id: 'block' }, kernelMessage: 'Interrupted loft join' } }); expect(model.result.meshes[0].featureId).toBe('block');
         if (!generated || !target) throw new Error('Expected native operands');
         const releasedLoft = generated;
         expect(() => releasedLoft.wrapped).toThrow(); expect(measureVolume(target)).toBeCloseTo(4000, 6);

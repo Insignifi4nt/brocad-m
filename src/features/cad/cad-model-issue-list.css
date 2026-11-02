@@ -1,0 +1,12 @@
+.cad-header-issues { position: relative; display: flex; flex-shrink: 0; }
+.cad-header-issues > button { gap: 3px; color: var(--muted-foreground); }
+.cad-header-issues > button.has-failures { color: var(--destructive); }
+.cad-header-issue-list { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; width: 320px; max-height: 320px; overflow-y: auto; padding: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 3px; box-shadow: var(--popup-shadow); white-space: normal; }
+.cad-header-issue-list ul { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+.cad-header-issue-list li { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 2px; }
+.cad-header-issue-list li > button[data-cad-issue-row] { flex: 1; min-width: 0; height: auto; display: grid; justify-items: start; gap: 1px; padding-block: 3px; text-align: left; }
+.cad-header-issue-subject { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.cad-header-issue-message { overflow-wrap: anywhere; }
+.cad-header-issue-cause { color: var(--muted-foreground); overflow-wrap: anywhere; }
+.cad-header-issue-repairs { display: grid; flex-shrink: 0; gap: 1px; }
+.cad-header-issue-list li > .cad-kernel-message { flex-basis: 100%; padding: 0 6px 3px; }

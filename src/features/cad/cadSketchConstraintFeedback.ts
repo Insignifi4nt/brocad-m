@@ -3,7 +3,6 @@ import type { CadSketchGraph, CadSketchGraphIssue } from '@/domain/cad/cadSketch
 import { cadSketchEntityPointIds, cadSketchRelationEntityIds, cadSketchRelationPointIds } from '@/domain/cad/cadSketchGraphReferences';
 import { cadSketchDiagnosisMarks, type CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
 import { cadSketchRelationName, cadSketchRelationOperandLabels, createCadSketchRelationLabels } from './cadSketchRelationNames';
-import { cadSketchSolverRecoveryMessages } from './sketch-solver/cadSketchSolverMessages';
 import type { CadSketchSolveDiagnostics, CadSketchSolveResult } from './sketch-solver/cadSketchSolverTypes';
 
 type Rejection = Extract<CadSketchSolveResult, { kind: 'rejected' }>;
@@ -20,9 +19,15 @@ export interface CadSketchConstraintFeedback {
   readonly subjects: readonly CadSketchConstraintFeedbackSubject[];
   readonly subjectCount: number;
   readonly omittedSubjectCount: number;
+  /** Only when the solver could not judge the edit at all: it could not load, its worker failed or its reply could not be read. */
+  readonly cause?: 'solver-unavailable';
+  /** The browser's or the solver worker's own words for that failure, bounded, when it gave any; the message never repeats them. */
+  readonly kernelMessage?: string;
 }
 interface PreparationFailureInput {
   readonly sketchId: string; readonly sketchName: string; readonly graph: CadSketchGraph; readonly rejection: Rejection; readonly dragPointId?: string;
+  /** The solver failed rather than judged the edit (`CadSketchSolverFailure`), with its own words when it gave any. */
+  readonly unavailable?: { readonly kernelMessage?: string };
 }
 
 const rejectionMessages: Record<Rejection['reason'], string> = {
@@ -92,17 +97,19 @@ export function cadSketchDiagnosticSubjects(graph: CadSketchGraph, diagnostics: 
   return subjects;
 }
 
-function feedback({ sketchId, sketchName, graph, rejection, dragPointId }: PreparationFailureInput): CadSketchConstraintFeedback {
+function feedback({ sketchId, sketchName, graph, rejection, dragPointId, unavailable }: PreparationFailureInput): CadSketchConstraintFeedback {
   const diagnostics = rejection.diagnostics, subjects = cadSketchDiagnosticSubjects(graph, diagnostics, 8, dragPointId);
   const subjectCount = diagnostics.conflictingIds.length + diagnostics.redundantIds.length + diagnostics.partiallyRedundantIds.length + diagnostics.issues.length;
-  // A solver that could not load says how to recover, which the generic wording would hide.
-  const message = rejection.reason === 'failed' && cadSketchSolverRecoveryMessages.has(rejection.message) ? rejection.message : rejectionMessages[rejection.reason];
+  // A solver that failed rather than judged the edit says why and how to recover, which the generic wording would hide.
+  const failed = unavailable;
+  const message = failed ? rejection.message : rejectionMessages[rejection.reason];
   return Object.freeze({ sketchId, reason: rejection.reason, message: `${sketchName}: ${message}`,
-    subjects: Object.freeze(subjects), subjectCount, omittedSubjectCount: subjectCount - subjects.length });
+    subjects: Object.freeze(subjects), subjectCount, omittedSubjectCount: subjectCount - subjects.length,
+    ...(failed ? { cause: 'solver-unavailable' as const, ...(failed.kernelMessage ? { kernelMessage: failed.kernelMessage } : {}) } : {}) });
 }
 
 /** A failed candidate retains diagnosis and operand identities without owning accepted data or history. */
-export class CadSketchPreparationError extends CadError {
+export class CadSketchPreparationError extends CadError<`sketch-${Rejection['reason']}`> {
   readonly feedback: CadSketchConstraintFeedback;
   readonly diagnostics: CadSketchSolveDiagnostics;
   readonly solverMessage: string;
@@ -110,11 +117,12 @@ export class CadSketchPreparationError extends CadError {
   readonly marks: CadSketchDiagnosisMarks | null;
   constructor(input: PreparationFailureInput) {
     const presentation = feedback(input);
-    super(`sketch-${input.rejection.reason}`, presentation.message);
+    super(`sketch-${input.rejection.reason}` as const, presentation.message);
     this.name = 'CadSketchPreparationError'; this.feedback = presentation; this.solverMessage = input.rejection.message;
     const diagnostics = input.rejection.diagnostics;
     this.diagnostics = Object.freeze({ ...diagnostics, conflictingIds: Object.freeze([...diagnostics.conflictingIds]), redundantIds: Object.freeze([...diagnostics.redundantIds]),
       partiallyRedundantIds: Object.freeze([...diagnostics.partiallyRedundantIds]), issues: Object.freeze(diagnostics.issues.map(issue => Object.freeze({ ...issue, source: Object.freeze({ ...issue.source }) }))) });
     this.marks = cadSketchDiagnosisMarks(input.sketchId, input.graph, diagnostics);
+    if (presentation.kernelMessage) (this as { kernelMessage?: string }).kernelMessage = presentation.kernelMessage;
   }
 }

@@ -25,8 +25,8 @@ function blamedIds(error: CadSketchPreparationError): ReadonlySet<string> {
  * Append a drawing whose inferred horizontal and vertical relations are optional. The full graph goes first, so a
  * drawing the sketch accepts costs one preparation. When preparation rejects it, the blamed inferences are dropped
  * and the drawing is tried once more, then once without any inference, whose failure is the one reported. Attachments
- * are never dropped. An abort, any other error, a failure that blames only other relations, or a changed base
- * (`current` false) stops at once. Every attempt keeps the same identities, and at most one is accepted.
+ * are never dropped. An abort, any other error, a solver that failed rather than judged the drawing, a failure that blames only other
+ * relations, or a changed base (`current` false) stops at once. Every attempt keeps the same identities, and at most one is accepted.
  */
 export function appendCadSketchGraphWithInferences<T>({ graph, inferredIds, submit, signal, current, onDropped }: {
   readonly graph: CadSketchGraph;
@@ -37,7 +37,8 @@ export function appendCadSketchGraphWithInferences<T>({ graph, inferredIds, subm
   readonly onDropped: (dropped: readonly CadSketchGraphRelation[], reason: CadSketchInferenceDropReason) => void;
 }): T | Promise<T> {
   const inferred = new Set(inferredIds.filter(id => graph.relations.some(relation => relation.id === id)));
-  const retryable = (error: unknown): error is CadSketchPreparationError => error instanceof CadSketchPreparationError && !signal?.aborted && current();
+  const retryable = (error: unknown): error is CadSketchPreparationError => error instanceof CadSketchPreparationError && error.feedback.cause !== 'solver-unavailable'
+    && !signal?.aborted && current();
   const commitWithout = (ids: ReadonlySet<string>, reason: CadSketchInferenceDropReason) =>
     then(submit(Object.freeze({ ...graph, relations: Object.freeze(graph.relations.filter(relation => !ids.has(relation.id))) })), result => {
       onDropped(graph.relations.filter(relation => ids.has(relation.id)), reason); return result;

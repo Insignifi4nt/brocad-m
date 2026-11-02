@@ -9,7 +9,7 @@ import { cadSketchDriverTolerance } from './cadSketchPrecision';
 import type { Point2 } from '@/domain/path-intel/types';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 
-export class CadSketchTangentOwnershipError extends CadError {
+export class CadSketchTangentOwnershipError extends CadError<'already-driven-sketch-tangent'> {
   constructor(readonly ownerRelationId: string) {
     super('already-driven-sketch-tangent', 'This tangent joint is already driven by its fillet corner.');
   }

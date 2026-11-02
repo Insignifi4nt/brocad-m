@@ -127,7 +127,7 @@ it('retains a complete multi-body reply above the former body count and rejects 
     expect(transport.terminated).toBe(false);
     expect(isCadKernelReply({ ...reply, result: { ...result, meshes: [...meshes.slice(0, -1), { ...meshes.at(-1), volume: NaN }] } })).toBe(false);
     expect(isCadKernelReply({ ...reply, result: { ...result, meshes: [...meshes.slice(0, -1), meshes[0]] } })).toBe(false);
-    const invalid = client.build(createCadDocument()), rejected = expect(invalid).rejects.toThrow('Invalid CAD worker response');
+    const invalid = client.build(createCadDocument()), rejected = expect(invalid).rejects.toMatchObject({ code: 'kernel-unavailable', kernelMessage: 'The reply does not follow the kernel protocol.' });
     transport.onmessage?.(new MessageEvent('message', { data: { id: 2, kind: 'built', result: {
       ...result, meshes: [...meshes.slice(0, -1), { ...meshes.at(-1), indices: [0, 1, 999] }],
     } } }));

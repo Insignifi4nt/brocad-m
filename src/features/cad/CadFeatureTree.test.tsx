@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CadDocument } from '@/domain/cad/cadDocument';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { CAD_INPUT_BLOCKED, cadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { CadFeatureTree, type CadFeatureTreeProps } from './CadFeatureTree';
 import { CadParametersPanel } from './CadParametersPanel';
 
@@ -355,15 +356,22 @@ describe('unified feature history and dependency tree', () => {
     await act(async () => row('wall').dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true })));
     expect(container.querySelector('input[aria-label="Profile name"]')).toBeNull(); expect(row('wall').disabled).toBe(false);
   });
-  it('presents real diagnostics, suppression and parameter highlights without changing model data', async () => {
+  it('presents build issues, suppression and parameter highlights without changing model data', async () => {
     const document = sample(), source = JSON.stringify(document);
-    await act(async () => root.render(<CadFeatureTree {...props({ document, highlightedFeatureIds: ['pad'], diagnostics: [{ code: 'example', featureId: 'pad', message: 'Cannot build this body.' }] })} />));
+    const issues = cadBuildIssues(document, { diagnostics: [{ code: 'example', featureId: 'pad', message: 'Cannot build this body.' }] }, 'v1');
+    await act(async () => root.render(<CadFeatureTree {...props({ document, highlightedFeatureIds: ['pad'], issues })} />));
     expect(button('Select Pad in history').getAttribute('aria-description')).toBe('Pad / pocket · Pad · Cannot build this body.');
     expect(button('Select Pad in history').classList.contains('has-error')).toBe(true);
     const diagnostic = button('Select Pad in history').querySelector('.cad-tree-error');
     expect(diagnostic?.getAttribute('aria-label')).toBe('Cannot build this body.');
     expect(diagnostic?.querySelector('svg[data-workbench-icon="warning"][aria-hidden="true"]')).not.toBeNull();
     expect(container.querySelector('[data-cad-feature-id="pad"]')?.classList.contains('is-parameter-related')).toBe(true);
+    // The feature that reads the failed result is marked as blocked, naming what it waits on.
+    const blocked = button('Select Moved body in history'), mark = blocked.querySelector('.cad-tree-blocked');
+    expect([blocked.classList.contains('is-blocked'), blocked.classList.contains('has-error'), blocked.querySelector('.cad-tree-error')]).toEqual([true, false, null]);
+    expect(blocked.getAttribute('aria-description')).toBe(`Move / rotate · Moved body · ${CAD_INPUT_BLOCKED} · Cause: Pad`);
+    expect([mark?.getAttribute('aria-label'), mark?.getAttribute('data-cad-issue-code')]).toEqual([`${CAD_INPUT_BLOCKED} · Cause: Pad`, 'input-blocked']);
+    expect(mark?.querySelector('svg[data-workbench-icon="info"][aria-hidden="true"]')).not.toBeNull();
     expect(JSON.stringify(document)).toBe(source);
     const suppressed = parseCadDocument({ ...document, features: document.features.map(feature => feature.id === 'move' ? { ...feature, suppressed: true } : feature) });
     await act(async () => root.render(<CadFeatureTree {...props({ document: suppressed, selectedId: 'pad' })} />));

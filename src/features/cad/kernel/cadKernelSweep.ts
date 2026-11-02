@@ -9,12 +9,13 @@ import { cadKernelProfileDrawing, cadKernelSketchOnPlane } from './cadKernelSket
 import { cadKernelDisposeOwned, cadKernelIsValid, cadKernelSolids } from './cadKernelShapes';
 import { CAD_PRECISION } from '../../../domain/precision/cadPrecision';
 import { cadKernelVolume } from './cadKernelQueries';
+import type { CadKernelProfileStep } from './cadKernelFailures';
 
 function validateSweepSolid(shape: Shape3D) {
   const oc = getOC(); const solids = cadKernelSolids(shape);
   try {
     if (solids.length !== 1) throw new CadError('sweep-invalid', 'Sweep must produce one closed solid. Revise the section or curve.');
-    if (!cadKernelIsValid(shape)) throw new CadError('sweep-invalid', 'OpenCascade rejected the exact Sweep topology. Revise the section or curve.');
+    if (!cadKernelIsValid(shape)) throw new CadError('sweep-invalid', 'The sweep made a body whose faces cross or leave gaps. Reduce the section or ease the bends of the curve.');
     const volume = cadKernelVolume(shape);
     if (!Number.isFinite(volume) || volume <= CAD_PRECISION.kernelMinimumVolumeMm3) throw new CadError('sweep-volume', 'Sweep must produce positive volume with outward orientation.');
     const shells = new oc.TopExp_Explorer(shape.wrapped, oc.TopAbs_ShapeEnum.TopAbs_SHELL, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
@@ -50,8 +51,8 @@ function validateSweepSolid(shape: Shape3D) {
   } finally { solids.forEach(cadKernelDisposeOwned); }
 }
 
-/** Exact line extrusions and signed circular revolutions, never a fitted pipe frame. */
-export function buildCadSweepSolid(resolved: CadResolvedSweepInputs): Shape3D {
+/** Exact line extrusions and signed circular revolutions, never a fitted pipe frame. The section's face is built in `faces`. */
+export function buildCadSweepSolid(resolved: CadResolvedSweepInputs, faces: CadKernelProfileStep): Shape3D {
   const datumPlacement = !resolved.placement.legacyPrincipal;
   const curvePlane = datumPlacement ? null : requireCadPrincipalPlane(resolved.curve.plane, 'Sweep');
   const sectionPlane = datumPlacement ? null : requireCadPrincipalPlane(resolved.section.plane, 'Sweep');
@@ -65,13 +66,15 @@ export function buildCadSweepSolid(resolved: CadResolvedSweepInputs): Shape3D {
   let result: Shape3D | undefined;
   try {
     const plane = basis ? new CadKernelPlane(origin, basis.u, basis.normal) : createCadKernelPlane(resolved.section.placement.frame, offset); planes.push(plane);
-    const drawing = cadKernelProfileDrawing(resolved.section.geometry, drawings);
-    const sketch = cadKernelSketchOnPlane(drawing, plane); sketches.push(sketch);
-    const faceBuilder = own(new oc.BRepBuilderAPI_MakeFace(sketch.wire.wrapped, true));
-    if (!faceBuilder.IsDone()) throw new CadError('sweep-section', 'Sweep section did not form a planar closed face.');
-    const rawFace = faceBuilder.Face(); let face: Face;
-    try { face = own(new Face(oc.TopoDS.Face(rawFace))); } finally { cadKernelDisposeOwned(rawFace); }
-    release(faceBuilder);
+    let face = faces(() => {
+      const drawing = cadKernelProfileDrawing(resolved.section.geometry, drawings);
+      const sketch = cadKernelSketchOnPlane(drawing, plane); sketches.push(sketch);
+      const faceBuilder = own(new oc.BRepBuilderAPI_MakeFace(sketch.wire.wrapped, true));
+      if (!faceBuilder.IsDone()) throw new CadError('sweep-section', 'Sweep section did not form a planar closed face.');
+      const rawFace = faceBuilder.Face(); let built: Face;
+      try { built = own(new Face(oc.TopoDS.Face(rawFace))); } finally { cadKernelDisposeOwned(rawFace); }
+      release(faceBuilder); return built;
+    });
     for (let index = 0; index < resolved.curve.segments.length; ++index) {
       const segment = resolved.curve.segments[index]; const entity = resolved.curve.entities[index];
       if (!entity) throw new CadError('sweep-curve', 'Sweep curve is missing an analytic edge.');
@@ -96,11 +99,11 @@ export function buildCadSweepSolid(resolved: CadResolvedSweepInputs): Shape3D {
       const axis = center ? own(cadKernelAx1([center[0], center[1], center[2]], [resolved.frame.binormal[0], resolved.frame.binormal[1], resolved.frame.binormal[2]])) : null;
       const builder = segment.kind === 'line' && displacement ? own(new oc.BRepPrimAPI_MakePrism(face.wrapped, displacement.wrapped, false, true))
         : segment.kind === 'arc' && axis ? own(new oc.BRepPrimAPI_MakeRevol(face.wrapped, axis, segment.sweep * Math.PI / 180, false)) : null;
-      if (!builder || !builder.IsDone()) throw new CadError('sweep-failed', `OpenCascade could not construct curve segment ${index + 1}.`);
+      if (!builder || !builder.IsDone()) throw new CadError('sweep-failed', `The sweep could not follow curve segment ${index + 1}. The section may be too large for that segment; reduce the section or revise the segment.`);
       const raw = builder.Shape(); let piece: Shape3D;
       try {
         const shape = cast(raw);
-        if (!isShape3D(shape)) { cadKernelDisposeOwned(shape); throw new CadError('sweep-invalid', 'Sweep segment did not produce a native solid.'); }
+        if (!isShape3D(shape)) { cadKernelDisposeOwned(shape); throw new CadError('sweep-invalid', `The sweep made no closed solid along curve segment ${index + 1}. The section may be too large for that segment; reduce the section or revise the segment.`); }
         piece = own(shape);
       } finally { cadKernelDisposeOwned(raw); }
       validateSweepSolid(piece);

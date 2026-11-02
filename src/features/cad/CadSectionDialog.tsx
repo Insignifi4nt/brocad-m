@@ -1,4 +1,5 @@
 import { userFacingMessage } from '@/lib/userMessage';
+import { CadKernelMessage, cadKernelMessageOf } from './CadKernelMessage';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
@@ -7,6 +8,8 @@ import type { CadMesh, CadPlane } from '@/domain/cad/cadDocument';
 import type { CadSectionRequest, CadSectionResult } from '@/domain/cad/cadSection';
 import type { DxfEntity } from '@/domain/dxf/types';
 import { cadSectionMiddleOffset } from './cadSectionMidpoint';
+import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 
 /** Display exact analytic curves. This preview never becomes the machining source. */
 export function CadSectionPreview({ entities, label = 'Exact section preview' }: { entities: readonly DxfEntity[]; label?: string }) {
@@ -49,7 +52,8 @@ export function CadSectionDialog({ bodies, initialBodyId, version, onClose, onIn
   const [plane, setPlane] = useState<CadPlane>('XY');
   const [offset, setOffset] = useState(cadSectionMiddleOffset(initialBody, 'XY'));
   const [result, setResult] = useState<CadSectionResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** The failure shown: its message, for a CAM step's refusal the code of its CAM issue, and the kernel's own words when it gave any. */
+  const [error, setError] = useState<{ readonly message: string; readonly code: string | null; readonly kernelMessage: string | null } | null>(null);
   const [busy, setBusy] = useState<'inspect' | 'send' | null>(null);
   const [reviewed, setReviewed] = useState<string | null>(null);
   const request: CadSectionRequest = { bodyId, plane, offset };
@@ -58,7 +62,7 @@ export function CadSectionDialog({ bodies, initialBodyId, version, onClose, onIn
   useEffect(() => { dialog.current?.showModal(); return () => { pending.current?.abort(); }; }, []);
   async function execute(kind: 'inspect' | 'send') {
     if (pending.current || kind === 'send' && reviewed !== requestKey) return;
-    const controller = new AbortController(); pending.current = controller;
+    const controller = new AbortController(), since = cadRefusalMark(); pending.current = controller;
     setBusy(kind); setError(null);
     try {
       if (kind === 'inspect') {
@@ -70,7 +74,8 @@ export function CadSectionDialog({ bodies, initialBodyId, version, onClose, onIn
         onClose();
       }
     } catch (error) {
-      if (!controller.signal.aborted) setError(userFacingMessage(error, 'Section operation failed.'));
+      // A refusal of the Section step is a CAM issue about the operation and its body; the alert keeps the refusal's own message.
+      if (!controller.signal.aborted) setError({ message: userFacingMessage(error, 'Section operation failed.'), code: cadRefusalIssue(error, 'refusal', since)?.code ?? null, kernelMessage: cadKernelMessageOf(error) });
     } finally {
       if (pending.current === controller) { pending.current = null; setBusy(null); }
     }
@@ -94,7 +99,8 @@ export function CadSectionDialog({ bodies, initialBodyId, version, onClose, onIn
       </div>
       <p className="text-muted-foreground">Offset follows {plane === 'XY' ? '+Z' : plane === 'XZ' ? '−Y' : '+X'}. Use a plane inside the material. Ellipse and spline sections are reported as unsupported.</p>
       <div className="flex items-center gap-3"><Button className={button} disabled={busy !== null || !bodies.length} onClick={() => { void execute('inspect'); }}>Preview section</Button>{busy === 'inspect' && <Button className={button} onClick={() => pending.current?.abort()}>Cancel section</Button>}<span role="status">{busy === 'inspect' ? 'Computing exact section…' : busy === 'send' ? 'Saving CAD and creating CAM project…' : reviewed === requestKey && result ? `${result.contourCount} closed contours · ${result.entities.length} analytic curves` : 'Preview the current plane before sending.'}</span></div>
-      {error && <p role="alert" className="text-destructive">{error}</p>}
+      {error && <p role="alert" className="text-destructive" data-cad-issue-code={error.code ?? undefined}>{error.message}</p>}
+      {error && <CadKernelMessage text={error.kernelMessage} />}
       {reviewed === requestKey && result && <CadSectionPreview entities={result.entities} />}
       <div className="flex items-center justify-between gap-6 border-t border-border pt-3"><p className="text-muted-foreground">Saves CAD, then opens a new detached CAM project in local plane coordinates. Review stock, wire and machining settings in CAM.</p><Button className={`${button} shrink-0 bg-primary text-primary-foreground`} disabled={busy !== null || reviewed !== requestKey} onClick={() => { void execute('send'); }}>Send section to CAM</Button></div>
     </div>

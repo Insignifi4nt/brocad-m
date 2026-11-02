@@ -2,11 +2,13 @@ import { beforeAll, describe, expect, it } from 'vitest';
 // TypeScript 7 ships no compiler API yet; AST tooling uses the TypeScript 6 package.
 import ts from '@typescript/typescript6';
 import { CadSourceIndex, cadDiagnosticReach, type CadDiagnosticReach, type CadDiagnosticReachOptions, type CadDiagnosticRoot } from './cadDiagnosticReach';
+import { cadSkippedMemberReads } from './cadMemberReads';
+import { cadUntracedCallProblems, cadUntracedCalls } from './cadUntracedCalls';
 import type { CadFeatureKind } from '../features/cadFeatureDefinitionTypes';
 import { CAD_FEATURE_SHARED_DIAGNOSTICS, cadFeatureDefinition, cadFeatureKinds } from '../features/cadFeatureRegistry';
 
 const FEATURES = 'src/domain/cad/features/', SCHEMA = 'src/domain/cad/cadSchema.ts', KERNEL = 'src/features/cad/kernel/cadKernelModel.ts';
-const EVIDENCE = 'src/features/cad/kernel/cadKernelCutEvidence.ts';
+const EVIDENCE = 'src/features/cad/kernel/cadKernelCutEvidence.ts', TYPES = 'cadFeatureDefinitionTypes.ts';
 
 /**
  * Functions that evaluate one input feature from its own data: a sketch's contours, solved graph and placement, a curve's geometry and
@@ -25,10 +27,11 @@ const INPUT_EVALUATIONS: Readonly<Record<string, readonly CadFeatureKind[]>> = {
  */
 const GRAPH_ISSUE = 'A sketch graph issue, refused with the code of the check that finds it.';
 const ARRANGEMENT_ISSUE = 'A sketch arrangement issue. Cells refuse an arrangement with issues as unsupported-sketch-cells.';
-const BODY_ISSUE = 'A body issue. The body lineage, which the parse and the rebuild both keep, records it, and a build returns it in bodyIssues beside its bodies; nothing turns it into a diagnostic.';
+const BODY_ISSUE = 'A body issue. The body lineage, which the parse and the rebuild both keep, records it, and a build returns it in bodyIssues beside its bodies; the build issues present it as an issue, never as a diagnostic.';
 /** Codes the walk finds that are no refusal of a feature, and why. */
 const NOT_REFUSALS: Readonly<Record<string, string>> = {
   STALE_BUILD: 'A topology snapshot refuses use once disposed. A rebuild selects edges and faces on the snapshot of its own build, before disposing it.',
+  'invalid-sketch-profile-copy': 'A profile copy\'s refusal, an edit rather than a feature. The walk runs every relation copy\'s callbacks, so a generator\'s copy of its relations reaches the profile copy\'s renaming.',
   'relation-residual': GRAPH_ISSUE, 'invalid-coordinate': GRAPH_ISSUE, 'degenerate-entity': GRAPH_ISSUE, 'arc-radius-mismatch': GRAPH_ISSUE,
   overlap: ARRANGEMENT_ISSUE, 'ambiguous-tangency': ARRANGEMENT_ISSUE, precision: ARRANGEMENT_ISSUE, 'non-simple-boundary': ARRANGEMENT_ISSUE,
   'ambiguous-body-parts': BODY_ISSUE, 'lost-body-parts': BODY_ISSUE, 'untracked-body-parts': BODY_ISSUE, 'more-body-issues': BODY_ISSUE
@@ -91,8 +94,10 @@ beforeAll(() => {
     ...[...walked].some(name => name.startsWith('src/features/cad/kernel/cadKernelPocket.ts:')) ? ['pocket'] : []];
   options = {
     templates: { [`${EVIDENCE}: prefix`]: operations, [`${EVIDENCE}: operation.toLowerCase()`]: operations },
-    // The catalog leads to every kind; the parse's context to every check it offers, which a kind's walk takes one by one.
-    stop: new Set([`${FEATURES}cadFeatureRegistry.ts:catalog`, `${SCHEMA}:context`]),
+    // The catalog leads to every kind, and so does a call of a definition's, a slot's or a field's member; the parse's context to every
+    // check it offers. A kind's walk takes them one by one.
+    stop: new Set([`${FEATURES}cadFeatureRegistry.ts:catalog`, `${SCHEMA}:context`, `${FEATURES}${TYPES}:CadFeatureDefinition`, `${FEATURES}${TYPES}:CadFeatureSlot`,
+      `${FEATURES}${TYPES}:CadFeatureField`]),
     receivers: (file, name) => file.startsWith(FEATURES) && name === 'context' ? { file: SCHEMA, node: context } : undefined
   };
 }, 60_000);
@@ -105,26 +110,42 @@ const kindReach = (kind: CadFeatureKind) => {
   const stop = new Set([...options.stop!, ...Object.entries(INPUT_EVALUATIONS).filter(([, owners]) => !owners.includes(kind)).map(([name]) => name)]);
   return reaches.get(kind) ?? reaches.set(kind, cadDiagnosticReach(index, kindRoots(kind), { ...options, stop })).get(kind)!;
 };
-const shared = () => new Set(Object.values(CAD_FEATURE_SHARED_DIAGNOSTICS).flat());
+const shared = (): ReadonlySet<string> => new Set(Object.values(CAD_FEATURE_SHARED_DIAGNOSTICS).flat());
+const untraced = new Set(cadUntracedCalls('feature'));
+/** What a walk reports and cannot trace, other than the calls read by hand. */
+const unread = (reach: CadDiagnosticReach) => reach.unexpanded.filter(entry => !untraced.has(entry));
+const walks = () => [...(Object.keys(CAD_FEATURE_SHARED_DIAGNOSTICS) as (keyof typeof CAD_FEATURE_SHARED_DIAGNOSTICS)[]).map(group => [group, sharedReach(group)] as const),
+  ...cadFeatureKinds().map(kind => [kind, kindReach(kind)] as const)];
 
 describe('CAD feature diagnostics', () => {
   it('list the codes of the steps every feature goes through as shared', () => {
     for (const [group, codes] of Object.entries(CAD_FEATURE_SHARED_DIAGNOSTICS)) {
       const reach = sharedReach(group as keyof typeof CAD_FEATURE_SHARED_DIAGNOSTICS);
-      expect(reach.unexpanded, group).toEqual([]);
+      expect(unread(reach), group).toEqual([]);
       expect(sorted([...reach.codes].filter(code => !(code in NOT_REFUSALS))), group).toEqual(sorted(codes));
     }
   }, 30_000);
 
   it.each(cadFeatureKinds())('list every code a %s feature can be refused with by its checks and evaluation', kind => {
     const reach = kindReach(kind);
-    expect(reach.unexpanded).toEqual([]);
+    expect(unread(reach)).toEqual([]);
     const declared = cadFeatureDefinition(kind).diagnostics, common = shared();
     expect(new Set(declared).size, 'listed once').toBe(declared.length);
     expect(sorted(declared)).toEqual(sorted([...reach.codes].filter(code => !common.has(code) && !(code in NOT_REFUSALS))));
     // An input's own kind walks the evaluations other kinds stop at, so their codes are listed there.
     for (const [name, owners] of Object.entries(INPUT_EVALUATIONS)) if (owners.includes(kind)) expect(reach.declarations, name).toContain(name);
   }, 30_000);
+
+  it('read by hand only the calls a walk reports, each running nothing that raises a code the walk does not list', () => {
+    expect(cadUntracedCallProblems(index, walks(), 'feature', (roots, reads) => cadDiagnosticReach(index, roots, { ...options, stop: new Set([...options.stop!, ...reads]) }))).toEqual([]);
+  }, 120_000);
+
+  it('follow or report every member read in the code they walk', () => {
+    for (const [name, reach] of walks()) {
+      expect(reach.accesses.size, name).toBeGreaterThan(0);
+      expect(cadSkippedMemberReads(index, reach), name).toEqual([]);
+    }
+  }, 120_000);
 
   it('take a caught error\'s code only at the sites read by hand', () => {
     const groups = Object.keys(CAD_FEATURE_SHARED_DIAGNOSTICS) as (keyof typeof CAD_FEATURE_SHARED_DIAGNOSTICS)[];

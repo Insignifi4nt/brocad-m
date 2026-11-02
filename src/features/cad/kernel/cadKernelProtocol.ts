@@ -1,5 +1,7 @@
 import type { CadBuildResult, CadDocument, CadMesh, CadMeshTopologyGroup } from '../../../domain/cad/cadDocument';
 import { cadBodyFeatureId, isCadBodyIssue, isCadBodyKey, isCadBodyState, MAX_CAD_BODY_ISSUES } from '../../../domain/cad/cadBodies';
+import { isCadKernelFailureDetails, isCadRefusalFactCode, isCadRefusalFacts, MAX_CAD_DIAGNOSTIC_CODE, MAX_CAD_DIAGNOSTIC_MESSAGE } from '../../../domain/cad/cadIssueCodes';
+import type { CadKernelRequestFailure } from './cadKernelFailures';
 import { isCadSectionResult, type CadSectionRequest, type CadSectionResult } from '../../../domain/cad/cadSection';
 import { isCadTopologyInspectResult, isCadTopologyResolvePicksResult, type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '../../../domain/cad/cadTopology';
@@ -29,7 +31,8 @@ export type CadKernelReply = { readonly id: number; readonly kind: 'built'; read
   | { readonly id: number; readonly kind: 'solid-imported'; readonly result: CadSolidImportResult }
   | { readonly id: number; readonly kind: 'dxf-imported'; readonly result: CadDxfImportResult }
   | { readonly id: number; readonly kind: 'dxf-curve-imported'; readonly result: CadDxfCurveImportResult }
-  | { readonly id: number; readonly kind: 'error'; readonly message: string; readonly code?: string };
+  /** `kernelMessage` keeps the kernel's own text for a failure it reported in its own words, which the message never repeats; `facts` are those of a code that carries them. */
+  | ({ readonly id: number; readonly kind: 'error'; readonly message: string; readonly code?: string } & Partial<Pick<CadKernelRequestFailure, 'kernelMessage' | 'facts'>>);
 
 /** The worker boundary receives structured clones, never executable model scripts. */
 export function isCadKernelEnvelope(value: unknown): value is Record<string, unknown> & { id: number; kind: string } {
@@ -39,8 +42,13 @@ export function isCadKernelEnvelope(value: unknown): value is Record<string, unk
 
 export function isCadKernelReply(value: unknown): value is CadKernelReply {
   if (!isCadKernelEnvelope(value)) return false;
-  if (value.kind === 'error') return typeof value.message === 'string' && value.message.length <= 8192
-    && (value.code === undefined || typeof value.code === 'string' && value.code.length <= 128);
+  // Kernel text may be of any length: the worker cuts it to its bound before replying, and the client again as it takes the reply in
+  // (`CadError.received`, `cadReceivedDiagnostic`), so text the kernel wrote never costs the reply that carries it.
+  if (value.kind === 'error') return typeof value.message === 'string' && value.message.length <= MAX_CAD_DIAGNOSTIC_MESSAGE
+    && (value.code === undefined || typeof value.code === 'string' && value.code.length <= MAX_CAD_DIAGNOSTIC_CODE)
+    && (value.kernelMessage === undefined || typeof value.kernelMessage === 'string' && value.kernelMessage.length > 0)
+    // A code that carries facts always gives them, and nothing else gives any.
+    && (value.facts === undefined ? !isCadRefusalFactCode(value.code) : typeof value.code === 'string' && isCadRefusalFacts(value.code, value.facts));
   if (value.kind === 'exported') return value.blob instanceof Blob;
   if (value.kind === 'sectioned') return isCadSectionResult(value.result);
   if (value.kind === 'topology-inspected') return isCadTopologyInspectResult(value.result);
@@ -73,10 +81,18 @@ export function isCadKernelReply(value: unknown): value is CadKernelReply {
   }
   if ('bodyIssues' in result && result.bodyIssues !== undefined
     && (!Array.isArray(result.bodyIssues) || result.bodyIssues.length > MAX_CAD_BODY_ISSUES || !result.bodyIssues.every(isCadBodyIssue))) return false;
+  const failed = new Set<string>();
   for (const diagnostic of result.diagnostics) {
     if (typeof diagnostic !== 'object' || diagnostic === null || typeof diagnostic.code !== 'string'
-      || diagnostic.code.length > 128 || typeof diagnostic.message !== 'string' || diagnostic.message.length > 8192
-      || diagnostic.featureId !== undefined && (typeof diagnostic.featureId !== 'string' || diagnostic.featureId.length > 96)) return false;
+      || diagnostic.code.length > MAX_CAD_DIAGNOSTIC_CODE || typeof diagnostic.message !== 'string' || diagnostic.message.length > MAX_CAD_DIAGNOSTIC_MESSAGE
+      || diagnostic.featureId !== undefined && (typeof diagnostic.featureId !== 'string' || diagnostic.featureId.length > 96)
+      // A failure may carry its kernel details; the stop it causes carries none.
+      || diagnostic.details !== undefined && (diagnostic.code === 'rebuild-stopped' || !isCadKernelFailureDetails(diagnostic.details, Infinity))
+      // A code that carries facts always gives them, and no other code gives any.
+      || (diagnostic.facts === undefined ? isCadRefusalFactCode(diagnostic.code) : !isCadRefusalFacts(diagnostic.code, diagnostic.facts))) return false;
+    // A stop follows a failure of the feature it stopped at.
+    if (diagnostic.code !== 'rebuild-stopped') { if (diagnostic.featureId !== undefined) failed.add(diagnostic.featureId); }
+    else if (diagnostic.featureId === undefined || !failed.has(diagnostic.featureId)) return false;
   }
   return true;
 }

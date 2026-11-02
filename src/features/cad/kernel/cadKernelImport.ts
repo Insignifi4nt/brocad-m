@@ -18,7 +18,7 @@ function castSolid(raw: TopoDS_Shape): Shape3D {
 function readStep(path: string, data: string): Shape3D {
   const oc = getOC(); const reader = new oc.STEPControl_Reader();
   try {
-    if (reader.ReadFile(path) !== oc.IFSelect_ReturnStatus.IFSelect_RetDone) throw new CadError('step-read', 'OpenCascade could not read this STEP file.');
+    if (reader.ReadFile(path) !== oc.IFSelect_ReturnStatus.IFSelect_RetDone) throw new CadError('step-read', 'This STEP file could not be read. It may be damaged or not a STEP file; export it again from the program that made it.');
     if (!assertCadStepLengthUnits(data).nativeTransferSupported) throw new CadError('step-units-unsupported',
       'This STEP uses a conversion-based length unit referring to another conversion-based unit. The current native reader cannot resolve that structure reliably. Re-export with SI length units or a direct conversion to SI. The original file has not changed.');
     // OC length conversion uses millimetres as the reference unit. Apply after ReadFile.
@@ -71,7 +71,7 @@ function readStl(path: string, bytes: Uint8Array, units: 'mm' | 'inch'): Shape3D
   let input: Shape3D | undefined;
   const sewing = new oc.BRepBuilderAPI_Sewing(CAD_PRECISION.kernelConfusionMm, true, true, false, false);
   try {
-    if (!reader.Read(raw, path) || raw.IsNull()) throw new CadError('stl-read', 'OpenCascade could not read this STL file.');
+    if (!reader.Read(raw, path) || raw.IsNull()) throw new CadError('stl-read', 'This STL file could not be read. It may be damaged or not an STL file; export it again from the program that made it.');
     input = castSolid(raw);
     const faces = cadKernelFaces(input);
     try { if (faces.length !== facets) throw new CadError('stl-incomplete', 'The STL reader omitted facets. Repair the source mesh before importing.'); }

@@ -1,11 +1,12 @@
 import type { CadSketchSolveDiagnostics, CadSketchSolveInput, CadSketchSolveResult } from './cadSketchSolverTypes';
 import { parseCadSketchSolveInput } from './cadSketchSolverProtocol';
-import { CAD_SKETCH_NATIVE_INCOMPATIBLE, CAD_SKETCH_NATIVE_LOAD_FAILED } from './cadSketchSolverMessages';
+import { cadSketchNativeFailure } from './cadSketchSolverFailure';
 import { cadSketchSolverStageClock, type CadSketchSolverStageObserver } from './cadSketchSolverStages';
 import { attemptCadSketchNativeSolve, type CadSketchNativeAttempt, type CadSketchNativeReason } from './native/cadSketchNativeAttempt';
 import { CadSketchNativeProtocolError, type CadSketchNativeSolution, type CadSketchNativeSolver } from './native/cadSketchNativeSolver';
 
 export interface CadSketchSolverBackend {
+  /** The solver's judgement of the input; rejects with a `CadSketchSolverFailure` when the solver failed rather than judged it. */
   solve(input: CadSketchSolveInput): Promise<CadSketchSolveResult>;
 }
 
@@ -33,14 +34,10 @@ export interface CadSketchSolveRecord {
 export const CAD_SKETCH_NATIVE_MEMORY_LIMIT_BYTES = 64 * 1024 * 1024;
 /** Waits before the second and third attempt to load an instance within one solve. */
 export const CAD_SKETCH_NATIVE_LOAD_RETRY_DELAYS_MS = [250, 1000] as const;
-/** After a solve failed to load an instance, later solves within this long fail without loading again. */
+/** After a solve failed to load an instance, later solves within this long try one load, without waiting. */
 export const CAD_SKETCH_NATIVE_LOAD_RETRY_INTERVAL_MS = 1000;
-export const CAD_SKETCH_NATIVE_FAILED = 'The sketch solver failed on this sketch.';
 
 const noDiagnostics = (): CadSketchSolveDiagnostics => ({ status: null, degreesOfFreedom: null, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] });
-const failed = (message: string): CadSketchSolveResult => ({ kind: 'rejected', reason: 'failed', message, diagnostics: noDiagnostics() });
-/** The rejection of a solve that could not load an instance. */
-const unloaded = (record: CadSketchSolveRecord) => failed(record.native === 'incompatible' ? CAD_SKETCH_NATIVE_INCOMPATIBLE : CAD_SKETCH_NATIVE_LOAD_FAILED);
 
 /**
  * An instance that cannot speak this app's protocol: another protocol version, or a module whose
@@ -51,14 +48,19 @@ const incompatible = (error: unknown) => error instanceof CadSketchNativeProtoco
 /**
  * Solves with the native solver, one solve at a time. Every answer is native's own: what it cannot
  * be certain of, as a drag diagnosed where it ended or a stalled sketch blamed as its start shows,
- * it still answers, with the reason recorded. An instance loads on first use; a solve that cannot
- * load one tries three times, waiting 250 ms and then 1 s, and is rejected as failed when all three
- * fail. Solves within a second of that fail at once, so a drag does not wait on every frame, and the
- * next solve after it tries again. A module speaking another protocol is never loaded again: the
- * page must be reloaded. An instance that traps or returns an invalid result is dropped; on an
- * instance that had already solved, the input is solved once more on a fresh one, as an earlier
- * solve may have left it inconsistent. An instance holding more than `memoryLimitBytes` is replaced
- * after its solve.
+ * it still answers, with the reason recorded. Every result is a judgement of the input; when the
+ * solver itself fails, the solve rejects with a `CadSketchSolverFailure` naming how (`native`), with
+ * the browser's, the module's or the trap's words as its kernel message.
+ *
+ * A failure is never kept: every solve without an instance tries to load one. An instance loads on
+ * first use; a solve that cannot load one tries three times, waiting 250 ms and then 1 s, and fails
+ * as `load-failed` when all three fail. A solve within a second of that tries once, without waiting,
+ * so a drag does not wait on every frame. A module speaking another protocol fails as `incompatible`
+ * at once, and the next solve tries it again. An instance that traps or returns an invalid result is
+ * dropped and fails as `failed` (`incompatible` for another protocol); on an instance that had
+ * already solved, the same input is solved once more on a fresh one first, as an earlier solve may
+ * have left it inconsistent. An instance holding more than `memoryLimitBytes` is replaced after its
+ * solve.
  */
 export function createCadSketchNativeRuntime(options: {
   readonly loadNative: () => Promise<CadSketchNativeSolver>;
@@ -75,17 +77,17 @@ export function createCadSketchNativeRuntime(options: {
   const wait = options.wait ?? (ms => new Promise<void>(resolve => { setTimeout(resolve, ms); }));
   /** The current instance and whether it has solved before. */
   let native: { readonly solver: CadSketchNativeSolver; used: boolean } | undefined;
-  let incompatibleModule = false, loadFailedAt: number | undefined;
+  let loadFailedAt: number | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   // One solve at a time, so instance replacement never races a solve.
   const exclusive = <T>(work: () => Promise<T>): Promise<T> => { const run = queue.then(work); queue = run.catch(() => undefined); return run; };
 
-  /** The current instance, loading one when there is none; undefined when none can be loaded. */
+  /** The current instance, loading one when there is none; throws the solver's failure when none can be loaded. */
   async function instance(record: Writable<CadSketchSolveRecord>) {
     if (native) return native;
-    if (incompatibleModule) { record.native = 'incompatible'; return undefined; }
-    if (loadFailedAt !== undefined && now() - loadFailedAt < CAD_SKETCH_NATIVE_LOAD_RETRY_INTERVAL_MS) { record.native = 'load-failed'; record.loadAttempts = 0; return undefined; }
-    for (let attempt = 0; attempt <= CAD_SKETCH_NATIVE_LOAD_RETRY_DELAYS_MS.length; attempt++) {
+    const attempts = loadFailedAt !== undefined && now() - loadFailedAt < CAD_SKETCH_NATIVE_LOAD_RETRY_INTERVAL_MS ? 1 : CAD_SKETCH_NATIVE_LOAD_RETRY_DELAYS_MS.length + 1;
+    let failure: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt) await wait(CAD_SKETCH_NATIVE_LOAD_RETRY_DELAYS_MS[attempt - 1]);
       record.loadAttempts = attempt + 1;
       try {
@@ -93,20 +95,20 @@ export function createCadSketchNativeRuntime(options: {
         loadFailedAt = undefined;
         return native;
       } catch (error) {
-        if (incompatible(error)) { incompatibleModule = true; record.native = 'incompatible'; return undefined; }
+        if (incompatible(error)) { record.native = 'incompatible'; throw cadSketchNativeFailure('incompatible', error); }
+        failure = error;
       }
     }
     loadFailedAt = now();
     record.native = 'load-failed';
-    return undefined;
+    throw cadSketchNativeFailure('load-failed', failure);
   }
 
-  /** Native's attempt on the current instance, or undefined when it failed and was dropped. */
-  function attempt(input: CadSketchSolveInput, current: NonNullable<typeof native>, record: Writable<CadSketchSolveRecord>) {
+  /** Native's attempt on the current instance, or what it threw when it failed and was dropped. */
+  function attempt(input: CadSketchSolveInput, current: NonNullable<typeof native>, record: Writable<CadSketchSolveRecord>): CadSketchNativeAttempt | { readonly failure: unknown } {
     try { return attemptCadSketchNativeSolve(input, current.solver, options.onStageTiming); } catch (error) {
-      record.native = 'failed'; record.nativeReset = 'failure'; native = undefined;
-      if (incompatible(error)) { incompatibleModule = true; record.native = 'incompatible'; }
-      return undefined;
+      record.native = incompatible(error) ? 'incompatible' : 'failed'; record.nativeReset = 'failure'; native = undefined;
+      return { failure: error };
     } finally { current.used = true; }
   }
 
@@ -115,16 +117,14 @@ export function createCadSketchNativeRuntime(options: {
     const started = now();
     try {
       let current = await instance(record);
-      if (!current) return unloaded(record);
       const reused = current.used;
-      let result: CadSketchNativeAttempt | undefined = attempt(input, current, record);
-      if (!result && reused && record.native === 'failed') {
+      let result = attempt(input, current, record);
+      if ('failure' in result && reused && record.native === 'failed') {
         current = await instance(record);
-        if (!current) return unloaded(record);
         record.native = 'failed';
         result = attempt(input, current, record);
       }
-      if (!result) return failed(record.native === 'incompatible' ? CAD_SKETCH_NATIVE_INCOMPATIBLE : CAD_SKETCH_NATIVE_FAILED);
+      if ('failure' in result) throw cadSketchNativeFailure(record.native === 'incompatible' ? 'incompatible' : 'failed', result.failure);
       if (current.solver.memoryBytes() > memoryLimit) { record.nativeReset ??= 'memory'; native = undefined; }
       record.native = result.reason ?? 'answer';
       if (result.drag) record.drag = result.drag;

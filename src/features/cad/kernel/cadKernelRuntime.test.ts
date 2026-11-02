@@ -343,3 +343,27 @@ it('retains accepted material when exporting a diagnosed candidate, while an exp
       .toMatchObject({ kind: 'topology-inspected', result: { total: 12 } });
   } finally { runtime.dispose(); }
 });
+
+it('names a kernel that fails to load as the cause of a request, keeping the loader\'s words apart', async () => {
+  const runtime = createCadKernelRuntime(async () => { throw new Error('WebAssembly.instantiate(): out of memory'); });
+  const unavailable = { kind: 'error', code: 'kernel-unavailable', message: 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.',
+    kernelMessage: 'WebAssembly.instantiate(): out of memory' };
+  try {
+    expect(await runtime.evaluate({ id: 1, kind: 'build', document })).toEqual({ id: 1, ...unavailable });
+    expect(await runtime.evaluate({ id: 2, kind: 'import-solid', source: { format: 'step', fileName: 'part.step', encoding: 'utf8', data: 'ISO-10303-21;' } })).toEqual({ id: 2, ...unavailable });
+  } finally { runtime.dispose(); }
+});
+
+it('keeps no failed kernel load, so the next request loads it again, and keeps the load that succeeds', async () => {
+  const initialize = vi.fn<() => Promise<void>>().mockRejectedValueOnce(new Error('WebAssembly.instantiate(): out of memory'))
+    .mockImplementationOnce(() => { throw new Error('Aborted(OOM)'); }).mockResolvedValue(undefined);
+  const runtime = createCadKernelRuntime(initialize);
+  try {
+    expect(await runtime.evaluate({ id: 1, kind: 'build', document })).toMatchObject({ kind: 'error', code: 'kernel-unavailable', kernelMessage: 'WebAssembly.instantiate(): out of memory' });
+    // A load that throws rather than rejects fails the same way.
+    expect(await runtime.evaluate({ id: 2, kind: 'build', document })).toMatchObject({ kind: 'error', code: 'kernel-unavailable', kernelMessage: 'Aborted(OOM)' });
+    expect(await runtime.evaluate({ id: 3, kind: 'build', document })).toMatchObject({ kind: 'built', result: { diagnostics: [] } });
+    expect(await runtime.evaluate({ id: 4, kind: 'build', document: { ...document, name: 'Again' } })).toMatchObject({ kind: 'built' });
+    expect(initialize).toHaveBeenCalledTimes(3);
+  } finally { runtime.dispose(); }
+});

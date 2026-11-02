@@ -69,7 +69,7 @@ export const cadSketchGeneratorRemovals = (confirmed: Iterable<string> = []): Ca
  * `relationIds` their IDs once each, which confirm them as removedRelationIds, and `pendingRelationIds` those of them the batch did not
  * confirm, so a caller that can list only some at a time lists the rest as each resend confirms more.
  */
-export class CadSketchGeneratorRemovalError extends CadError {
+export class CadSketchGeneratorRemovalError extends CadError<'unconfirmed-sketch-generator-removals'> {
   readonly relationIds: readonly string[];
   readonly pendingRelationIds: readonly string[];
   readonly relations: readonly CadSketchGeneratorRemovedRelation[];

@@ -10,6 +10,7 @@ import { cadSketchFixedComponents } from '../../../domain/cad/cadSketchFixedComp
 import { cadSketchLinearPatternLockReason } from '../../../domain/cad/cadSketchLinearPattern';
 import { cadSketchGeneratorLockReason } from '../../../domain/cad/sketch-generators/cadSketchGenerators';
 import type { CadSketchSolveDiagnostics, CadSketchSolveInput, CadSketchSolveResult } from './cadSketchSolverTypes';
+import { isCadSketchNativeFailure, type CadSketchNativeFailure } from './cadSketchSolverFailure';
 
 // The graph is not part of this schema: its own parser validates it, once.
 const envelopeSchema = Type.Object({ parameters: Type.Record(Type.String(), CadNumberSchema),
@@ -35,13 +36,16 @@ const resultSchema = Type.Union([
     message: Type.String({ maxLength: 8192 }), diagnostics: diagnosticsSchema }, { additionalProperties: false })
 ]);
 export interface CadSketchSolverRequest { readonly id: number; readonly kind: 'solve'; readonly input: CadSketchSolveInput }
-export type CadSketchSolverReply = { readonly id: number; readonly kind: 'result'; readonly result: CadSketchSolveResult }
-  | { readonly id: number; readonly kind: 'error'; readonly message: string };
+/**
+ * An error reply: the worker's own words, never shown as the message. `failure` names how the native solver failed, so the client words
+ * it; a reply without it is the worker failing for a reason it does not name.
+ */
+export interface CadSketchSolverErrorReply { readonly id: number; readonly kind: 'error'; readonly message: string; readonly failure?: CadSketchNativeFailure }
+export type CadSketchSolverReply = { readonly id: number; readonly kind: 'result'; readonly result: CadSketchSolveResult } | CadSketchSolverErrorReply;
 /** A solved result crosses the worker boundary as its solved values only; the client applies them to its own request graph. */
 export type CadSketchSolverWireResult = Exclude<CadSketchSolveResult, { readonly kind: 'solved' }>
   | { readonly kind: 'solved'; readonly layout: number; readonly values: readonly number[]; readonly diagnostics: CadSketchSolveDiagnostics };
-export type CadSketchSolverWireReply = { readonly id: number; readonly kind: 'result'; readonly result: CadSketchSolverWireResult }
-  | { readonly id: number; readonly kind: 'error'; readonly message: string };
+export type CadSketchSolverWireReply = { readonly id: number; readonly kind: 'result'; readonly result: CadSketchSolverWireResult } | CadSketchSolverErrorReply;
 
 export function cadSketchSolverWireResult(result: CadSketchSolveResult): CadSketchSolverWireResult {
   return result.kind === 'solved' ? { kind: 'solved', layout: CAD_SKETCH_SOLVED_LAYOUT_VERSION, values: cadSketchSolvedValues(result.graph), diagnostics: result.diagnostics } : result;
@@ -102,7 +106,11 @@ export function cadSketchSolutionMatchesInput(input: CadSketchSolveInput, graph:
 
 export function parseCadSketchSolverReply(value: unknown, input: CadSketchSolveInput): CadSketchSolverReply {
   if (!isCadSketchSolverEnvelope(value)) throw new Error('Invalid sketch worker response.');
-  if (value.kind === 'error' && 'message' in value && typeof value.message === 'string' && value.message.length <= 8192) return { id: value.id, kind: 'error', message: value.message };
+  if (value.kind === 'error' && 'message' in value && typeof value.message === 'string' && value.message.length <= 8192) {
+    const failure = 'failure' in value ? value.failure : undefined;
+    if (failure !== undefined && !isCadSketchNativeFailure(failure)) throw new Error('Invalid sketch worker response.');
+    return { id: value.id, kind: 'error', message: value.message, ...failure ? { failure } : {} };
+  }
   if (value.kind !== 'result' || !('result' in value) || !Value.Check(resultSchema, value.result)) throw new Error('Invalid sketch worker response.');
   const result = value.result;
   const diagnostics: CadSketchSolveDiagnostics = result.diagnostics;

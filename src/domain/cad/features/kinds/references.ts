@@ -75,8 +75,8 @@ export const sketch = {
     'invalid-gear', 'invalid-plugin', 'invalid-plugin-inputs', 'invalid-plugin-rules', 'plugin-limit', 'plugin-size', 'invalid-dxf-source',
     // The graph: its entities, relations, solution and annotations.
     'invalid-sketch-graph', 'invalid-sketch-graph-geometry', 'sketch-graph-precision', 'missing-sketch-entity', 'missing-sketch-point', 'invalid-sketch-cycle',
-    'non-canonical-sketch-relation', 'fixed-sketch-relation', 'overconstrained-sketch-dimension', 'already-driven-sketch-radius',
-    'unsupported-sketch-dimension', 'unsupported-sketch-operand', 'invalid-sketch-operand', 'invalid-sketch-angle', 'invalid-sketch-angle-ray',
+    'non-canonical-sketch-relation', 'fixed-sketch-relation', 'overconstrained-sketch-dimension', 'already-driven-sketch-radius', 'already-driven-sketch-tangent',
+    'unsupported-sketch-dimension', 'unsupported-sketch-operand', 'unlowerable-sketch-operand', 'invalid-sketch-operand', 'invalid-sketch-angle', 'invalid-sketch-angle-ray',
     'invalid-sketch-line-pair', 'invalid-sketch-midpoint', 'invalid-sketch-pattern', 'owned-sketch-pattern', 'invalid-sketch-generator', 'owned-sketch-generator', 'stale-sketch-generator', 'unsupported-sketch-offset',
     'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve', 'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair',
     'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry', 'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'invalid-sketch-annotation',

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { parseCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { CadError } from '@/domain/cad/cadError';
 import { CadSketchPreparationError, describeCadSketchConstraintSource } from './cadSketchConstraintFeedback';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { prepareCadEdits } from './cadEditPreparation';
 import { createCadSketchNativeRuntime } from './sketch-solver/cadSketchNativeRuntime';
-import { CAD_SKETCH_NATIVE_INCOMPATIBLE, CAD_SKETCH_NATIVE_LOAD_FAILED } from './sketch-solver/cadSketchSolverMessages';
+import { CAD_SKETCH_NATIVE_INCOMPATIBLE, CAD_SKETCH_NATIVE_LOAD_FAILED } from './sketch-solver/cadSketchSolverFailure';
 import type { CadSketchSolveResult } from './sketch-solver/cadSketchSolverTypes';
 import { CadSketchNativeProtocolError } from './sketch-solver/native/cadSketchNativeSolver';
 
@@ -78,19 +80,24 @@ describe('candidate-owned sketch constraint feedback', () => {
     expect(subject.pointIds).toEqual(['a', 'b', 'c']); expect(subject.entityIds).toEqual(['z-edge', 'a-edge']);
   });
 
-  it('shows how to recover from a solver that cannot load, and generic wording for other failures', async () => {
-    const present = async (loadNative: () => Promise<never>) => {
-      const rejection = await createCadSketchNativeRuntime({ loadNative, wait: async () => undefined }).solve({ graph: graph(), parameters: {} });
-      if (rejection.kind !== 'rejected') throw new Error('Expected a rejection.');
-      return new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Outline', graph: graph(), rejection });
-    };
+  it('shows how to recover from a solver that failed rather than judged the edit, and generic wording for a failed judgement', async () => {
+    const document = parseCadDocument({ ...createCadDocument('Drawing', 'drawing'), schemaVersion: 2, features: [{ id: 'sketch', name: 'Outline', kind: 'sketch',
+      suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [], entities: [], relations: [] } }] });
+    const present = (loadNative: () => Promise<never>) => prepareCadEdits(document, [{ kind: 'append-sketch-entities', sketchId: 'sketch', geometry: graph() }],
+      createCadSketchNativeRuntime({ loadNative, wait: async () => undefined })).then(() => { throw new Error('Expected a refusal.'); }, (error: unknown) => error as CadSketchPreparationError);
     const unloaded = await present(async () => { throw new TypeError('Failed to fetch'); });
-    expect(unloaded.message).toBe(`Outline: ${CAD_SKETCH_NATIVE_LOAD_FAILED}`); expect(unloaded.feedback.reason).toBe('failed');
+    expect(unloaded).toBeInstanceOf(CadSketchPreparationError);
+    expect(unloaded).toMatchObject({ code: 'sketch-failed', message: `Outline: ${CAD_SKETCH_NATIVE_LOAD_FAILED}`, kernelMessage: 'Failed to fetch',
+      feedback: { reason: 'failed', cause: 'solver-unavailable', kernelMessage: 'Failed to fetch' } });
     const incompatible = await present(async () => { throw new CadSketchNativeProtocolError('Protocol 9 is not supported.'); });
-    expect(incompatible.message).toBe(`Outline: ${CAD_SKETCH_NATIVE_INCOMPATIBLE}`);
-    const failed = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Outline', graph: graph(),
-      rejection: { kind: 'rejected', reason: 'failed', message: 'Native trap at 0x2a.', diagnostics: unloaded.diagnostics } });
-    expect(failed.message).toBe('Outline: The sketch solver could not solve this edit.'); expect(failed.solverMessage).toBe('Native trap at 0x2a.');
+    expect(incompatible).toMatchObject({ message: `Outline: ${CAD_SKETCH_NATIVE_INCOMPATIBLE}`, feedback: { cause: 'solver-unavailable', kernelMessage: 'Protocol 9 is not supported.' } });
+    // A failed judgement, as a drag that stalled, names no such cause, whatever its words, and keeps the generic wording.
+    for (const message of ['Native trap at 0x2a.', CAD_SKETCH_NATIVE_LOAD_FAILED]) {
+      const failed = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Outline', graph: graph(),
+        rejection: { kind: 'rejected', reason: 'failed', message, diagnostics: unloaded.diagnostics } });
+      expect(failed.message).toBe('Outline: The sketch solver could not solve this edit.'); expect(failed.solverMessage).toBe(message);
+      expect(failed.feedback.cause).toBeUndefined();
+    }
   });
 
   it('preserves a proposed relation and exact operands while presenting a readable detached rejection', () => {

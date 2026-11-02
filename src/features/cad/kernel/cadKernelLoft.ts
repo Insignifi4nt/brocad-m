@@ -13,7 +13,7 @@ function validateLoftSolid(shape: Shape3D) {
   const solids = cadKernelSolids(shape);
   try {
     if (solids.length !== 1) throw new CadError('loft-invalid', 'A loft must produce exactly one closed solid. Revise the section shapes or spacing.');
-    if (!cadKernelIsValid(shape)) throw new CadError('loft-invalid', 'OpenCascade rejected the loft topology. Revise the section shapes or try ruled mode.');
+    if (!cadKernelIsValid(shape)) throw new CadError('loft-invalid', 'The loft made a body whose faces cross or leave gaps. Revise the section shapes or try ruled mode.');
     const explorer = new oc.TopExp_Explorer(shape.wrapped, oc.TopAbs_ShapeEnum.TopAbs_SHELL, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
     try {
       while (explorer.More()) {
@@ -45,11 +45,11 @@ function placeLoftSolid(shape: Shape3D, frame: CadResolvedFrame): Shape3D {
     transform.SetDisplacement(reference, target);
     // Own the native builder explicitly; the convenience transform hides it.
     builder = new oc.BRepBuilderAPI_Transform(shape.wrapped, transform, true, false);
-    if (!builder.IsDone()) throw new CadError('loft-placement', 'OpenCascade could not place the fitted loft in its datum frame.');
+    if (!builder.IsDone()) throw CadError.received('loft-placement', 'The loft could not be moved onto its datum plane. The move copies the loft exactly, so the loft built before it is likely damaged; rebuild the part, and if this repeats, revise its sections or recreate the datum plane.', { kernelMessage: 'OpenCascade could not place the fitted loft in its datum frame.' });
     const raw = builder.Shape();
     try {
       const placed = cast(raw);
-      if (!isShape3D(placed)) { cadKernelDisposeOwned(placed); throw new CadError('loft-placement', 'Datum placement did not preserve the native loft solid.'); }
+      if (!isShape3D(placed)) { cadKernelDisposeOwned(placed); throw CadError.received('loft-placement', 'The loft could not be moved onto its datum plane. The move copies the loft exactly, so the loft built before it is likely damaged; rebuild the part, and if this repeats, revise its sections or recreate the datum plane.', { kernelMessage: 'Datum placement did not preserve the native loft solid.' }); }
       result = placed;
     } finally { cadKernelDisposeOwned(raw); }
     validateLoftSolid(result);
@@ -81,11 +81,11 @@ export function buildCadLoftSolid(resolved: ReturnType<typeof resolveCadLoftSect
       builder.AddWire(sketch.wire.wrapped);
     }
     builder.Build();
-    if (!builder.IsDone()) throw new CadError('loft-failed', 'OpenCascade could not connect these sections. Revise their shapes or try ruled mode.');
+    if (!builder.IsDone()) throw new CadError('loft-failed', 'The loft could not connect these sections. They may twist against each other or differ too much; revise their shapes or try ruled mode.');
     const raw = builder.Shape();
     try {
       const built = cast(raw);
-      if (!isShape3D(built)) { cadKernelDisposeOwned(built); throw new CadError('loft-invalid', 'The loft did not produce a native solid.'); }
+      if (!isShape3D(built)) { cadKernelDisposeOwned(built); throw new CadError('loft-invalid', 'The loft made no closed solid. The sections may cross each other or one may be open; revise the sections or try ruled mode.'); }
       shape = built;
     } finally { cadKernelDisposeOwned(raw); }
     validateLoftSolid(shape);

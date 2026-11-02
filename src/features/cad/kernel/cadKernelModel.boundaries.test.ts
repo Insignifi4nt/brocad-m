@@ -78,7 +78,7 @@ describe('kernel bounds slack for inward shells', () => {
     shellDrift.xMm = 3e-6;
     const { diagnostics, message } = built(shelled());
     expect(diagnostics).toEqual(['shell-failed', 'rebuild-stopped']);
-    expect(message).toContain('extended outside the original body');
+    expect(message).toContain('grew outside the body');
   });
 });
 

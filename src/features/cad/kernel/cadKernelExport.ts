@@ -36,7 +36,7 @@ export function exportCadKernelStep(shapes: readonly { readonly shape: Shape3D; 
     oc.Interface_Static.SetIVal('write.step.schema', 5);
     const progress = own(new oc.Message_ProgressRange());
     attemptedWrite = true;
-    if (!writer.Perform(document, filename, progress)) throw new CadError('step-export', 'OpenCascade could not write the named STEP assembly.');
+    if (!writer.Perform(document, filename, progress)) throw new CadError('step-export', 'The bodies could not be written as a STEP file. A body may hold geometry the STEP writer cannot store; rebuild the part and export again, or export STL instead.');
     const file = oc.FS.readFile(path);
     // FS.readFile owns its allocated bytes; Blob snapshots the exact view. Copy
     // shared/native memory if an alternative FS supplies borrowed storage.

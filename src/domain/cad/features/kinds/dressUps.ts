@@ -1,6 +1,7 @@
 import { Type } from '@sinclair/typebox';
 import type { CadEdgeSelection, CadFaceQuery } from '../../cadTopology';
 import { CadEdgeSelectionSchema, CadFaceQuerySchema, resolveCadEdgeSelection, validateCadShellOpening } from '../../cadTopology';
+import type { CadRefusalCode } from '../../cadIssueCodes';
 import { CAD_PRECISION } from '../../../precision/cadPrecision';
 import type { CadFeatureCheckContext, CadFeatureDefinition, CadFeatureOf } from '../cadFeatureDefinitionTypes';
 import { cadFeatureField, cadFeatureScalarField, cadFeatureShape } from '../cadFeatureFields';
@@ -24,7 +25,7 @@ function checkEdgeTreatment(feature: CadFeatureOf<'fillet' | 'chamfer'>, context
   context.scalar(feature, 'radius');
   if (feature.selection) resolveCadEdgeSelection(feature.selection, context.document.parameters);
 }
-const edgeTreatmentDiagnostics = ['invalid-selector', 'invalid-selector-dimension', 'invalid-direction', 'selection-empty', 'selection-count-mismatch',
+const edgeTreatmentDiagnostics: readonly CadRefusalCode[] = ['invalid-selector', 'invalid-selector-dimension', 'invalid-direction', 'selection-empty', 'selection-count-mismatch',
   'selection-tangent-chain', 'unsupported-selection', 'invalid-dimension', 'missing-body'];
 
 export const fillet = {

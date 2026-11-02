@@ -4,6 +4,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import type { useWorkbenchAppController } from '@/app/useWorkbenchAppController';
 import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { cadFeatureProducesBody, createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { cadRefusalAt, cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
+import { cadBuildIssues, NO_CAD_BUILD_ISSUES, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
 import { archiveCadDocument, listCadDocuments, loadCadDocument, renameCadDocument, restoreCadDocument, saveCadDocument, type CadLibraryEntry } from '@/domain/cad/cadStorage';
 import { readExactUtf8Blob } from '@/domain/storage/exactTextStream';
@@ -30,20 +32,22 @@ import { CadSketchRegionReadTargetSchema, type CadSketchRegionReadTarget, type C
 import { Value } from '@sinclair/typebox/value';
 import { isCadImportData } from '@/domain/cad/cadImportData';
 import { needsCadSketchPreparation, prepareCadEdits, type CadSketchEditWarning, type CadSketchWarningsRecord } from './cadEditPreparation';
-import type { CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
+import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
+import { createCadKernelLoader, loadCadKernelClient } from './kernel/cadKernelLoader';
 import type { CadSketchConstraintInspection } from './cadSketchConstraintInspection';
 import { useCadSketchEditing } from './useCadSketchEditing';
 import { cadSketchGeneratorHandleError, cadSketchProfileViews, cadSketchWholeGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 type App = Pick<ReturnType<typeof useWorkbenchAppController>, 'connectedWorkbench' | 'workbenchInteractionLocked' | 'runAgentWorkbenchOperation'>
   & Partial<Pick<ReturnType<typeof useWorkbenchAppController>, 'showStatusToast'>>;
-type Kernel = ReturnType<typeof import('./kernel/cadKernelClient').createCadKernelClient>;
 export function downloadCadBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url; anchor.download = name; anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
+/** Imports the kernel client's module, only once a CAD operation first needs it, and creates a client. */
+const loadKernel = () => import('./kernel/cadKernelClient').then(module => module.createCadKernelClient());
 const fileBase = (name: string) => name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').slice(0, 100) || 'part';
 function importUnitReceipt(declaration: DxfUnitDeclaration) {
   if (declaration.status !== 'malformed' || declaration.rawValue === null || declaration.rawValue.length <= 160) return declaration;
@@ -56,6 +60,8 @@ function matchingSectionResult(value: unknown, request: CadSectionRequest, param
   }
   return value;
 }
+/** What a section is cut for: a Section for CAM step, or a DXF export, which is no CAM step. */
+export type CadSectionIntent = 'section' | 'dxf-export';
 type CadPreviewArtifact = PreviewCaptureArtifact & { documentId: string; viewState: CadViewportState; sketchId: string | null; curveId: string | null };
 
 export function useCadController(app: App, session: CadSession, open: boolean, setOpen: (open: boolean) => void,
@@ -63,6 +69,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   useCadUnloadGuard(session);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const [build, setBuild] = useState<CadBuildResult | null>(null);
+  /** The issues of each published build, made once as it is published: never while a feature is hovered, dragged or previewed. */
+  const buildIssues = useRef(new WeakMap<CadBuildResult, CadBuildIssues>());
   const [buildVersion, setBuildVersion] = useState<string | null>(null);
   const [buildState, setBuildState] = useState<'idle' | 'building' | 'ready' | 'error'>('idle');
   const [featurePreview, setFeaturePreview] = useState<CadFeaturePreviewState>({ kind: 'idle' });
@@ -85,10 +93,12 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   const setViewportControls = useCallback((controls: CadWorkbenchViewportControls | null) => { viewport.current = controls; }, []);
   const busy = useRef(false);
   const preparing = useRef<AbortController | null>(null);
-  const sketchSolver = useRef<Promise<CadSketchSolverClient> | null>(null);
+  // A solver module that cannot be loaded refuses the sketch being solved, and the next request loads it again.
+  const [sketchSolvers] = useState(() => createCadSketchSolverLoader(() => import('./sketch-solver/cadSketchSolverClient').then(module => module.createCadSketchSolverClient())));
   const constraintInspections = useRef(new WeakMap<CadDocument, Map<string, CadSketchConstraintInspection>>());
   const current = useRef({ app, open }); current.current = { app, open };
-  const kernel = useRef<Promise<Kernel> | null>(null);
+  // A kernel module that cannot be loaded refuses the request as kernel-unavailable, and the next request loads it again.
+  const [kernels] = useState(() => createCadKernelLoader(loadKernel));
   const buildAbort = useRef<AbortController | null>(null);
   const boundAdapter = useRef(app.connectedWorkbench?.adapter);
   const sketchEditing = useCadSketchEditing({ session, storage: app.connectedWorkbench?.adapter ?? null, open,
@@ -99,7 +109,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       const workbench = connected(); editable(expectedVersion); session.assertWorkflowClosed('editor');
       return { document: session.getSnapshot().document, storage: workbench.adapter };
     },
-    createKernel: async () => (await import('./kernel/cadKernelClient')).createCadKernelClient(),
+    createKernel: () => loadCadKernelClient(loadKernel),
     prepare: prepareDocument,
     onChange: setFeaturePreview
   }), session);
@@ -109,7 +119,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       const workbench = connected(); editable(expectedVersion); session.assertWorkflowClosed(scope);
       return { document: session.getSnapshot().document, storage: workbench.adapter };
     },
-    createKernel: async () => (await import('./kernel/cadKernelClient')).createCadKernelClient(),
+    createKernel: () => loadCadKernelClient(loadKernel),
     prepare: prepareDocument,
   }), session);
   useLayoutEffect(() => { featureInputCoordinator.invalidate(); }, [featureInputCoordinator, snapshot.version, app.connectedWorkbench?.adapter, open, app.workbenchInteractionLocked, storageBusy]);
@@ -122,26 +132,16 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     setOpen(value);
   }
 
-  function getKernel() {
-    kernel.current ??= import('./kernel/cadKernelClient').then(module => module.createCadKernelClient());
-    return kernel.current;
-  }
-  function getSketchSolver() {
-    if (sketchSolver.current) return sketchSolver.current;
-    const pending = import('./sketch-solver/cadSketchSolverClient').then(module => module.createCadSketchSolverClient());
-    sketchSolver.current = pending;
-    void pending.catch(() => { if (sketchSolver.current === pending) sketchSolver.current = null; });
-    return pending;
-  }
+  function getKernel() { return kernels.load(); }
   /** Prepares a previewed batch: every preview goes through here, and none looks for solve warnings. */
   async function prepareDocument(document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) {
     return needsCadSketchPreparation(document, edits)
-      ? (await prepareCadEdits(document, edits, await getSketchSolver(), signal)).document : applyCadEdits(document, edits);
+      ? (await prepareCadEdits(document, edits, sketchSolvers.solver(), signal)).document : applyCadEdits(document, edits);
   }
   /** As `prepareDocument`, with warnings about its solves, for an edit that is committed rather than previewed. */
   async function prepareCommit(document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) {
     return needsCadSketchPreparation(document, edits)
-      ? prepareCadEdits(document, edits, await getSketchSolver(), signal, { warnings: true }) : { document: applyCadEdits(document, edits), sketchWarnings: [] };
+      ? prepareCadEdits(document, edits, sketchSolvers.solver(), signal, { warnings: true }) : { document: applyCadEdits(document, edits), sketchWarnings: [] };
   }
   /**
    * Shows each warning of an accepted edit's solves as a status toast that names its sketch, and keeps them with the version that edit made, so
@@ -155,13 +155,14 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     let inspection = constraintInspections.current.get(source)?.get(sketchId);
     if (!inspection) {
       const { inspectCadSketchConstraints } = await import('./cadSketchConstraintInspection'); signal?.throwIfAborted();
-      inspection = await inspectCadSketchConstraints(source, sketchId, getSketchSolver, signal);
+      inspection = await inspectCadSketchConstraints(source, sketchId, sketchSolvers.load, signal);
       signal?.throwIfAborted();
     }
     return inspection;
   }
-  function publishBuild(result: CadBuildResult, version: string) {
+  function publishBuild(result: CadBuildResult, version: string, document: CadDocument) {
     const state = result.diagnostics.length ? 'error' : 'ready';
+    buildIssues.current.set(result, cadBuildIssues(document, result, version));
     liveBuild.current = { result, version, state };
     setErrorMessage(null);
     setBuild(result); setBuildVersion(version); setBuildState(state);
@@ -186,11 +187,11 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   }, [app.connectedWorkbench?.adapter, session]);
   useEffect(() => () => {
     preparing.current?.abort();
-    void sketchSolver.current?.then(client => client.dispose(), () => undefined);
+    sketchSolvers.dispose();
     libraryAbort.current?.abort(); session.setWorkflowOpen(false, 'library');
     importAbort.current?.abort();
     buildAbort.current?.abort();
-    void kernel.current?.then(value => value.dispose()); kernel.current = null;
+    kernels.dispose();
     if (previewUrl.current) { const url = previewUrl.current; window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }
   }, []);
 
@@ -206,7 +207,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const timer = setTimeout(() => {
       void getKernel().then(client => client.build(snapshot.document, controller.signal)).then(result => {
         if (controller.signal.aborted || session.getSnapshot().version !== snapshot.version) return;
-        publishBuild(result, snapshot.version);
+        publishBuild(result, snapshot.version, snapshot.document);
       }).catch((error: unknown) => {
         if (controller.signal.aborted) return;
         setBuildState('error'); setErrorMessage(userFacingMessage(error, 'CAD kernel could not build this model.'));
@@ -280,10 +281,10 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       const owner = new AbortController(); preparing.current = owner;
       const combined = signal ? AbortSignal.any([signal, owner.signal]) : owner.signal;
       session.setWorkflowOpen(true, 'preparation');
-      const solver = getSketchSolver();
+      const solver = sketchSolvers.solver();
       let warnings: readonly CadSketchEditWarning[] = [];
       return session.editPrepared(expectedVersion ?? source.version, async (document, signal) => {
-        const prepared = await prepareCadEdits(document, captured, await solver, signal, { warnings: true });
+        const prepared = await prepareCadEdits(document, captured, solver, signal, { warnings: true });
         warnings = prepared.sketchWarnings; return prepared.document;
       }, combined, () => {
         if (!current.current.open || current.current.app.connectedWorkbench !== workbench || current.current.app.workbenchInteractionLocked)
@@ -578,7 +579,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     // A generator proposal is read as its edit is prepared, through the solver; a Trim or Extend query beside it is refused unprepared.
     let query = captured, source = document;
     if (captured.proposal?.generator !== undefined && captured.trimAt === undefined && captured.extendAt === undefined) {
-      const prepared = await prepareCadSketchRegionProposal(document, sketchId, captured.proposal, await getSketchSolver(), signal);
+      const prepared = await prepareCadSketchRegionProposal(document, sketchId, captured.proposal, sketchSolvers.solver(), signal);
       query = { ...captured, proposal: prepared.proposal }; source = prepared.document;
       signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     }
@@ -604,7 +605,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
         // A generator proposal is read as its edit is prepared, through the solver.
         let prepared = { document, proposal: capturedProposal };
         if (capturedProposal.generator !== undefined) {
-          prepared = await prepareCadSketchRegionProposal(document, sketchId, capturedProposal, await getSketchSolver(), signal);
+          prepared = await prepareCadSketchRegionProposal(document, sketchId, capturedProposal, sketchSolvers.solver(), signal);
           signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
         }
         text = JSON.stringify(readCadSketchRegionReference(prepared.document, sketchId, capturedTarget, prepared.proposal));
@@ -719,7 +720,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const document = session.getSnapshot().document;
     const result = await (await getKernel()).build(document, signal);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
-    publishBuild(result, expectedVersion);
+    publishBuild(result, expectedVersion, document);
     return result;
   }
   const topology = createCadTopologyActions({
@@ -744,23 +745,41 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     return inputToken === undefined ? topology.tangentChain(request, expectedVersion, signal, scope)
       : featureInputCoordinator.tangentChain(request, expectedVersion, signal, scope, inputToken);
   }
-  async function inspectSection(request: CadSectionRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
+  /**
+   * The section `request` cuts, for `intent`, which every caller states: a Section for CAM step names its body as the source of a refusal,
+   * the visible dialog's preview and the agent's alike, and a DXF export names the export and that body, since its section is no CAM step.
+   * `scope` is only the workflow the caller
+   * may run inside, so an agent, which owns none, still names its intent.
+   */
+  async function inspectSection(request: CadSectionRequest, expectedVersion: string, intent: CadSectionIntent, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     signal?.throwIfAborted();
     const section = { ...parseCadSectionRequest(request) };
     const document = session.getSnapshot().document;
-    const result = await (await getKernel()).section(document, section, signal);
+    // A DXF export records itself, so a refusal it shares with an earlier Section for CAM is no CAM step's here.
+    const refused = (error: unknown) => cadRefusalAt(error, intent === 'section' ? { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }
+      : { kind: 'export-operation', format: 'dxf-section', sourceId: section.bodyId }, since);
+    const result = await (await getKernel()).section(document, section, signal).catch((error: unknown) => { throw refused(error); });
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
-    return matchingSectionResult(result, section, document.parameters);
+    // Reading the result evaluates the offset again, so a refusal there is the step's too.
+    try { return matchingSectionResult(result, section, document.parameters); } catch (error) { throw refused(error); }
   }
   type CamSource = { kind: 'sketch'; sketchId: string } | { kind: 'section'; section: CadSectionRequest };
   async function prepareHandoffGeometry(source: CamSource, document: CadDocument, signal?: AbortSignal) {
+    const since = cadRefusalMark();
     const { cadSketchToCam, cadEntitiesToCam } = await import('@/domain/cad/cadCam');
-    if (source.kind === 'sketch') return { path: cadSketchToCam(document, source.sketchId), sourceReceipt: { sketchId: source.sketchId } };
-    const section = matchingSectionResult(await (await getKernel()).section(document, source.section, signal), source.section, document.parameters);
-    return { path: cadEntitiesToCam(section.entities, document), sourceReceipt: { section: {
-      bodyId: section.bodyId, plane: section.plane, offset: section.offset, contourCount: section.contourCount
-    } } };
+    // Each refusal names the CAM step and its source: the sketch sent, or the body a section cuts.
+    try {
+      if (source.kind === 'sketch') return { path: cadSketchToCam(document, source.sketchId), sourceReceipt: { sketchId: source.sketchId } };
+      const section = matchingSectionResult(await (await getKernel()).section(document, source.section, signal), source.section, document.parameters);
+      return { path: cadEntitiesToCam(section.entities, document), sourceReceipt: { section: {
+        bodyId: section.bodyId, plane: section.plane, offset: section.offset, contourCount: section.contourCount
+      } } };
+    } catch (error) {
+      throw cadRefusalAt(error, source.kind === 'sketch' ? { kind: 'cam-operation', operation: 'send-sketch', sourceId: source.sketchId }
+        : { kind: 'cam-operation', operation: 'section', sourceId: source.section.bodyId }, since);
+    }
   }
   async function handoffToCam(source: CamSource, expectedVersion: string, signal?: AbortSignal, scope?: 'section') {
     editable(expectedVersion); session.assertWorkflowClosed(scope); assertCanSwitch();
@@ -809,33 +828,42 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     return handoffToCam({ kind: 'section', section: { ...parseCadSectionRequest(request) } }, expectedVersion, signal, scope);
   }
   async function exportDxf(sketchId: string, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, scope?: 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     const { cadSketchToDxf } = await import('@/domain/cad/cadCam');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const document = session.getSnapshot().document;
-    const text = cadSketchToDxf(document, sketchId);
+    // Each refusal names the export and the sketch it writes.
+    let text: string;
+    try { text = cadSketchToDxf(document, sketchId); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-sketch', sourceId: sketchId }, since); }
     const fileName = `${fileBase(document.name)}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);
     return { fileName, downloadRequested: true, sketchId, version: expectedVersion };
   }
   async function exportCurveDxf(curveId: string, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, scope?: 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     const { cadCurveToDxf } = await import('@/domain/cad/cadCurveDxf');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const document = session.getSnapshot().document;
-    const text = cadCurveToDxf(document, curveId);
+    // Each refusal names the export and the curve it writes.
+    let text: string;
+    try { text = cadCurveToDxf(document, curveId); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-curve', sourceId: curveId }, since); }
     const fileName = `${fileBase(document.name)}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);
     return { fileName, downloadRequested: true, curveId, version: expectedVersion };
   }
   async function exportSectionDxf(request: CadSectionRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope); signal?.throwIfAborted();
     const document = session.getSnapshot().document;
-    const section = await inspectSection(request, expectedVersion, signal, scope);
+    const section = await inspectSection(request, expectedVersion, 'dxf-export', signal, scope);
     const [{ cadEntitiesToDxf }, { cadSketchPluginNoteLines }] = await Promise.all([import('@/domain/cad/cadDxfExport'), import('@/domain/cad/cadCam')]);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const notes = cadSketchPluginNoteLines(document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document) ? [feature] : []));
-    const text = cadEntitiesToDxf(section.entities, notes);
+    // Curves DXF cannot write are the export's refusal too.
+    let text: string;
+    try { text = cadEntitiesToDxf(section.entities, notes); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-section', sourceId: section.bodyId }, since); }
     const fileName = `${fileBase(document.name)}-section-${section.plane}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);
     return { fileName, downloadRequested: true, version: expectedVersion, section: {
@@ -848,7 +876,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     openDocument, newDocument, importDocument, importDocumentValue, importSolidSource, importDxfSource, importDxfCurveSource, importFile, confirmImport, cancelImport, measureSketch, inspectSketchConstraints, inspectSketchHandles, measureCurve, inspectSketchRegions, readSketchRegionReference, inspectPlugin, inspectParameters, inspectPlane, inspectLoft, inspectSweep, exportDocument, exportSolid, exportDxf, exportCurveDxf, exportSectionDxf, inspectBuild, inspectSection, sendSectionToCam, sendToCam, back,
     setViewportControls, readViewport: (expectedVersion: string) => getViewport(expectedVersion).getState(), changeViewport, captureViewport, previewArtifact,
     inspectTopology, resolveTopologyPicks, topologyAdjacency, topologyTangentChain, buildFeatureInput: featureInputCoordinator.build, releaseFeatureInput,
-    build, buildVersion, buildState, featurePreview, previewFeature: featurePreviewCoordinator.update, errorMessage, setErrorMessage, storageBusy, isBusy, isOpen: () => current.current.open,
+    build, buildVersion, buildState, buildIssues: (build && buildIssues.current.get(build)) ?? NO_CAD_BUILD_ISSUES, buildIssuesOf: (result: CadBuildResult) => buildIssues.current.get(result) ?? NO_CAD_BUILD_ISSUES, featurePreview, previewFeature: featurePreviewCoordinator.update, errorMessage, setErrorMessage, storageBusy, isBusy, isOpen: () => current.current.open,
     undo: (expected?: string) => { editable(expected); session.undo(expected); },
     redo: (expected?: string) => { editable(expected); session.redo(expected); }
   };

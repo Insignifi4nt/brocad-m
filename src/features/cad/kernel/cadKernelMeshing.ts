@@ -8,16 +8,16 @@ interface MeshOptions { readonly tolerance: number; readonly angularTolerance: n
 type TopologyKind = 'face' | 'edge';
 
 function checkedCount(count: number, multiple: number): number {
-  if (!Number.isSafeInteger(count) || count < 0 || count % multiple) throw new CadError('invalid-mesh', 'The kernel returned an invalid preview buffer size.');
+  if (!Number.isSafeInteger(count) || count < 0 || count % multiple) throw CadError.received('invalid-mesh', 'The body could not be drawn: its display mesh came back incomplete. Rebuild the part.', { kernelMessage: 'The kernel returned an invalid preview buffer size.' });
   return count;
 }
 
 /** Native pointers are read only after checking sizes, against the current heap. */
 function readNumbers(pointer: number, count: number, format: 'float' | 'unsigned' | 'signed'): number[] {
   const buffer = getOC().wasmMemory.buffer;
-  if (!Number.isSafeInteger(pointer) || pointer < -0x80000000 || pointer > 0xffffffff) throw new CadError('invalid-mesh', 'The kernel returned an invalid preview buffer pointer.');
+  if (!Number.isSafeInteger(pointer) || pointer < -0x80000000 || pointer > 0xffffffff) throw CadError.received('invalid-mesh', 'The body could not be drawn: its display mesh came back incomplete. Rebuild the part.', { kernelMessage: 'The kernel returned an invalid preview buffer pointer.' });
   const start = (pointer >>> 0) / 4;
-  if (!Number.isInteger(start) || start + count > buffer.byteLength / 4) throw new CadError('invalid-mesh', 'The kernel returned an invalid preview buffer.');
+  if (!Number.isInteger(start) || start + count > buffer.byteLength / 4) throw CadError.received('invalid-mesh', 'The body could not be drawn: its display mesh came back incomplete. Rebuild the part.', { kernelMessage: 'The kernel returned an invalid preview buffer.' });
   const heap = format === 'float' ? new Float32Array(buffer) : format === 'unsigned' ? new Uint32Array(buffer) : new Int32Array(buffer);
   return Array.from(heap.subarray(start, start + count));
 }
@@ -49,16 +49,16 @@ function transformedIndices(shape: TopoDS_Shape, localized: TopoDS_Shape, transf
               const modified = transform.ModifiedShape(original);
               try {
                 const localizedIndex = modified.IsNull() ? 0 : localizedMap.FindIndex(modified);
-                if (!localizedIndex) throw new CadError('topology-mapping', 'Preview translation could not identify an exact source element.');
+                if (!localizedIndex) throw CadError.received('topology-mapping', 'The body could not be drawn: its display faces and edges differ from the exact body. Rebuild the part; if this repeats, revise the dimensions of this feature slightly.', { kernelMessage: 'Preview translation could not identify an exact source element.' });
                 const sourceIndex = sourceMap.Add(original), key = `${kind}:${localizedIndex}`;
                 const previous = indices.get(key);
-                if (previous !== undefined && previous !== sourceIndex) throw new CadError('topology-mapping', 'Preview translation does not preserve exact topology identity.');
+                if (previous !== undefined && previous !== sourceIndex) throw CadError.received('topology-mapping', 'The body could not be drawn: its display faces and edges differ from the exact body. Rebuild the part; if this repeats, revise the dimensions of this feature slightly.', { kernelMessage: 'Preview translation does not preserve exact topology identity.' });
                 indices.set(key, sourceIndex);
               } finally { modified.Nullify(); modified.delete(); }
             } finally { original.Nullify(); original.delete(); }
             explorer.Next();
           }
-          if (sourceMap.Extent() !== localizedMap.Extent()) throw new CadError('topology-mapping', 'Preview translation changed the exact topology inventory.');
+          if (sourceMap.Extent() !== localizedMap.Extent()) throw CadError.received('topology-mapping', 'The body could not be drawn: its display faces and edges differ from the exact body. Rebuild the part; if this repeats, revise the dimensions of this feature slightly.', { kernelMessage: 'Preview translation changed the exact topology inventory.' });
         } finally { explorer.delete(); }
       } finally { localizedMap.delete(); }
     } finally { sourceMap.delete(); }
@@ -98,7 +98,7 @@ export function meshCadKernelPreview(shape: Shape3D, bounds: CadMesh['bounds'], 
             const vertices = checkedCount(raw.getVerticesSize(), 3);
             const normals = checkedCount(raw.getNormalsSize(), 3);
             const triangles = checkedCount(raw.getTrianglesSize(), 3);
-            if (vertices !== normals) throw new CadError('invalid-mesh', 'The kernel returned mismatched preview vertices and normals.');
+            if (vertices !== normals) throw CadError.received('invalid-mesh', 'The body could not be drawn: its display mesh came back incomplete. Rebuild the part.', { kernelMessage: 'The kernel returned mismatched preview vertices and normals.' });
             const groups = readNumbers(raw.getFaceGroupsPtr(), checkedCount(raw.getFaceGroupsSize(), 3), 'signed');
             const faceGroups: ShapeMesh['faceGroups'] = [];
             for (let index = 0; index < groups.length; index += 3) faceGroups.push({ start: groups[index], count: groups[index + 1], faceId: sourceIndex(indices, 'face', groups[index + 2]) });

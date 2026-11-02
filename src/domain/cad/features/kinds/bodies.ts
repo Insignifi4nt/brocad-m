@@ -1,6 +1,7 @@
 import { Type } from '@sinclair/typebox';
 import type { CadPlane } from '../../cadDocument';
 import { CadError } from '../../cadError';
+import type { CadRefusalCode } from '../../cadIssueCodes';
 import { CadPlaneSchema } from '../../cadPrimitives';
 import { MAX_CAD_PATTERN_COUNT, MIN_CAD_PATTERN_COUNT, resolveCadCircularPattern } from '../../cadPatterns';
 import { CAD_PRECISION } from '../../../precision/cadPrecision';
@@ -40,7 +41,7 @@ export const transform = {
 /** Instances of a pattern, including the original. A literal until S8's format cut lets it hold expressions. */
 const patternCount = cadFeatureField(Type.Integer({ minimum: MIN_CAD_PATTERN_COUNT, maximum: MAX_CAD_PATTERN_COUNT }),
   { scalar: { quantity: 'count', integer: true, min: MIN_CAD_PATTERN_COUNT, max: MAX_CAD_PATTERN_COUNT, literal: true, repeats: true } });
-const patternDiagnostics = ['invalid-dimension', 'pattern-limit', 'instance-limit', 'invalid-instances', 'missing-body'];
+const patternDiagnostics: readonly CadRefusalCode[] = ['invalid-dimension', 'pattern-limit', 'instance-limit', 'invalid-instances', 'missing-body'];
 
 const linearPatternShape = cadFeatureShape(Type.Literal('linear-pattern'), {
   sourceId: cadSourceBodyField,

@@ -128,7 +128,7 @@ function WorkbenchApp({ services }: AppProps) {
           onFailure={() => { cad.cancelImport(); closeCadSection(); closeCadDxfExport(); }}>
         <Suspense fallback={<p className="p-4 text-xs" role="status">Opening CAD workspace…</p>}>
           <CadWorkbench
-            document={cad.sketchEditing.snapshot.document} documentVersion={cad.sketchEditing.snapshot.version} build={cad.build} buildVersion={cad.buildVersion} buildState={cad.buildState}
+            document={cad.sketchEditing.snapshot.document} documentVersion={cad.sketchEditing.snapshot.version} build={cad.build} buildVersion={cad.buildVersion} buildState={cad.buildState} buildIssues={cad.buildIssues}
             featurePreview={cad.featurePreview} onFeaturePreview={cad.sketchEditing.sketchId ? undefined : cad.previewFeature}
             dirty={cad.sketchEditing.snapshot.dirty} canUndo={cad.sketchEditing.snapshot.canUndo} canRedo={cad.sketchEditing.snapshot.canRedo}
             errorMessage={cad.errorMessage} onStatusMessage={app.showStatusToast} storageBusy={cad.storageBusy || app.workbenchInteractionLocked}
@@ -180,11 +180,11 @@ function WorkbenchApp({ services }: AppProps) {
             onClose={closeCadDxfExport}
             onExportSketch={(id, version, signal) => cad.exportDxf(id, version, signal, 'dxf-export')}
             onExportCurve={(id, version, signal) => cad.exportCurveDxf(id, version, signal, 'dxf-export')}
-            onInspectSection={(request, version, signal) => cad.inspectSection(request, version, signal, 'dxf-export')}
+            onInspectSection={(request, version, signal) => cad.inspectSection(request, version, 'dxf-export', signal, 'dxf-export')}
             onExportSection={(request, version, signal) => cad.exportSectionDxf(request, version, signal, 'dxf-export')} /></Suspense>}
           {cadSection && <CadSectionDialog bodies={cad.build?.meshes ?? []} initialBodyId={cadSection.bodyId} version={cadSection.version}
             onClose={closeCadSection}
-            onInspect={(request, version, signal) => cad.inspectSection(request, version, signal, 'section')}
+            onInspect={(request, version, signal) => cad.inspectSection(request, version, 'section', signal, 'section')}
             onSend={(request, version, signal) => cad.sendSectionToCam(request, version, signal, 'section')} />}
           {cad.importFile && <CadImportDialog file={cad.importFile.file} onImport={cad.confirmImport} onCancel={cad.cancelImport} />}
         </Suspense>

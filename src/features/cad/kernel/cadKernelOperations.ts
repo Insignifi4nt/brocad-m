@@ -5,7 +5,7 @@ import { CAD_PRECISION } from '../../../domain/precision/cadPrecision';
 
 /** Explicit native builder lifetimes also cover rejected kernel operations. */
 export function applyCadEdgeOperation(shape: Shape3D, edges: readonly Edge[], kind: 'fillet' | 'chamfer', radius: number, tangentPropagation = false): Shape3D {
-  if (!edges.length) throw new CadError('selection-empty', 'Select at least one exact edge.');
+  if (!edges.length) throw new CadError('selection-empty', 'Select at least one exact edge.', { expected: null });
   const oc = getOC();
   const builder = kind === 'fillet'
     ? new oc.BRepFilletAPI_MakeFillet(shape.wrapped, oc.ChFi3d_FilletShape.ChFi3d_Rational)
@@ -19,12 +19,13 @@ export function applyCadEdgeOperation(shape: Shape3D, edges: readonly Edge[], ki
         const propagated = builder.Edge(contour, index);
         try {
           if (!edges.some(edge => edge.wrapped.IsSame(propagated))) throw new CadError('selection-tangent-chain',
-            `OpenCascade would ${kind} additional tangent edges. Enable Follow tangent edges or select the complete tangent chain explicitly.`);
+            `The ${kind} would also reach edges tangent to the selected ones. Enable Follow tangent edges or select the complete tangent chain.`);
         } finally { cadKernelDisposeOwned(propagated); }
       }
     }
     builder.Build();
-    if (!builder.IsDone()) throw new CadError('kernel-operation-failed', `OpenCascade could not ${kind} the selected edges. Reduce the radius or revise the selection.`);
+    const size = kind === 'fillet' ? 'radius' : 'distance';
+    if (!builder.IsDone()) throw new CadError('kernel-operation-failed', `The ${kind} could not be applied to the selected edges. The ${size} may be too large for an edge or a face next to it; reduce the ${size} or choose other edges.`);
     const raw = builder.Shape();
     try {
       const result = cast(raw);
@@ -50,7 +51,7 @@ export function applyCadShell(shape: Shape3D, opening: Face, thickness: number):
     // OpenCascade uses negative offset for inward walls; the public feature is positive.
     builder.MakeThickSolidByJoin(shape.wrapped, faces, -thickness, CAD_PRECISION.kernelConfusionMm,
       oc.BRepOffset_Mode.BRepOffset_Skin, false, false, oc.GeomAbs_JoinType.GeomAbs_Arc, false);
-    if (!builder.IsDone()) throw new CadError('shell-failed', 'OpenCascade could not shell this body. Reduce the thickness or choose another planar opening.');
+    if (!builder.IsDone()) throw new CadError('shell-failed', 'The shell could not be made. The thickness may be too large for a thin or curved region; reduce the thickness or choose another planar opening.');
     const raw = builder.Shape();
     try {
       const result = cast(raw);

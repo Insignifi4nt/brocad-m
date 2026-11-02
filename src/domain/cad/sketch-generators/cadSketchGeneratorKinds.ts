@@ -620,7 +620,7 @@ const offset: CadSketchGeneratorKind<Of<'offset'>> = {
       try { result = offsetCadSketchLoop(edges, area > 0 ? distance : -distance).edges; }
       catch (error) {
         // The reason a detached offset of the chain gives, with its code, named for the generator.
-        if (error instanceof CadError) throw new CadError(error.code, `${name}: ${error.message}`);
+        if (error instanceof CadError) throw CadError.checked(error.code, `${name}: ${error.message}`, error.facts);
         throw invalid(`${name}: the chain cannot be offset exactly.`);
       }
       const after = chainArea(result);
