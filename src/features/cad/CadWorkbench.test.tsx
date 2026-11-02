@@ -499,9 +499,40 @@ describe('CAD sketch interaction', () => {
     await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'hex' }));
     await click('Delete selected feature or profile'); await click('Delete'); expect(ids()).toEqual([]);
     await act(async () => currentSession.undo()); expect(ids()).toEqual(['hex', 'tie', 'off']);
+    // Its row in the sketch's Relations list asks too, from the Delete key, from its menu, and as the selected row.
+    const toggle = container.querySelector<HTMLButtonElement>('[data-cad-sketch-relation-list] .cad-sketch-relation-list-toggle');
+    if (toggle?.getAttribute('aria-expanded') === 'false') await act(async () => toggle.click());
+    const row = () => { const found = container.querySelector<HTMLButtonElement>('button[data-cad-sketch-relation-row="hex"]'); if (!found) throw new Error('Hex relation row missing.'); return found; };
+    const rowKey = async () => act(async () => { row().focus(); row().dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })); });
+    await rowKey(); expect(dialog()?.textContent).toContain(asked); await click('Cancel'); expect(ids()).toEqual(['hex', 'tie', 'off']);
+    await act(async () => row().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })));
+    const remove = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(entry => entry.textContent?.trim() === 'Delete'); if (!remove) throw new Error('Row Delete missing.');
+    await act(async () => remove.click()); expect(dialog()?.textContent).toContain(asked); await click('Delete'); expect(ids()).toEqual([]);
+    await act(async () => currentSession.undo()); expect(ids()).toEqual(['hex', 'tie', 'off']);
+    await act(async () => row().click()); await rowKey(); expect(dialog()?.textContent).toContain(asked); await click('Delete'); expect(ids()).toEqual([]);
+    await act(async () => currentSession.undo()); expect(ids()).toEqual(['hex', 'tie', 'off']);
     // A shape nothing else uses goes at once.
     await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'off' }));
     await click('Delete selected feature or profile'); expect(dialog()).toBeNull(); expect(ids()).toEqual(['hex', 'tie']);
+  });
+  it('asks before Delete on the Relations row of a shape whose mark is hidden removes a relation on it', async () => {
+    const ring = { id: 'ring', kind: 'generator', idPrefix: 'ring', name: 'Ring', construction: false, geometry: { kind: 'circle', x: 30, y: 0, radius: 4 } } as const;
+    const initial = parseCadDocument({ ...createCadDocument('Ring', 'ring-delete'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Ring', plane: 'XY', offset: 0,
+      suppressed: false, profiles: [], graph: { points: [{ id: 'pin', position: [30, 0] }], entities: [], relations: [ring, { id: 'hold', kind: 'coincident', pointIds: ['pin', 'ring_k0'] }] } }] });
+    await mount(initial, { build: null, buildState: 'idle' });
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const toggle = container.querySelector<HTMLButtonElement>('[data-cad-sketch-relation-list] .cad-sketch-relation-list-toggle');
+    if (toggle?.getAttribute('aria-expanded') === 'false') await act(async () => toggle.click());
+    const row = container.querySelector<HTMLButtonElement>('button[data-cad-sketch-relation-row="ring"]'); if (!row) throw new Error('Ring row missing.');
+    // With relation marks hidden, the row is the only thing that names the shape's relation.
+    await act(async () => setCadPreferences({ ...getCadPreferences(), showRelations: false }));
+    try {
+      await act(async () => { row.focus(); row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })); });
+      expect(container.querySelector('[role="dialog"]')?.textContent).toContain('Delete Ring?This also removes one relation that uses its geometry: ');
+      expect(currentDocument).toBe(initial);
+      await click('Delete');
+      expect(sketchGraph().relations).toEqual([]); expect(sketchGraph().points.map(point => point.id)).toEqual(['pin']);
+    } finally { setCadPreferences({ ...getCadPreferences(), showRelations: true }); }
   });
   it('reopens a circular pattern of count 1, which draws no copy, from its tree row and its Relations row', async () => {
     const pattern = { id: 'pat', kind: 'generator', idPrefix: 'pat', construction: false, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 } } as const;

@@ -1595,10 +1595,18 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     const drawn = (id: string) => drawnAnnotations?.graph === graph && cadSketchDimensionPick(drawnAnnotations, id) !== null;
     const ids = selected ? removableSelectedRelationIds(graph) : annotations.map(pick => pick.id).filter(drawn);
     if (!ids.length) return;
-    submitEdit(signal => props.onEditMany(ids.map(id => ({ kind: 'remove-sketch-relation' as const, sketchId: sketch.id, relationId: id })), signal), () => {
+    const removed = () => {
       setGraphPick(current => current?.dimensions?.some(pick => ids.includes(pick.id)) ? null : current);
       setRelationRowPick(current => current?.relationIds.some(id => ids.includes(id)) ? null : current);
-    }, SKETCH_RELATION_FAILURE);
+    };
+    // Shapes' rows go as their shapes do, naming first what goes with them. A selection mixing shapes with other relations removes
+    // exactly what it lists, so it refuses while anything else depends on those shapes.
+    if (ids.every(id => graph.relations.some(relation => relation.id === id && relation.kind === 'generator'))) {
+      deleteFromSketch(() => ids.length === 1 ? prepareCadSketchShapeDeletion(sketch, ids[0])
+        : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [], relationIds: ids, name: `${ids.length} shapes` }), removed);
+      return;
+    }
+    submitEdit(signal => props.onEditMany(ids.map(id => ({ kind: 'remove-sketch-relation' as const, sketchId: sketch.id, relationId: id })), signal), removed, SKETCH_RELATION_FAILURE);
   };
   /**
    * Delete and Backspace on a focused label, point or edge act on the selection, as they do on the canvas: Delete removes the selected
@@ -2162,13 +2170,14 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   };
   /**
    * Delete on a row removes the whole relation selection, drawn and listed alike, in one undo step when the row is part of it, otherwise the
-   * row's own relation; a pattern detaches through its editor.
+   * row's own relation; a pattern detaches through its editor, and a shape goes as Delete shape takes it.
    */
   const deleteRelationRow = (relation: CadSketchGraphRelation) => {
     const graph = sketch?.graph;
     if (!sketch || !graph || interactionState.current.locked) return;
     if (relation.kind === 'linear-pattern') { editSketchPattern(relation.id, true); return; }
     if (selectedRelationIds.includes(relation.id)) { deleteSketchAnnotations(); return; }
+    if (relation.kind === 'generator') { deleteShape(sketch, relation.id); return; }
     const pick = drawnRelationPick(relation.id);
     if (pick) { deleteSketchAnnotations([pick]); return; }
     applySketchEdits([{ kind: 'remove-sketch-relation' as const, sketchId: sketch.id, relationId: relation.id }]);
