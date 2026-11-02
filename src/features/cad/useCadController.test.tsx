@@ -47,6 +47,16 @@ vi.mock('./sketch-solver/cadSketchSolverClient', () => ({ createCadSketchSolverC
 // Counts how often edit preparation looks for solve warnings, and stands in for what it finds.
 const shrinkWarnings = vi.hoisted(() => vi.fn());
 vi.mock('./cadSketchShrinkWarnings', () => ({ cadSketchShrinkWarnings: shrinkWarnings }));
+// The DXF writer, which refuses the next export once a test sets `refuse`: a section read back against its schema gives it nothing to refuse.
+const dxfWriter = vi.hoisted(() => ({ refuse: null as null | (() => unknown) }));
+vi.mock('@/domain/cad/cadDxfExport', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/domain/cad/cadDxfExport')>();
+  return { ...actual, cadEntitiesToDxf: (...input: Parameters<typeof actual.cadEntitiesToDxf>) => {
+    const refuse = dxfWriter.refuse; dxfWriter.refuse = null;
+    if (refuse) throw refuse();
+    return actual.cadEntitiesToDxf(...input);
+  } };
+});
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
@@ -1875,12 +1885,12 @@ describe('CAD controller asynchronous guards', () => {
     await expect(loadCadDocument(h.workbench().adapter, before.document.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(h.cad().isBusy()).toBe(false); expect(h.cad().isOpen()).toBe(true);
   });
-  it('names the CAM step and its source in a refusal of a Section for CAM or a sketch handoff, and no CAM step in the section of a DXF export', async () => {
+  it('names the CAM step and its source in a refusal of a Section for CAM or a sketch handoff, and the export and its source in the section of a DXF export', async () => {
     const h = await harness(true, true), version = h.session.getSnapshot().version;
     const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
     kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
     const exported = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, 'dxf-export', undefined, 'dxf-export'));
-    expect([(exported as CadError).code, cadRefusalIssue(exported)]).toEqual(['empty-section', null]);
+    expect(cadRefusalIssue(exported)).toMatchObject({ namespace: 'export', code: 'empty-section', subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
     await act(async () => h.session.setWorkflowOpen(true, 'section'));
     kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
     const inspected = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, 'section', undefined, 'section'));
@@ -1896,15 +1906,14 @@ describe('CAD controller asynchronous guards', () => {
     expect(h.workbench().manifest.projects).toHaveLength(0);
   });
   it.each([
-    // A DXF export's refusal is the document check's when its code is one a feature can be refused with, and none otherwise.
-    { code: 'empty-section', exported: null, refuse: () => new CadError('empty-section', 'The section plane misses the body.') },
-    { code: 'kernel-operation-failed', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.',
+    { code: 'empty-section', refuse: () => new CadError('empty-section', 'The section plane misses the body.') },
+    { code: 'kernel-operation-failed', refuse: () => CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.',
       { kernelMessage: 'BRepAlgoAPI_Section failed' }) },
     // The body the request names was consumed, and the offset names no parameter: refusals of the step as the worker replies them.
-    { code: 'missing-body', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('missing-body',
+    { code: 'missing-body', refuse: () => CadError.received('missing-body',
       'Body pad is unavailable or has already been consumed. Choose a current body from the feature tree.', {}) },
-    { code: 'unknown-parameter', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('unknown-parameter', 'Unknown parameter "depth".', {}) },
-  ])('gives the Section for CAM dialog and the agent the same $code issue, and a DXF export the same refusal through either', async ({ code, exported: exportedIssue, refuse }) => {
+    { code: 'unknown-parameter', refuse: () => CadError.received('unknown-parameter', 'Unknown parameter "depth".', {}) },
+  ])('gives the Section for CAM dialog and the agent the same $code issue, and the DXF export dialog and the agent the same export issue', async ({ code, refuse }) => {
     const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
     const tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
     const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
@@ -1917,16 +1926,18 @@ describe('CAD controller asynchronous guards', () => {
     expect(issue).toMatchObject({ namespace: 'cam', code, subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
     const reply = await tool('cad_inspect_section').execute({ expectedVersion: version, section: request });
     expect(reply).toEqual({ ok: false, error: { code, message: (shown as CadError).message, details: { issue: cadAgentIssue(issue!, (shown as CadError).kernelMessage) } } });
-    // A DXF export's section is no CAM step, through the export dialog or the agent.
+    // A DXF export's section is no CAM step: the export dialog's preview and download, as App wires them, and the agent name the export and
+    // its body, with the refusal's own code.
     await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    const previewed = await refusal(() => h.cad().inspectSection(request, version, 'dxf-export', undefined, 'dxf-export'));
     const exported = await refusal(() => h.cad().exportSectionDxf(request, version, undefined, 'dxf-export'));
     await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
     const exportIssue = cadRefusalIssue(exported);
-    expect(exportIssue === null ? null : { namespace: exportIssue.namespace, subject: exportIssue.subject }).toEqual(exportedIssue);
+    expect(exportIssue).toMatchObject({ namespace: 'export', code, message: (exported as CadError).message, subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
+    expect(cadRefusalIssue(previewed)).toEqual(exportIssue);
     const exportReply = await tool('cad_export_section_dxf').execute({ expectedVersion: version, section: request });
-    expect(exportReply).toMatchObject({ ok: false, error: { code, ...exportIssue ? { details: { issue: cadAgentIssue(exportIssue, (exported as CadError).kernelMessage) } } : {} } });
-    if (!exportIssue) expect(exportReply).not.toHaveProperty('error.details.issue');
-    expect(kernel.section).toHaveBeenCalledTimes(4);
+    expect(exportReply).toEqual({ ok: false, error: { code, message: (exported as CadError).message, details: { issue: cadAgentIssue(exportIssue!, (exported as CadError).kernelMessage) } } });
+    expect(kernel.section).toHaveBeenCalledTimes(5);
     expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
   });
   it('names only the steps of the operation that raised a refusal again, so a reused refusal keeps no CAM step of its earlier use', async () => {
@@ -1948,13 +1959,29 @@ describe('CAD controller asynchronous guards', () => {
     await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
     expect(await refusal(() => h.cad().exportSectionDxf(request, version, undefined, 'dxf-export'))).toBe(cached);
     await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
-    expect(cadRefusalIssue(cached)).toMatchObject({ namespace: 'feature', subject: { kind: 'document' } });
+    expect(cadRefusalIssue(cached)).toMatchObject({ namespace: 'export', subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
     // The next Section for CAM is the step's again, and a solid export, which records no step, gives the agent no step of either.
     expect(await tool('cad_inspect_section').execute({ expectedVersion: version, section: request })).toMatchObject({ ok: false,
       error: { code: 'kernel-operation-failed', details: { issue: { namespace: 'cam', subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } } } } });
     expect(await tool('cad_export_solid').execute({ expectedVersion: version, format: 'step' })).toMatchObject({ ok: false,
       error: { code: 'kernel-operation-failed', details: { issue: { namespace: 'feature', subject: { kind: 'document' } } } } });
     expect(kernel.export).toHaveBeenCalledTimes(1);
+  });
+  it('gives curves the DXF writer refuses as the export\'s issue, through the export dialog and the agent alike', async () => {
+    const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
+    const refuse = () => new CadError('dxf-geometry', 'DXF coordinates must be finite.');
+    kernel.section.mockResolvedValue(section);
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    dxfWriter.refuse = refuse;
+    let exported: unknown;
+    await act(async () => { exported = await h.cad().exportSectionDxf(request, version, undefined, 'dxf-export').then(() => undefined, (error: unknown) => error); });
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    const issue = cadRefusalIssue(exported);
+    expect(issue).toMatchObject({ namespace: 'export', code: 'dxf-geometry', message: 'DXF coordinates must be finite.',
+      subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
+    dxfWriter.refuse = refuse;
+    const reply = await cadSiteTools(h.cad).find(entry => entry.name === 'cad_export_section_dxf')!.execute({ expectedVersion: version, section: request });
+    expect(reply).toEqual({ ok: false, error: { code: 'dxf-geometry', message: 'DXF coordinates must be finite.', details: { issue: cadAgentIssue(issue!, undefined) } } });
   });
   it('reads the section back as part of the step, so an offset naming no parameter is the step\'s refusal there too', async () => {
     const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 'depth / 2' } as const;

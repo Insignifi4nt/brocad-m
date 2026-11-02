@@ -4,6 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadMesh } from '@/domain/cad/cadDocument';
 import type { CadSectionResult } from '@/domain/cad/cadSection';
+import { CadError } from '@/domain/cad/cadError';
+import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
 import { CadDxfExportDialog, type CadDxfExportDialogProps } from './CadDxfExportDialog';
 
 let host: HTMLDivElement, root: Root;
@@ -88,6 +90,32 @@ it('reports unsupported section errors and invalid expressions with a usable cor
   expect(button('Preview section').disabled).toBe(true);
   await type(offset, '5');
   expect(button('Preview section').disabled).toBe(false);
+});
+it('shows a refused section export with the code of its export issue, and the kernel\'s own words under a closed disclosure', async () => {
+  const subject = { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } as const;
+  const message = 'The section could not be cut through this body, for a reason the kernel did not name. Move the section plane slightly or choose another body.';
+  const callbacks = props({ onInspectSection: vi.fn(async () => { throw cadRefusalAt(new CadError('empty-section', 'The section plane does not cross the body.'), subject); }) });
+  await act(async () => root.render(<CadDxfExportDialog {...callbacks} />));
+  const alert = () => host.querySelector<HTMLElement>('[role=alert]');
+  await act(async () => button('Preview section').click());
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual(['The section plane does not cross the body.', 'empty-section']);
+  expect(host.querySelector('details')).toBeNull();
+  // The download, after a reviewed preview, gives its own refusal the same way.
+  vi.mocked(callbacks.onInspectSection).mockResolvedValue(section);
+  vi.mocked(callbacks.onExportSection).mockImplementation(async () => { throw cadRefusalAt(CadError.received('kernel-operation-failed', message, { kernelMessage: 'BRepAlgoAPI_Section: not done' }), subject); });
+  await act(async () => button('Preview section').click());
+  await act(async () => button('Download DXF').click());
+  const disclosure = host.querySelector<HTMLDetailsElement>('details');
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual([message, 'kernel-operation-failed']);
+  expect([disclosure?.open, disclosure?.querySelector('summary')?.textContent, disclosure?.querySelector('p')?.textContent]).toEqual([false, 'Kernel message', 'BRepAlgoAPI_Section: not done']);
+  expect(alert()?.textContent).not.toContain('BRepAlgoAPI');
+  expect(callbacks.onClose).not.toHaveBeenCalled();
+  // A refusal recorded before this preview started, which the preview gives again unrecorded, has no code here.
+  const earlier = cadRefusalAt(new CadError('empty-section', 'The section plane does not cross the body.'), subject);
+  vi.mocked(callbacks.onInspectSection).mockImplementation(async () => { throw earlier; });
+  await act(async () => button('Preview section').click());
+  expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
+  expect(host.querySelector('details')).toBeNull();
 });
 it.each(['close', 'stale', 'cancel'] as const)('aborts an outstanding section on %s and never publishes its late preview', async change => {
   let signal: AbortSignal | undefined, resolve: ((result: CadSectionResult) => void) | undefined;

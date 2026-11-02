@@ -2,7 +2,7 @@ import type { CadBodyKey, CadBodyUntrackedReason } from './cadBodies';
 import type { CadDocument, CadKernelFailureDetails } from './cadDocument';
 import { CadError } from './cadError';
 import { cadFeatureDependencies } from './cadFeatureInputs';
-import type { CadCamCodeOf, CadCamOperation, CadRefusalCode, CadRefusalFactCode, CadRefusalFacts, CadSketchGraphCode, CadSketchRefusalCode, CadSketchRelationCode } from './cadIssueCodes';
+import type { CadCamCodeOf, CadCamOperation, CadExportCodeOf, CadExportFormat, CadRefusalCode, CadRefusalFactCode, CadRefusalFacts, CadSketchGraphCode, CadSketchRefusalCode, CadSketchRelationCode } from './cadIssueCodes';
 import type { CadEdit } from './cadOperations';
 import { cadFeatureActive } from './features/cadFeatureActivity';
 
@@ -23,7 +23,7 @@ import { cadFeatureActive } from './features/cadFeatureActivity';
  * An issue is detached from what built it and frozen through, and a list of issues (`createCadIssueList`) has unique keys and causes that
  * name issues of the same list, with no cycle.
  */
-export type CadIssue = CadSketchIssueOf | CadFeatureIssueOf | CadKernelIssueOf | CadBodyIssueOf | CadCamIssueOf;
+export type CadIssue = CadSketchIssueOf | CadFeatureIssueOf | CadKernelIssueOf | CadBodyIssueOf | CadCamIssueOf | CadExportIssueOf;
 export type CadIssueNamespace = CadIssue['namespace'];
 export type CadIssueSeverity = 'error' | 'warning' | 'info';
 export type CadIssueState = 'failed' | 'blocked';
@@ -37,12 +37,14 @@ export type CadIssueSubject =
   /** An input slot of a feature: the field that names the input, and the id it named. */
   | { readonly kind: 'reference-slot'; readonly featureId: string; readonly field: string; readonly inputId: string }
   | { readonly kind: 'body'; readonly key: CadBodyKey; readonly featureId: string }
-  | { readonly kind: 'cam-operation'; readonly operation: CadCamOperation; readonly sourceId: string };
+  | { readonly kind: 'cam-operation'; readonly operation: CadCamOperation; readonly sourceId: string }
+  /** An export step, which is no CAM step: what it writes, and the source it was given. */
+  | { readonly kind: 'export-operation'; readonly format: CadExportFormat; readonly sourceId: string };
 type SubjectOf<K extends CadIssueSubject['kind']> = Extract<CadIssueSubject, { readonly kind: K }>;
 
 /** The cause a sketch refusal names beyond its code, when one is known. */
 export type CadSketchRefusalCause = 'mirror-collapse' | 'solver-unavailable';
-export type { CadCamOperation };
+export type { CadCamOperation, CadExportFormat };
 
 /** An issue of namespace `N` with code `C`, whose details are `D`, about a subject `S`, in state `T`. */
 interface CadIssueOf<N extends string, C extends string, D, S extends CadIssueSubject, T extends CadIssueState> {
@@ -119,6 +121,13 @@ export type CadBodyIssueOf =
 /** A CAM step refused: its operation and the source it was given, and a code that step can raise (`CAD_CAM_STEP_CODES`). */
 export type CadCamIssueOf = { readonly [O in CadCamOperation]: CadIssueOf<'cam', CadCamCodeOf<O>, CadNoIssueDetails,
   { readonly kind: 'cam-operation'; readonly operation: O; readonly sourceId: string }, 'failed'> }[CadCamOperation];
+
+/**
+ * An export step refused: what it writes and the source it was given, and a code that step can raise (`CAD_EXPORT_STEP_CODES`). Its own
+ * namespace, since an export is no CAM step and some of its codes, such as `empty-section`, are no feature's.
+ */
+export type CadExportIssueOf = { readonly [F in CadExportFormat]: CadIssueOf<'export', CadExportCodeOf<F>, CadNoIssueDetails,
+  { readonly kind: 'export-operation'; readonly format: F; readonly sourceId: string }, 'failed'> }[CadExportFormat];
 
 /**
  * An existing action that resolves an issue, prepared against document version `preparedAt`:

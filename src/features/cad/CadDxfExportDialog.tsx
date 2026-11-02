@@ -12,7 +12,10 @@ import { cadSketchToEntities } from '@/domain/cad/cadSketchGeometry';
 import { resolveCadCurveGeometry } from '@/domain/cad/cadCurve';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { cadBodyFeatureId, cadBodyLineage } from '@/domain/cad/cadBodies';
+import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 import { CadContextHelp } from './CadContextHelp';
+import { CadKernelMessage, cadKernelMessageOf } from './CadKernelMessage';
 import { CadSectionPreview } from './CadSectionDialog';
 import { cadSectionMiddleOffset } from './cadSectionMidpoint';
 import './cad-dxf-export.css';
@@ -52,7 +55,9 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
   const [bodyId, setBodyId] = useState(initialBody?.featureId ?? '');
   const [plane, setPlane] = useState<CadPlane>('XY'), [offset, setOffset] = useState(cadSectionMiddleOffset(initialBody, 'XY'));
   const [review, setReview] = useState<{ key: string; result: CadSectionResult } | null>(null);
-  const [error, setError] = useState<string | null>(null), [busy, setBusy] = useState<'preview' | 'export' | null>(null);
+  // A refusal keeps the code of its issue, as the agent reply gives it, and the kernel's own words for its closed disclosure.
+  const [error, setError] = useState<{ readonly message: string; readonly code: string | null; readonly kernelMessage: string | null } | null>(null);
+  const [busy, setBusy] = useState<'preview' | 'export' | null>(null);
   const stale = version !== currentVersion;
   const request: CadSectionRequest = { bodyId, plane, offset };
   const key = JSON.stringify([version, currentVersion, kind, kind === 'sketch' ? sketchId : kind === 'curve' ? curveId : request]);
@@ -83,7 +88,7 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
   const changeSource = (next: SourceKind) => { setKind(next); setError(null); };
   async function execute(action: 'preview' | 'export') {
     if (pending.current || stale || !hasSource || source.error || action === 'export' && kind === 'section' && !reviewed) return;
-    const controller = new AbortController(); pending.current = controller;
+    const controller = new AbortController(), since = cadRefusalMark(); pending.current = controller;
     setBusy(action); setError(null);
     try {
       if (action === 'preview') {
@@ -96,7 +101,9 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
         if (!controller.signal.aborted && liveKey.current === key) onClose();
       }
     } catch (cause) {
-      if (!controller.signal.aborted && liveKey.current === key) setError(userFacingMessage(cause, 'DXF export failed.'));
+      if (!controller.signal.aborted && liveKey.current === key) {
+        setError({ message: userFacingMessage(cause, 'DXF export failed.'), code: cadRefusalIssue(cause, 'refusal', since)?.code ?? null, kernelMessage: cadKernelMessageOf(cause) });
+      }
     } finally { if (pending.current === controller) { pending.current = null; setBusy(null); } }
   }
   return <dialog ref={dialog} aria-label="Export DXF" className="cad-dxf-export" onCancel={event => { event.preventDefault(); close(); }}>
@@ -119,7 +126,9 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
       <div className="cad-dxf-preview">{previewEntities.length ? <CadSectionPreview entities={previewEntities} label={kind === 'section' ? 'Exact section preview' : kind === 'sketch' ? 'Sketch DXF preview' : 'Reference curve DXF preview'} />
         : <p>{busy === 'preview' ? 'Computing exact section…' : kind === 'section' ? 'Preview the section to review its exported contours.' : 'No exportable geometry.'}</p>}</div>
       <div className="cad-dxf-status" role="status">{busy === 'export' ? 'Preparing DXF download…' : busy === 'preview' ? 'Computing exact section…' : reviewed ? `${reviewed.contourCount} closed contours · ${reviewed.entities.length} analytic curves` : kind !== 'section' && previewEntities.length ? `${previewEntities.length} analytic curves${kind === 'curve' ? ' · open chain' : ''}` : ' '}</div>
-      {(stale || error || source.error) && <p role="alert" className="cad-dxf-error">{stale ? 'The CAD draft changed. Close this export and reopen it to review the current geometry.' : error ?? source.error}</p>}
+      {(stale || error || source.error) && <p role="alert" className="cad-dxf-error" data-cad-issue-code={!stale && error?.code || undefined}>
+        {stale ? 'The CAD draft changed. Close this export and reopen it to review the current geometry.' : error?.message ?? source.error}</p>}
+      {!stale && error && <CadKernelMessage text={error.kernelMessage} />}
     </div>
     <footer><span>Standalone 2D DXF · no CAD save required</span><div><Button type="button" className="cad-dxf-secondary" onClick={busy ? () => pending.current?.abort() : close}>{busy ? 'Cancel operation' : 'Cancel'}</Button><Button variant="primary" type="button" className="cad-dxf-primary" disabled={busy !== null || stale || !hasSource || Boolean(source.error) || kind === 'section' && !reviewed} onClick={() => { void execute('export'); }}><DownloadIcon size={13} />Download DXF</Button></div></footer>
   </dialog>;

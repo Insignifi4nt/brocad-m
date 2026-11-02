@@ -166,3 +166,24 @@ const CAM_CODES: { readonly [O in CadCamOperation]: ReadonlySet<unknown> } = {
 };
 /** Whether CAM step `operation` can raise `code`. */
 export function isCadCamCode<O extends CadCamOperation>(operation: O, code: unknown): code is CadCamCodeOf<O> { return CAM_CODES[operation].has(code); }
+
+/**
+ * Every refusal each export step can raise, which keeps its own code. An export step is no CAM step: it may cut the same section, but its
+ * refusals are about the export and its source, never a CAM step. `cadCamDiagnostics.test.ts` holds each list to exactly the codes the step
+ * reaches, and to none that carries facts.
+ * - `dxf-section`: a section DXF export: the request, the body it names, its offset expression, a model with diagnostics, the plane's cut of
+ *   the body, contours the path planner cannot close, which the section counts, or curves DXF cannot write; a kernel failure without a code
+ *   of its own is `kernel-operation-failed`.
+ * A step's other failures are no problem of the export or its source and give no issue (`cadRefusalIssue`).
+ */
+export const CAD_EXPORT_STEP_CODES = Object.freeze({
+  'dxf-section': Object.freeze(['cam-geometry', 'degenerate-section', 'division-by-zero', 'dxf-geometry', 'empty-section', 'expression-limit', 'invalid-expression',
+    'invalid-plane', 'invalid-scalar', 'invalid-section', 'kernel-operation-failed', 'missing-body', 'open-section', 'section-failed', 'tangent-section',
+    'unknown-parameter', 'unsupported-entity', 'unsupported-section-curve'] as const)
+});
+/** The export steps whose refusals are issues: a section DXF export. */
+export type CadExportFormat = keyof typeof CAD_EXPORT_STEP_CODES;
+export type CadExportCodeOf<F extends CadExportFormat> = (typeof CAD_EXPORT_STEP_CODES)[F][number];
+const EXPORT_CODES: { readonly [F in CadExportFormat]: ReadonlySet<unknown> } = { 'dxf-section': new Set(CAD_EXPORT_STEP_CODES['dxf-section']) };
+/** Whether export step `format` can raise `code`. */
+export function isCadExportCode<F extends CadExportFormat>(format: F, code: unknown): code is CadExportCodeOf<F> { return EXPORT_CODES[format].has(code); }

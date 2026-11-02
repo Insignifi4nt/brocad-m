@@ -3,12 +3,12 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import ts from '@typescript/typescript6';
 import { CadSourceIndex, cadDiagnosticReach, type CadDiagnosticReach, type CadDiagnosticRoot } from './cadDiagnosticReach';
 import { cadSkippedMemberReads } from './cadMemberReads';
-import { CAD_CAM_STEP_CODES, isCadRefusalFactCode, type CadCamOperation } from '../cadIssueCodes';
+import { CAD_CAM_STEP_CODES, CAD_EXPORT_STEP_CODES, isCadRefusalFactCode, type CadCamOperation, type CadExportFormat } from '../cadIssueCodes';
 
 const KERNEL = 'src/features/cad/kernel/cadKernelModel.ts', CONTROLLER = 'src/features/cad/useCadController.ts', CAM = 'src/domain/cad/cadCam.ts';
 
 /**
- * Where a CAM step's walk stops, and why what lies beyond raises no refusal of the step:
+ * Where a CAM or export step's walk stops, and why what lies beyond raises no refusal of the step:
  * - the document check, which the step runs again on the document the session accepted, so it refuses nothing there; a check that did
  *   refuse records the feature or input slot it was reading before the step records itself;
  * - the body lineage, which the rebuild kept; a section only looks a built body up.
@@ -18,7 +18,7 @@ const STOPS = ['src/domain/cad/cadSchema.ts:parseCadDocument', `${KERNEL}:lineag
 const PATH_DIAGNOSTIC = 'A diagnostic the path planner records on the CAM document it returns. A document with an error diagnostic or an open contour is refused as cam-geometry.';
 const GRAPH_ISSUE = 'A sketch graph issue, refused with the code of the check that finds it.';
 const ARRANGEMENT_ISSUE = 'A sketch arrangement issue. Cells refuse an arrangement with issues as unsupported-sketch-cells.';
-/** Codes the walk finds that are no refusal of a CAM step, and why. */
+/** Codes the walk finds that are no refusal of a CAM or export step, and why. */
 const NOT_REFUSALS: Readonly<Record<string, string>> = {
   ...Object.fromEntries(['ambiguous-endpoint-cluster', 'branching-topology', 'closed-chain-gap', 'degenerate-contour', 'duplicate-segment', 'dxf-import-warning',
     'endpoint-cluster-snap', 'intersecting-topology', 'invalid-arc', 'invalid-polyline', 'layer-filtered', 'non-finite-geometry', 'open-chain',
@@ -32,7 +32,10 @@ const UNREAD: Readonly<Record<string, string>> = {
 };
 
 let index: CadSourceIndex;
-let roots: { readonly [O in CadCamOperation]: readonly CadDiagnosticRoot[] };
+/** A CAM step, or an export step, which is no CAM step and lists its codes apart. */
+type Step = CadCamOperation | CadExportFormat;
+const STEP_CODES: { readonly [S in Step]: readonly string[] } = { ...CAD_CAM_STEP_CODES, ...CAD_EXPORT_STEP_CODES };
+let roots: { readonly [S in Step]: readonly CadDiagnosticRoot[] };
 
 beforeAll(() => {
   index = new CadSourceIndex();
@@ -52,23 +55,26 @@ beforeAll(() => {
     // A Section for CAM: the request, the model's section, the reply the worker gives a failure, the result read back, and the handoff of
     // its curves to the path planner.
     section: [{ file: KERNEL, node: section }, { file: CONTROLLER, node: matching }, ...exported('src/domain/cad/cadSection.ts', 'parseCadSectionRequest'),
-      ...exported('src/features/cad/kernel/cadKernelFailures.ts', 'cadKernelRequestFailure'), ...exported(CAM, 'cadEntitiesToCam')]
+      ...exported('src/features/cad/kernel/cadKernelFailures.ts', 'cadKernelRequestFailure'), ...exported(CAM, 'cadEntitiesToCam')],
+    // A section DXF export: the same section, read back the same way, and the DXF writer its curves go to instead of the path planner.
+    'dxf-section': [{ file: KERNEL, node: section }, { file: CONTROLLER, node: matching }, ...exported('src/domain/cad/cadSection.ts', 'parseCadSectionRequest'),
+      ...exported('src/features/cad/kernel/cadKernelFailures.ts', 'cadKernelRequestFailure'), ...exported('src/domain/cad/cadDxfExport.ts', 'cadEntitiesToDxf')]
   };
 }, 60_000);
 
 const sorted = (codes: Iterable<string>) => [...codes].sort();
-const reaches = new Map<CadCamOperation, CadDiagnosticReach>();
-const reach = (operation: CadCamOperation) => reaches.get(operation)
+const reaches = new Map<Step, CadDiagnosticReach>();
+const reach = (operation: Step) => reaches.get(operation)
   ?? reaches.set(operation, cadDiagnosticReach(index, roots[operation], { stop: new Set(STOPS) })).get(operation)!;
-const operations = Object.keys(CAD_CAM_STEP_CODES) as CadCamOperation[];
+const operations = Object.keys(STEP_CODES) as Step[];
 
-describe('CAM step diagnostics', () => {
+describe('CAM and export step diagnostics', () => {
   it.each(operations)('list every code the %s step can be refused with', operation => {
-    const walked = reach(operation), listed: readonly string[] = CAD_CAM_STEP_CODES[operation];
+    const walked = reach(operation), listed = STEP_CODES[operation];
     expect(walked.unexpanded.filter(entry => !(entry in UNREAD))).toEqual([]);
     expect(new Set(listed).size, 'listed once').toBe(listed.length);
     expect(sorted(listed)).toEqual(sorted([...walked.codes].filter(code => !(code in NOT_REFUSALS))));
-    // A code with facts would need them in its CAM issue, which carries none.
+    // A code with facts would need them in its CAM or export issue, which carries none.
     expect(listed.filter(isCadRefusalFactCode)).toEqual([]);
   }, 60_000);
 

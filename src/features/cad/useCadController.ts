@@ -733,7 +733,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   }
   /**
    * The section `request` cuts, for `intent`, which every caller states: a Section for CAM step names its body as the source of a refusal,
-   * the visible dialog's preview and the agent's alike, and a DXF export's section is no CAM step. `scope` is only the workflow the caller
+   * the visible dialog's preview and the agent's alike, and a DXF export names the export and that body, since its section is no CAM step.
+   * `scope` is only the workflow the caller
    * may run inside, so an agent, which owns none, still names its intent.
    */
   async function inspectSection(request: CadSectionRequest, expectedVersion: string, intent: CadSectionIntent, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
@@ -742,8 +743,9 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     signal?.throwIfAborted();
     const section = { ...parseCadSectionRequest(request) };
     const document = session.getSnapshot().document;
-    // A DXF export records the document, so a refusal it shares with an earlier Section for CAM is no CAM step's here.
-    const refused = (error: unknown) => cadRefusalAt(error, intent === 'section' ? { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId } : { kind: 'document' }, since);
+    // A DXF export records itself, so a refusal it shares with an earlier Section for CAM is no CAM step's here.
+    const refused = (error: unknown) => cadRefusalAt(error, intent === 'section' ? { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }
+      : { kind: 'export-operation', format: 'dxf-section', sourceId: section.bodyId }, since);
     const result = await (await getKernel()).section(document, section, signal).catch((error: unknown) => { throw refused(error); });
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     // Reading the result evaluates the offset again, so a refusal there is the step's too.
@@ -832,6 +834,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     return { fileName, downloadRequested: true, curveId, version: expectedVersion };
   }
   async function exportSectionDxf(request: CadSectionRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope); signal?.throwIfAborted();
     const document = session.getSnapshot().document;
     const section = await inspectSection(request, expectedVersion, 'dxf-export', signal, scope);
@@ -840,7 +843,9 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const notes = document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document)
       ? feature.profiles.flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin'
         ? [`${profile.geometry.package.id}@${profile.geometry.package.version}: ${profile.geometry.package.notes}`] : []) : []);
-    const text = cadEntitiesToDxf(section.entities, notes);
+    // Curves DXF cannot write are the export's refusal too.
+    let text: string;
+    try { text = cadEntitiesToDxf(section.entities, notes); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-section', sourceId: section.bodyId }, since); }
     const fileName = `${fileBase(document.name)}-section-${section.plane}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);
     return { fileName, downloadRequested: true, version: expectedVersion, section: {

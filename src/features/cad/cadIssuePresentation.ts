@@ -28,7 +28,7 @@ export function cadIssueNames(items: readonly CadIssue[], document: Pick<CadDocu
   });
 }
 
-/** The name an issue's subject goes by: its feature's name, with the input or body it names, the CAM step and its source, or the part. */
+/** The name an issue's subject goes by: its feature's name, with the input or body it names, the CAM or export step and its source, or the part. */
 export function cadIssueSubjectLabel(subject: CadIssueSubject, names: CadIssueNames): string {
   switch (subject.kind) {
     case 'document': return 'Part';
@@ -36,6 +36,7 @@ export function cadIssueSubjectLabel(subject: CadIssueSubject, names: CadIssueNa
     case 'reference-slot': return `${names.feature(subject.featureId)} · input ${names.feature(subject.inputId)}`;
     case 'body': return `${names.feature(subject.featureId)} · body ${subject.key}`;
     case 'cam-operation': return `${subject.operation === 'section' ? 'Section for CAM' : 'Send to CAM'} · ${names.feature(subject.sourceId)}`;
+    case 'export-operation': return `Section DXF export · ${names.feature(subject.sourceId)}`;
     case 'sketch-relation': case 'sketch-entity': case 'sketch-point': return names.feature(subject.sketchId);
   }
 }

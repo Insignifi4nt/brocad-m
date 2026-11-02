@@ -61,6 +61,41 @@ describe('refusals in the CAD issue model', () => {
     expect(cadRefusalIssue(cadRefusalAt(new CadError('missing-body', 'No.'), { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' }))).toBeNull();
   });
 
+  it('gives an export step\'s refusal as an export issue about the export and its source, never a CAM step\'s', () => {
+    const subject = { kind: 'export-operation', format: 'dxf-section', sourceId: 'body' } as const;
+    // A code a feature can be refused with and one only a section raises are both the export's, with their own codes.
+    for (const error of [CadError.received('kernel-operation-failed', 'The section could not be cut.', { kernelMessage: 'BRepAlgoAPI_Section failed' }),
+      new CadError('empty-section', 'The plane misses the body.'), new CadError('dxf-geometry', 'DXF coordinates must be finite.')]) {
+      expect(cadRefusalIssue(cadRefusalAt(error, subject))).toEqual({ key: 'refusal', namespace: 'export', code: error.code, severity: 'error', state: 'failed',
+        subject, message: error.message, causes: [], repairs: [], details: {} });
+    }
+    // The export reports the codes it can raise, and only those.
+    expect(cadRefusalIssue(cadRefusalAt(new CadError('missing-sketch', 'No.'), subject))).toBeNull();
+    expect(cadRefusalIssue(cadRefusalAt(new CadError('invalid-reference', 'No.'), subject))).toBeNull();
+    // Its other failures are no problem of the export or its source.
+    for (const failure of [CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded.', { kernelMessage: 'CompileError' }),
+      new DOMException('The operation was aborted.', 'AbortError'), new Error('CAD model has been disposed.')]) {
+      expect(cadRefusalIssue(cadRefusalAt(failure, subject)), String(failure)).toBeNull();
+    }
+    // A Section for CAM recorded before the export is replaced by it, and the export's record by a later Section for CAM or the document.
+    const cut = cadRefusalAt(new CadError('empty-section', 'The plane misses the body.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
+    cadRefusalAt(cut, subject);
+    expect(cadRefusalSubject(cut)).toEqual(subject);
+    cadRefusalAt(cut, { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
+    expect(cadRefusalSubject(cut)).toEqual({ kind: 'cam-operation', operation: 'section', sourceId: 'body' });
+    cadRefusalAt(cut, subject);
+    cadRefusalAt(cut, { kind: 'document' });
+    expect(cadRefusalSubject(cut)).toEqual({ kind: 'document' });
+    // An export of another body, or a document check inside the export, keeps what it encloses and no more.
+    cadRefusalAt(cut, subject);
+    cadRefusalAt(cut, { ...subject, sourceId: 'other' });
+    expect(cadRefusalSubject(cut)).toEqual({ ...subject, sourceId: 'other' });
+    const slot = { kind: 'reference-slot', featureId: 'body', field: 'sketchId', inputId: 'sketch1' } as const, since = cadRefusalMark();
+    const missing = cadRefusalAt(new CadError('missing-body', 'Body box is unavailable.'), slot);
+    cadRefusalAt(missing, subject, since);
+    expect(cadRefusalSubject(missing)).toEqual(slot);
+  });
+
   it('names the nearest step of one propagation, which a refusal raised again starts over', () => {
     const slot = (featureId: string, inputId: string) => ({ kind: 'reference-slot', featureId, field: 'sketchId', inputId }) as const;
     // The reviewer's probe: an independent check rethrows a cached refusal while checking a different feature.
@@ -144,7 +179,7 @@ describe('refusals in the CAD issue model', () => {
     expect([(malformed as CadError).code, cadRefusalIssue(malformed)]).toEqual(['invalid-document', null]);
     expect(cadRefusalIssue(new CadError('stale-repair', 'Read the issues again.'))).toBeNull();
     expect(cadRefusalIssue(new CadError('sketch-conflicting', 'Sketch constraints conflict.'))).toBeNull();
-    // A section refused outside a CAM step, as a DXF export's is, is not a feature refusal either.
+    // A section refused outside a CAM or export step is not a feature refusal either.
     expect(cadRefusalIssue(new CadError('empty-section', 'The plane misses the body.'))).toBeNull();
   });
 
