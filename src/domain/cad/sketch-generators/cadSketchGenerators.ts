@@ -17,6 +17,7 @@ import {
   CAD_SKETCH_GENERATOR_KINDS, type CadSketchGeneratedGeometry, type CadSketchGeneratorContext, type CadSketchGeneratorEvaluation,
   type CadSketchGeneratorKind
 } from './cadSketchGeneratorKinds';
+import { CAD_SKETCH_GENERATOR_DRAWS_OUTLINE } from './cadSketchGeneratorSchema';
 
 // A sketch generator is a relation that makes and keeps geometry: a profile's outline, a plugin's shape or a regular polygon. Only its
 // record is stored. Parsing a document generates its members from the record and the document's parameters, as real points, edges and
@@ -146,6 +147,8 @@ function generated(generator: CadSketchGenerator, evaluation: CadSketchGenerator
   const kept = memo.get(key);
   if (kept) { memo.delete(key); memo.set(key, kept); return kept; }
   const prefix = generator.idPrefix;
+  // The crossing check trusts this: see `CAD_SKETCH_GENERATOR_DRAWS_OUTLINE`.
+  if (Boolean(evaluation.shape) !== CAD_SKETCH_GENERATOR_DRAWS_OUTLINE[generator.geometry.kind]) throw new Error(`A ${generator.geometry.kind} generator's outline check disagrees with its kind.`);
   const output = evaluation.build(member => cadSketchGeneratedId(prefix, member), generator.construction);
   const members: CadSketchGeneratedGeometry = Object.freeze({
     points: trustCadSketchGeneratedItems(output.points), entities: trustCadSketchGeneratedItems(output.entities),

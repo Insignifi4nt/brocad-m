@@ -9,6 +9,7 @@ import { SpatialHash } from '@/domain/path-intel/spatialIndex';
 import type { Bounds2, PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { cadDevelopmentChecks } from './cadDevelopmentChecks';
+import { CAD_SKETCH_GENERATOR_DRAWS_OUTLINE } from './sketch-generators/cadSketchGeneratorSchema';
 
 export interface CadSketchGraphSourceRef { readonly entityId: string; readonly reversed: boolean }
 export interface CadSketchGraphCycle {
@@ -53,14 +54,15 @@ function checkCycleEncoding(path: readonly ResolvedCadPathSegment[]): void {
 }
 
 /**
- * The generators among the prepared edges, for the crossing check. A generator's members draw outlines that its kind checked as a legacy
- * profile is checked, closed and free of self-intersection, so they meet one another only at their own joints: only edges of different
- * generators, or a generator's and a drawn edge, can cross. Each generator is found among the others by the bounds of everything it made,
- * and only the edges of a generator that comes near another generator or a drawn edge are compared one by one. Null without generators.
+ * The generators among the prepared edges, for the crossing check. A generator whose kind draws an outline (`CAD_SKETCH_GENERATOR_DRAWS_OUTLINE`)
+ * checked all it made as a legacy profile is checked, closed and free of self-intersection, so its members meet one another only at their
+ * own joints: only edges of different generators, or a generator's and another edge, can cross. Each such generator is found among the
+ * others by the bounds of everything it made, and only the edges of one that comes near another generator or edge are compared one by
+ * one. Other generators' members, such as a pattern's copies, are compared as drawn edges are. Null without outline generators.
  */
 function generatedUnits(graph: CadSketchGraph, prepared: readonly Prepared[], tolerance: number) {
   const prefixes = new Set<string>();
-  for (const relation of graph.relations) if (relation.kind === 'generator') prefixes.add(relation.idPrefix);
+  for (const relation of graph.relations) if (relation.kind === 'generator' && CAD_SKETCH_GENERATOR_DRAWS_OUTLINE[relation.geometry.kind]) prefixes.add(relation.idPrefix);
   if (!prefixes.size) return null;
   const units = new Map<Prepared, string>(), bounds = new Map<string, Bounds2>(), blocks: { readonly unit?: string; readonly bounds: Bounds2 }[] = [];
   for (const item of prepared) {

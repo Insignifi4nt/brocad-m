@@ -65,6 +65,20 @@ describe('regions of generated geometry', () => {
     expect(cut.cycles.map(cycle => cycle.sourceRefs[0].entityId)).toEqual(['b_e0']);
   });
 
+  it('compare the copies of a circular pattern with one another, as the same edges drawn are compared', () => {
+    // A line patterned four times about the origin: every copy crosses the two beside it.
+    const line = { points: [{ id: 'a', position: [-10, 2] }, { id: 'b', position: [10, 2] }],
+      entities: [{ id: 'line', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }] };
+    const pattern = generator('pat', { kind: 'circular-pattern', seedIds: ['line'], centerId: '@origin', count: 4, angle: 360 });
+    const graph = sketchOf(part({ graph: { ...line, relations: [pattern] } })).graph!;
+    const generated = compileCadSketchGraph(graph, {});
+    // Without the generator record its members are the same geometry, drawn.
+    const detached = compileCadSketchGraph(sketchOf(part({ graph: { ...graph, relations: graph.relations.filter(relation => relation.id !== 'pat') } })).graph!, {});
+    expect(graph.entities.map(entity => entity.id).sort()).toEqual(['line', 'pat_i1_line', 'pat_i2_line', 'pat_i3_line']);
+    expect(generated.arrangementEntityIds).toEqual(['line', 'pat_i1_line', 'pat_i2_line', 'pat_i3_line']);
+    expect(generated).toEqual(detached);
+  });
+
   it('read a drawn loop, and a generator outline that drawn geometry joins, as path contours', () => {
     const points = [{ id: 'a', position: [40, 0] }, { id: 'b', position: [60, 0] }, { id: 'c', position: [50, 10] }];
     const triangle = { points, entities: ['a', 'b', 'c'].map((id, index) => ({ id: `t-${id}`, kind: 'line', construction: false, startPointId: id, endPointId: ['b', 'c', 'a'][index] })) };

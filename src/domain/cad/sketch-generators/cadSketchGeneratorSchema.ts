@@ -1,4 +1,4 @@
-import { Type } from '@sinclair/typebox';
+import { Type, type Static } from '@sinclair/typebox';
 import { CadScalarSchema } from '../cadPrimitives';
 import { CadProfileSchema } from '../cadProfileSchema';
 import { CAD_SKETCH_ELEMENT_ID_PATTERN } from '../sketch-relations/cadSketchVirtualElements';
@@ -47,3 +47,10 @@ export const CadSketchGeneratorGeometrySchema = Type.Union([
   Type.Object({ kind: Type.Literal('offset'), chain: Type.Array(Type.Object({ entityId: ref, reversed: Type.Boolean() }, strict), { minItems: 1, maxItems: CAD_SKETCH_OFFSET_LINKS_MAX }),
     distance: scalar }, strict)
 ]);
+/**
+ * Whether a kind checks all it generates as one simple closed outline, its evaluation's `shape`, so its edges meet one another only at
+ * their joints. A pattern's copies may cross one another.
+ */
+export const CAD_SKETCH_GENERATOR_DRAWS_OUTLINE: { readonly [K in Static<typeof CadSketchGeneratorGeometrySchema>['kind']]: boolean } = Object.freeze({
+  plugin: true, rectangle: true, circle: true, polygon: true, path: true, slot: true, 'regular-polygon': true, 'circular-pattern': false, offset: true
+});
