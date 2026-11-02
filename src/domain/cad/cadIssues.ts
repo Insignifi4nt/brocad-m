@@ -70,12 +70,16 @@ type SketchItemSubject = SubjectOf<'sketch-relation' | 'sketch-entity' | 'sketch
 export type CadSketchItemOrigin = 'analysis' | 'edit' | 'warning';
 interface CadSketchItemDetails { readonly origin: CadSketchItemOrigin; readonly pointIds: readonly string[]; readonly entityIds: readonly string[] }
 export type CadSketchIssueOf =
-  /** The refusal of an edit or of the accepted analysis, which the items it names list as their cause; it counts the items it names and those it leaves out. */
+  /**
+   * The refusal of an edit or of the accepted analysis. It lists as its causes the items it names, which the list holds, and counts them
+   * and those it leaves out.
+   */
   | CadIssueOf<'sketch', CadSketchRefusalCode, { readonly cause: CadSketchRefusalCause | null; readonly subjectCount: number; readonly omittedSubjectCount: number },
     SubjectOf<'feature'>, 'failed'>
-  | CadIssueOf<'sketch', CadSketchRelationCode | Exclude<CadSketchGraphCode, 'relation-residual'>, CadSketchItemDetails, SketchItemSubject, CadIssueState>
-  /** A relation the solved sketch does not meet, by how much in millimetres. */
-  | CadIssueOf<'sketch', 'relation-residual', CadSketchItemDetails & { readonly residualMm: number }, SketchItemSubject, CadIssueState>
+  /** A relation, edge or point the solver or the graph check names. */
+  | CadIssueOf<'sketch', CadSketchRelationCode | Exclude<CadSketchGraphCode, 'relation-residual'>, CadSketchItemDetails, SketchItemSubject, 'failed'>
+  /** A relation the solved sketch does not meet, by how much in millimetres, or null when the check could not measure it. */
+  | CadIssueOf<'sketch', 'relation-residual', CadSketchItemDetails & { readonly residualMm: number | null }, SketchItemSubject, 'failed'>
   /** A curve Symmetric shrank in the last accepted edit, each curve's size before and after in millimetres. */
   | CadIssueOf<'sketch', 'mirror-shrank', { readonly curves: readonly { readonly entityId: string; readonly beforeMm: number; readonly afterMm: number }[] },
     SubjectOf<'sketch-relation'>, 'failed'>;

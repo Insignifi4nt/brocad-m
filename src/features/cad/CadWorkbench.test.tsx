@@ -2357,7 +2357,7 @@ describe('CAD sketch interaction', () => {
       await act(async () => onlySelection()!.click());
       expect(relationRow('Distance relation 1').getAttribute('aria-label')).toMatch(/ · Conflict$/);
       await openIssues();
-      const issues = [...container.querySelectorAll<HTMLElement>('ul[aria-label="Constraint issues"] > li button')], rows = [...container.querySelectorAll<HTMLElement>('ul[aria-label="Sketch relations"] > li button'), ...issues];
+      const issues = [...container.querySelectorAll<HTMLElement>('ul[aria-label="Constraint issues"] > li > button[data-cad-issue-row]')], rows = [...container.querySelectorAll<HTMLElement>('ul[aria-label="Sketch relations"] > li button'), ...issues];
       expect(issues).toHaveLength(2);
       const lit: (string | null)[][] = [];
       canvasRenders.mockClear();
@@ -2379,6 +2379,22 @@ describe('CAD sketch interaction', () => {
         canvas.dispatchEvent(event);
       });
       expect(canvasRenders).toHaveBeenCalled();
+    });
+
+    it('repairs a listed issue by deleting its relation through the same edit as its tree row', async () => {
+      const onEditMany = vi.fn((edits: readonly CadEdit[]) => {
+        const feature = currentDocument.features[0]; if (feature.kind !== 'sketch' || !feature.graph) throw new Error('Sketch missing.');
+        if (onEditMany.mock.calls.length === 1) throw new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Bracket', graph: feature.graph, rejection: { kind: 'rejected', reason: 'conflicting',
+          message: 'Over-defined.', diagnostics: { status: 'failed', degreesOfFreedom: null, conflictingIds: ['length', 'diagonal'], redundantIds: [], partiallyRedundantIds: [], issues: [] } } });
+        currentSession.edit(edits);
+      });
+      await open({ build: null, buildState: 'idle', onEditMany }); await geometryMenu('base', 'Constraints and dimensions');
+      await rowKey(relationRow('Distance relation 1'), 'Delete'); await openIssues();
+      const repair = container.querySelector<HTMLButtonElement>('[data-cad-issue-repair="delete-relation:diagonal"]'); if (!repair) throw new Error('Repair missing.');
+      expect(repair.disabled).toBe(false);
+      await act(async () => repair.click());
+      expect(onEditMany).toHaveBeenLastCalledWith([{ kind: 'remove-sketch-relation', sketchId: 'sketch', relationId: 'diagonal' }], expect.any(AbortSignal));
+      expect(relations().map(relation => relation.id)).toContain('length'); expect(relations().map(relation => relation.id)).not.toContain('diagonal');
     });
 
     describe('a tree or issue row highlight after an outside edit, which sends the row no blur or pointer leave', () => {
@@ -5111,7 +5127,7 @@ describe('sketch definition colours and locks', () => {
     expect(prepare).toHaveBeenCalled();
     // All ten redundant relations hold their lines, though the header lists eight subjects and counts the rest.
     await act(async () => container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!.click());
-    expect(container.querySelectorAll('ul[aria-label="Constraint issues"] > li > button')).toHaveLength(8);
+    expect(container.querySelectorAll('ul[aria-label="Constraint issues"] > li > button[data-cad-issue-row]')).toHaveLength(8);
     expect(container.querySelector('.cad-sketch-header-issue-more')?.textContent).toMatch(/^\d+ more affected items$/);
     expect(marked('redundant')).toEqual([...rungs.flatMap(index => [`point l${index}`, `point r${index}`]), ...rungs.map(index => `rung${index}`)].sort());
     expect(marked('conflicting')).toEqual(['point t0', 'point t1']);

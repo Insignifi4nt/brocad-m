@@ -18,7 +18,8 @@ import { CadSketchCornerEditor, CadSketchMoveEditor } from './CadSketchGeometryE
 import { CadSketchSelectionInspector } from './CadSketchSelectionInspector';
 import { CadSketchRelationList } from './CadSketchRelationList';
 import { cadSketchSelectionRelationActions, type CadSketchSelectionAction, type CadSketchSelectionActionsModel } from './CadSketchSelectionActions';
-import { cadSketchAnalysisIssues, cadSketchIssuesStandInForD1, NO_CAD_SKETCH_ISSUES_BY_RELATION, type CadSketchAnalysisIssues, type CadSketchIssue } from './cadSketchIssues';
+import { cadSketchAnalysisIssues, cadSketchIssues, noCadSketchIssues, type CadSketchAnalysisIssues, type CadSketchIssue } from './cadSketchIssues';
+import { preparedCadIssueRepair, type CadIssueRepair } from '@/domain/cad/cadIssues';
 import { cadSketchRelationOffers, type CadSketchRelationOffer } from '@/domain/cad/sketch-relations/cadSketchRelationOffers';
 import type { CadSketchWarningsRecord } from './cadEditPreparation';
 import {
@@ -638,9 +639,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const shownFeedback = editFeedback?.document === document && editFeedback.feedback.sketchId === sketch?.id ? editFeedback.feedback : null;
   const shownWarnings = props.sketchWarnings && props.sketchWarnings.version === props.documentVersion ? props.sketchWarnings.warnings : null;
   /** Conflicting, redundant and unmet relations, a refused edit's subjects and unsized shrinks, for the header and the relations tree alike. */
-  const sketchIssues = useMemo(() => !sketch ? null : sketch.graph ? cadSketchIssuesStandInForD1({ sketchId: sketch.id, graph: sketch.graph, analysis: shownAnalysis.issues, feedback: shownFeedback, warnings: shownWarnings })
-    : { sketchId: sketch.id, message: null, list: [], omitted: 0, byRelation: NO_CAD_SKETCH_ISSUES_BY_RELATION },
-    [sketch, shownAnalysis.issues, shownFeedback, shownWarnings]);
+  const sketchIssues = useMemo(() => !sketch ? null : sketch.graph ? cadSketchIssues({ sketchId: sketch.id, graph: sketch.graph, version: props.documentVersion, analysis: shownAnalysis.issues,
+    feedback: shownFeedback, warnings: shownWarnings }) : noCadSketchIssues(sketch.id), [sketch, props.documentVersion, shownAnalysis.issues, shownFeedback, shownWarnings]);
   /** A sketch editor, the value editor or the icon row reports its refusal here, or null once it has none. */
   const reportEditFeedback = useCallback((feedback: CadSketchConstraintFeedback | null) => setEditFeedback(current => feedback ? current?.feedback === feedback && current.document === document ? current : { document, feedback }
     : current?.document === document ? null : current), [document]);
@@ -2074,6 +2074,14 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     parameters={document.parameters} issues={sketchIssues} selectedIds={selectedRelationIds} selection={relationListSelection ?? graphGeometry} onlySelection={relationListSelection !== null}
     onOnlySelection={relationRowCommands.scope} locked={locked} highlight={sketchHighlight} onSelect={relationRowCommands.select} onOpen={relationRowCommands.open}
     onDelete={relationRowCommands.remove} onMenu={relationRowCommands.menu} reveal={relationListReveal} expanded={relationListOpen} onExpandedChange={relationRowCommands.expand} /> } : null;
+  /** A repair a sketch issue offers goes through the sketch edit path; one prepared for an earlier version of the part is refused. */
+  const repairSketchIssue = (repair: CadIssueRepair) => {
+    if (!sketch || interactionState.current.locked) return;
+    let prepared: CadIssueRepair;
+    try { prepared = preparedCadIssueRepair(repair, props.documentVersion); }
+    catch (cause) { setError(userFacingMessage(cause, 'The repair could not be applied.')); return; }
+    if (prepared.kind === 'edit') applySketchEdits(prepared.edits);
+  };
   /** Inspecting an issue of a relation the canvas does not draw opens its row too, the one place it can be selected or deleted. */
   const inspectHeaderIssue = (issue: CadSketchIssue | null) => {
     inspectIssue(issue);
@@ -2081,7 +2089,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   };
   const sketchHeader = sketch && sketchIssues ? <CadSketchContextHeader name={sketch.name}
     status={!currentAreaRepair ? <CadSketchConstraintStatus document={document} sketch={sketch} version={props.documentVersion} inspect={props.onInspectSketchConstraints} onReport={publishSketchReport} enabled={props.sketchAnalysisReady !== false && !pending && !storageBusy && !externalWorkflowOpen} /> : null}
-    issues={sketchIssues} inspectedIssue={inspectedIssue?.key ?? null} issuesLocked={commandSubmission.applying || storageBusy || externalWorkflowOpen} onInspectIssue={inspectHeaderIssue}
+    issues={sketchIssues} inspectedIssue={inspectedIssue?.key ?? null} issuesLocked={commandSubmission.applying || storageBusy || externalWorkflowOpen} onInspectIssue={inspectHeaderIssue} onRepairIssue={repairSketchIssue}
+    repairsLocked={toolsLocked}
     highlight={sketchHighlight} highlightOf={issueHighlight} dimensionsShown={preferences.showOnPartDimensions} relationsShown={relationsShown}
     onShowDimensions={shown => { setCadPreferences({ ...getCadPreferences(), showOnPartDimensions: shown }); }} onShowRelations={shown => { setCadPreferences({ ...getCadPreferences(), showRelations: shown }); }}
     actions={<>{currentAreaRepair ? <Button variant="primary" className="cad-sketch-header-finish" type="submit" form={areaRepairFormId} aria-label="Finish sketch" title="Finish sketch with replacement areas" disabled={!areaRepairReady || storageBusy || externalWorkflowOpen}><Check size={14} /><span>Finish</span></Button>
