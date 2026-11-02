@@ -227,7 +227,7 @@ export class CadKernelTopology {
   meshGroups(mesh: ShapeMesh, edgeMesh: ShapeEdgeMesh): { faceGroups: CadMeshTopologyGroup[]; edgeGroups: CadMeshTopologyGroup[] } {
     const keyFor = (kind: Entry['kind'], index: number) => {
       const entry = this.indices.get(`${kind}:${index}`);
-      if (!entry) throw new CadError('topology-mapping', 'The drawn body has faces or edges the exact body does not. Rebuild the part and select again.');
+      if (!entry) throw CadError.received('topology-mapping', 'The drawn body has faces or edges the exact body does not. Rebuild the part and select again.', { kernelMessage: 'The kernel preview contains topology absent from the exact body.' });
       return entry.key;
     };
     return { faceGroups: mesh.faceGroups.filter(group => group.count > 0).map(group => ({ start: group.start, count: group.count, key: keyFor('face', group.faceId) })),

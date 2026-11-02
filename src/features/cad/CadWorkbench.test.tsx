@@ -1684,7 +1684,8 @@ describe('CAD sketch interaction', () => {
     const source = applyCadEdits(solidDocument(), [{ kind: 'add-feature', feature: { id: 'move', name: 'Moved plate', kind: 'transform', suppressed: false, sourceId: 'pad', translation: [5, 0, 0], rotation: [0, 0, 0] } }]);
     await mount(source, { build: null, buildState: 'error' });
     const version = currentSession.getSnapshot().version;
-    const issues = cadBuildIssues(currentDocument, { diagnostics: [{ code: 'kernel-operation-failed', featureId: 'pad', message: 'The extrusion failed.' }],
+    const issues = cadBuildIssues(currentDocument, { diagnostics: [{ code: 'kernel-operation-failed', featureId: 'pad', message: 'The extrusion failed.',
+        details: { operation: 'extrude', input: null, kernelMessage: 'BRep_API: command not done' } }],
         bodyIssues: [{ code: 'lost-body-parts', featureId: 'move', body: 'pad' as CadBodyKey, pieces: ['pad/split(1)' as CadBodyKey], message: '1 piece of the body is gone.' }] }, version, true);
     await act(async () => publishBuildIssues(issues, version));
     const trigger = button('3 model issues');
@@ -1695,6 +1696,10 @@ describe('CAD sketch interaction', () => {
       ['kernel-operation-failed', 'failed', 'Pad 1The extrusion failed.'],
       ['input-blocked', 'blocked', `Moved plate${CAD_INPUT_BLOCKED}Cause: Pad 1`],
       ['lost-body-parts', 'failed', 'Moved plate · body pad1 piece of the body is gone.']]);
+    // The kernel's own words stay out of the row, under a closed disclosure on the issue that has them.
+    const kernel = rows().map(row => row.querySelector<HTMLDetailsElement>('details.cad-kernel-message'));
+    expect(kernel.map(disclosure => disclosure && [disclosure.open, disclosure.querySelector('summary')?.textContent, disclosure.querySelector('p')?.textContent]))
+      .toEqual([[false, 'Kernel message', 'BRep_API: command not done'], null, null]);
     // Choosing a row selects its feature; Edit feature opens the editor a double-click opens.
     await act(async () => rows()[1].querySelector<HTMLButtonElement>('[data-cad-issue-row]')!.click());
     expect(container.querySelector('.cad-tree-row[aria-pressed="true"]')?.getAttribute('aria-label')).toBe('Select Moved plate in history');

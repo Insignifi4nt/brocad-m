@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { useEffect, useRef, useState } from 'react';
 import type { CadDxfUnits } from '@/domain/cad/cadDxfSource';
+import { CadKernelMessage, cadKernelMessageOf } from './CadKernelMessage';
 
 export function CadImportDialog({ file, onImport, onCancel }: {
   file: File; onImport(units: CadDxfUnits | 'file', dxfKind?: 'sketch' | 'curve'): Promise<unknown>; onCancel(): void;
@@ -13,7 +14,8 @@ export function CadImportDialog({ file, onImport, onCancel }: {
   const [units, setUnits] = useState<CadDxfUnits | 'file'>(/\.stl$/i.test(file.name) ? 'mm' : 'file');
   const [dxfKind, setDxfKind] = useState<'sketch' | 'curve'>('sketch');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /** The failure shown, with the kernel's own words when it gave any. */
+  const [error, setError] = useState<{ readonly message: string; readonly kernelMessage: string | null } | null>(null);
   const stl = /\.stl$/i.test(file.name);
   const dxf = /\.dxf$/i.test(file.name);
   useEffect(() => { dialog.current?.showModal(); }, []);
@@ -21,7 +23,7 @@ export function CadImportDialog({ file, onImport, onCancel }: {
     if (pending.current) return;
     pending.current = true; setBusy(true); setError(null);
     try { await onImport(units, dxf ? dxfKind : undefined); }
-    catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError(userFacingMessage(cause, 'Import failed.')); }
+    catch (cause) { if (!(cause instanceof DOMException && cause.name === 'AbortError')) setError({ message: userFacingMessage(cause, 'Import failed.'), kernelMessage: cadKernelMessageOf(cause) }); }
     finally { pending.current = false; setBusy(false); }
   }
   const button = 'border border-border px-3 py-1.5 text-xs disabled:opacity-40 hover:bg-accent';
@@ -37,7 +39,8 @@ export function CadImportDialog({ file, onImport, onCancel }: {
         onChange={event => { const next = event.target.value; if (next === 'mm' || next === 'inch' || next === 'cm' || next === 'm' || next === 'file') setUnits(next); }}>
         {dxf && <option value="file">Use file declaration</option>}<option value="mm">Millimeters</option><option value="inch">Inches</option>{dxf && <><option value="cm">Centimeters</option><option value="m">Meters</option></>}</Select></label>
         : <p className="mt-4 text-xs text-muted-foreground">Uses the file’s units.</p>}
-      {error && <p role="alert" className="mt-3 text-xs text-destructive">{error}</p>}
+      {error && <p role="alert" className="mt-3 text-xs text-destructive">{error.message}</p>}
+      {error && <CadKernelMessage text={error.kernelMessage} />}
       <div className="mt-5 flex justify-end gap-2"><Button type="button" className={button} onClick={onCancel}>Cancel</Button>
         <Button variant="primary" type="submit" autoFocus={!stl && !dxf} className={`${button} bg-primary text-primary-foreground`} disabled={busy}>{busy ? 'Importing…' : 'Import'}</Button></div>
     </form>

@@ -142,8 +142,12 @@ export function cadSiteTools(getController: () => CadController) {
           pointIds: error.pointIds.slice(0, 8), pointCount: error.pointIds.length, omittedPointCount: Math.max(0, error.pointIds.length - 8)
         });
         if (error instanceof CadSketchTangentOwnershipError) throw new ToolError(error.code, error.message, { ownerRelationId: error.ownerRelationId });
-        // A refusal of a feature or a CAM step also gives its issue: the feature, input slot or CAM step it is about.
-        if (error instanceof CadError) { const issue = cadRefusalIssue(error); throw new ToolError(error.code, error.message, issue ? { issue: cadAgentIssue(issue) } : undefined); }
+        // A refusal of a feature or a CAM step also gives its issue: the feature, input slot or CAM step it is about. The kernel's own words
+        // go with the issue, or alone when no issue covers the refusal.
+        if (error instanceof CadError) {
+          const issue = cadRefusalIssue(error), kernelMessage = error.kernelMessage;
+          throw new ToolError(error.code, error.message, issue ? { issue: cadAgentIssue(issue, kernelMessage) } : kernelMessage ? { kernelMessage } : undefined);
+        }
         if (error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }

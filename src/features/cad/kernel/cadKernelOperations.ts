@@ -24,7 +24,8 @@ export function applyCadEdgeOperation(shape: Shape3D, edges: readonly Edge[], ki
       }
     }
     builder.Build();
-    if (!builder.IsDone()) throw new CadError('kernel-operation-failed', `The ${kind} could not be applied to the selected edges. The size may be too large for an edge or a face next to it; reduce it or choose other edges.`);
+    const size = kind === 'fillet' ? 'radius' : 'distance';
+    if (!builder.IsDone()) throw new CadError('kernel-operation-failed', `The ${kind} could not be applied to the selected edges. The ${size} may be too large for an edge or a face next to it; reduce the ${size} or choose other edges.`);
     const raw = builder.Shape();
     try {
       const result = cast(raw);

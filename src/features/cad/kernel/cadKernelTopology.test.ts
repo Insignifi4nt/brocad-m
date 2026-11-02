@@ -96,6 +96,18 @@ describe('exact topology and selected mechanical features', () => {
       expect(top).toMatchObject({ offset: 5 });
     });
   });
+  it('names the next step when the drawn body has a face the exact body lacks, keeping the failed check as the kernel\'s account', () => {
+    const box = makeBox([0, 0, 0], [20, 10, 5]);
+    try {
+      const topology = new CadKernelTopology(box);
+      try {
+        const mesh = { faceGroups: [{ start: 0, count: 3, faceId: 9999 }] } as unknown as Parameters<CadKernelTopology['meshGroups']>[0];
+        expect(() => topology.meshGroups(mesh, { edgeGroups: [] } as unknown as Parameters<CadKernelTopology['meshGroups']>[1])).toThrow(expect.objectContaining({
+          code: 'topology-mapping', message: 'The drawn body has faces or edges the exact body does not. Rebuild the part and select again.',
+          kernelMessage: 'The kernel preview contains topology absent from the exact body.' }));
+      } finally { topology.dispose(); }
+    } finally { box.delete(); }
+  });
   it('atomically converts picks to geometric selectors and applies only the selected edge', () => {
     let selection: CadEdgeSelection = selected;
     built(boxDocument(), model => {

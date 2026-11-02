@@ -9,11 +9,13 @@ export const CAD_AGENT_BLOCKED_BYTES = 2048;
 
 /**
  * One issue as a reply gives it: what it is about, its message (summarized as diagnostics are), the issues it names as causes, its typed
- * details and the repairs the workbench offers. The kernel's own words stay in the diagnostic the issue came from, so they are not repeated.
+ * details and the repairs the workbench offers. A build issue leaves the kernel's own words to the diagnostic it came from, so a reply does not
+ * repeat them; a refusal, which has no diagnostic, gives them as `kernelMessage` when the kernel gave any.
  */
-export function cadAgentIssue(issue: CadIssue) {
+export function cadAgentIssue(issue: CadIssue, kernelMessage?: string) {
   const details: Record<string, unknown> = { ...issue.details };
   delete details.kernelMessage;
+  if (kernelMessage) details.kernelMessage = kernelMessage;
   return { key: issue.key, namespace: issue.namespace, code: issue.code, severity: issue.severity, state: issue.state, subject: issue.subject,
     ...summarizeMessage(issue.message), causes: issue.causes, details, repairs: issue.repairs.map(repair => ({ id: repair.id, kind: repair.kind, label: repair.label })) };
 }
@@ -30,7 +32,7 @@ export type CadAgentIssue = ReturnType<typeof cadAgentIssue>;
  */
 export function cadAgentIssueDigest(issues: readonly CadIssue[]) {
   const digest = cadIssueDigest(issues);
-  const items = digest.issues.slice(0, CAD_AGENT_ISSUE_COUNT).map(cadAgentIssue);
+  const items = digest.issues.slice(0, CAD_AGENT_ISSUE_COUNT).map(issue => cadAgentIssue(issue));
   while (items.length && jsonByteLength(items) > CAD_AGENT_ISSUE_BYTES) items.pop();
   const listed = new Set(items.map(item => item.key));
   const blocked = digest.blocked.filter(summary => listed.has(summary.cause));

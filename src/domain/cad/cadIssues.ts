@@ -279,6 +279,7 @@ export function cadIssueRootCauses(issues: readonly CadIssue[], key: string): { 
 
 /** A feature that reads inputs which failed or are blocked: the features its input slots name, in history order. */
 export interface CadBlockedFeature { readonly featureId: string; readonly inputs: readonly string[] }
+const NO_BLOCKED_FEATURES: readonly CadBlockedFeature[] = Object.freeze([]);
 
 /**
  * The active features of `document` that read the result of a feature of `failedIds`, directly or through another feature that does, as
@@ -288,6 +289,8 @@ export interface CadBlockedFeature { readonly featureId: string; readonly inputs
  * reads one, and blocks what reads it either way. Other features are left out; their evaluation does not depend on the failures.
  */
 export function cadBlockedFeatures(document: Pick<CadDocument, 'features' | 'parameters'>, failedIds: readonly string[]): readonly CadBlockedFeature[] {
+  // Nothing failed, so nothing reads a failure: a clean build walks no history.
+  if (!failedIds.length) return NO_BLOCKED_FEATURES;
   const failed = new Set(failedIds), order = new Map(document.features.map((feature, index) => [feature.id, index]));
   const reached = new Set<string>(), found: CadBlockedFeature[] = [];
   for (const feature of document.features) {

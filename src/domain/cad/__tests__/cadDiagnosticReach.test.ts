@@ -250,7 +250,18 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
     expect(reach(`const CODE = 'checked-code';
       export function check(facts: unknown) { if (facts) throw CadError.checked(CODE, '', facts); throw CadError.received('received-code', '', {}); }`))
       .toEqual({ codes: ['checked-code', 'received-code'], unexpanded: [] });
-    const refusal = `class Refusal extends CadError { constructor(code: string, message = '') { super(code, message); } }`;
+    // The factories raise the code their caller gave, read at the call: their bodies, which pass it on, are not walked.
+    const factories = `class CadError extends Error {
+      constructor(readonly code: string, message: string) { super(message); }
+      static checked(code: string, message: string) { return new CadError(code, message); }
+      static received(code: string, message: string, extra: object) { return CadError.checked(code, message); }
+    }`;
+    const raised = walk(`${factories} export function check(facts: unknown) { if (facts) throw CadError.checked('checked-code', ''); throw CadError.received('received-code', '', {}); }`);
+    expect([[...raised.codes].sort(), raised.unexpanded, [...raised.declarations].filter(name => /checked|received/.test(name))]).toEqual([['checked-code', 'received-code'], [], []]);
+    // A method of that name on another class is walked as any other.
+    expect(reach(`${factories} class Other { static received(code: string) { return new CadError(code, ''); } } export function check() { throw Other.received('other-code'); }`).unexpanded)
+      .toEqual([`${FILE}: code, from ${FILE}: code`]);
+    const refusal =`class Refusal extends CadError { constructor(code: string, message = '') { super(code, message); } }`;
     expect(reach(`${refusal} export function check() { throw new Refusal('refusal-code'); }`)).toEqual({ codes: ['refusal-code'], unexpanded: [] });
     // A subclass without a constructor passes its own arguments on; one with a constructor gives its own.
     expect(reach(`${refusal} class Deeper extends Refusal {} class Named extends Refusal { constructor() { super('named-code'); } }

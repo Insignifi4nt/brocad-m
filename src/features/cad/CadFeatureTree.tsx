@@ -10,7 +10,7 @@ import { featureLabels } from './CadFeatureEditor';
 import { CadContextMenu, type CadContextMenuAnchor, type CadContextMenuItem } from './CadContextMenu';
 import { CadTreeRename } from './CadTreeRename';
 import { cadFeatureTreeRelationships } from './cadFeatureTreeModel';
-import { cadIssueRowText } from './cadIssuePresentation';
+import { cadIssueNames, cadIssueRowText } from './cadIssuePresentation';
 import type { CadEditCompletion } from './useCadEditSubmission';
 import './cad-feature-tree.css';
 
@@ -89,6 +89,8 @@ export function CadFeatureTree({ document, issues = NO_CAD_BUILD_ISSUES, selecte
     selectedId: null, expanded: new Set(), branches: new Set(['part', 'model']),
   }));
   const relationships = useMemo(() => cadFeatureTreeRelationships(document.features), [document.features]);
+  // Indexed once per build and history, not per row or on hover, so the rows of a long blocked chain stay linear to label.
+  const issueNames = useMemo(() => cadIssueNames(issues.items, document), [issues.items, document]);
   // Reveal selection before sibling views read the tree for their initial Fit.
   // Remember the selection so ordinary rerenders preserve manual collapse.
   if (treeView.selectedId !== selectedId) {
@@ -219,7 +221,7 @@ export function CadFeatureTree({ document, issues = NO_CAD_BUILD_ISSUES, selecte
     const content = sketchContent?.sketchId === feature.id ? sketchContent.content : null;
     const expandable = nested.length > 0 || shared.length > 0 || missing.length > 0 || profiles.length > 0 || content !== null;
     const open = expanded.has(feature.id), detailsId = `${treeId}-${position}`;
-    const issue = issues.byFeature.get(feature.id), issueText = issue ? cadIssueRowText(issue, issues.items, document) : null;
+    const issue = issues.byFeature.get(feature.id), issueText = issue ? cadIssueRowText(issue, issueNames) : null;
     const failed = issue?.state === 'failed', blocked = issue?.state === 'blocked';
     const datumPlane = feature.kind === 'datum-plane', planeHovered = datumPlane && typeof hoveredReferencePlane === 'object' && hoveredReferencePlane?.featureId === feature.id;
     return <li key={feature.id} className={`cad-feature-node${highlightedFeatureIds.includes(feature.id) ? ' is-parameter-related' : ''}`} data-cad-feature-id={feature.id} data-cad-history-position={position}>

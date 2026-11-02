@@ -67,6 +67,17 @@ it('shows a refused Section with its own message and the code of its CAM issue',
   recorded = false;
   await act(async () => button('Preview section').click());
   expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
+  expect(host.querySelector('details')).toBeNull();
+});
+it('keeps the kernel\'s own words for a failed Section under a closed disclosure, out of the alert', async () => {
+  const message = 'The section could not be cut through this body. Move the section plane slightly or choose another body.';
+  const inspect = vi.fn(async () => { throw cadRefusalAt(CadError.received('kernel-operation-failed', message, { kernelMessage: 'BRepAlgoAPI_Section: not done' }),
+    { kind: 'cam-operation', operation: 'section', sourceId: 'pad' }); });
+  await act(async () => root.render(<CadSectionDialog bodies={[body]} initialBodyId="pad" version="v1" onInspect={inspect} onSend={async () => undefined} onClose={vi.fn()} />));
+  await act(async () => button('Preview section').click());
+  const alert = host.querySelector<HTMLElement>('[role=alert]'), disclosure = host.querySelector<HTMLDetailsElement>('details');
+  expect([alert?.textContent, alert?.dataset.cadIssueCode]).toEqual([message, 'kernel-operation-failed']);
+  expect([disclosure?.open, disclosure?.querySelector('summary')?.textContent, disclosure?.querySelector('p')?.textContent]).toEqual([false, 'Kernel message', 'BRepAlgoAPI_Section: not done']);
 });
 it('uses the selected raised body and signed plane midpoint while retaining exact custom offsets through review', async () => {
   const raised: typeof body = { featureId: 'raised', name: 'Raised', bounds: { min: [50, -20, 5], max: [70, -10, 10] } };

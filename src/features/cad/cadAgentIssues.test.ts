@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { CadBuildResult, CadDocument, CadFeature } from '@/domain/cad/cadDocument';
 import type { CadBodyKey } from '@/domain/cad/cadBodies';
 import { CAD_INPUT_BLOCKED, cadBuildIssues, NO_CAD_BUILD_ISSUES } from '@/domain/cad/cadBuildIssues';
+import { CadError } from '@/domain/cad/cadError';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { jsonByteLength } from '@/features/webmcp/diagnosticSummaries';
 import { CAD_AGENT_ISSUE_BYTES, CAD_AGENT_ISSUE_COUNT, cadAgentIssueDigest } from './cadAgentIssues';
@@ -33,6 +34,8 @@ describe('CAD issues in agent replies', () => {
       ['lost-body-parts', 'failed', { kind: 'body', key: 'pad', featureId: 'move3' }, []]]);
     // The kernel's own words stay in the diagnostic; the issue keeps the step and input.
     expect(digest.items[0].details).toEqual({ operation: 'extrude', input: null });
+    // A listed issue gains no kernel words of its own, whatever its place in the list.
+    expect(digest.items.map(item => 'kernelMessage' in item.details)).toEqual([false, false, false]);
     expect(digest.items[0].repairs).toEqual([{ id: 'command:edit-feature:pad', kind: 'command', label: 'Edit feature' }]);
     expect(digest.blocked).toEqual([{ cause: 'kernel:0:kernel-operation-failed', count: 30, featureIds: ['move0', 'move1', 'move2', 'move3', 'move4', 'move5', 'move6', 'move7'] }]);
     expect([digest.omitted, digest.omittedBlocked, 'unresolved' in digest]).toEqual([0, 22, false]);
@@ -70,5 +73,24 @@ describe('CAD issues in agent replies', () => {
     // A refusal that is no problem of a feature keeps the reply it had.
     const stale = await run('cad_edit_document', { expectedVersion: 'earlier', edits: [{ kind: 'set-parameter', name: 'depth', value: 4 }] });
     expect(stale).toMatchObject({ ok: false }); expect((stale as { error: object }).error).not.toHaveProperty('details');
+  });
+  it('gives the kernel\'s own words with a refusal that came back from it, in its issue, or in the details when no issue covers it', async () => {
+    const session = new CadSession(parseCadDocument({ ...createCadDocument('Part', 'cad_agent'), features: [sketch, pad] }));
+    const version = session.getSnapshot().version;
+    let refusal = CadError.received('kernel-operation-failed', 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.', { kernelMessage: 'Standard_ConstructionError: gp_Dir() - input vector has zero norm' });
+    const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build: null, buildIssues: NO_CAD_BUILD_ISSUES,
+      buildIssuesOf: () => NO_CAD_BUILD_ISSUES, inspectBuild: vi.fn(async () => { throw refusal; }) } as unknown as CadController;
+    const tools = cadSiteTools(() => controller), build = () => tools.find(tool => tool.name === 'cad_build')!.execute({ expectedVersion: version });
+    const failed = await build();
+    expect(failed).toMatchObject({ ok: false, error: { code: 'kernel-operation-failed', message: 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.',
+      details: { issue: { code: 'kernel-operation-failed', subject: { kind: 'document' }, details: { kernelMessage: 'Standard_ConstructionError: gp_Dir() - input vector has zero norm' } } } } });
+    // The message never repeats the kernel's words.
+    expect((failed as { error: { message: string } }).error.message).not.toContain('Standard_ConstructionError');
+    refusal = CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', { kernelMessage: 'WebAssembly.instantiate(): Out of memory' });
+    expect(await build()).toMatchObject({ ok: false, error: { code: 'kernel-unavailable', details: { kernelMessage: 'WebAssembly.instantiate(): Out of memory' } } });
+    // A refusal without kernel words keeps the reply it had.
+    refusal = new CadError('step-export', 'The bodies could not be written as a STEP file.');
+    const plain = await build();
+    expect(plain).toMatchObject({ ok: false, error: { code: 'step-export' } }); expect((plain as { error: object }).error).not.toHaveProperty('details');
   });
 });

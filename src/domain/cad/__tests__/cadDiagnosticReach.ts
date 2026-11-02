@@ -26,7 +26,8 @@ import ts from '@typescript/typescript6';
  *
  * It collects the first argument of each `CadError` raised (`new CadError(…)`, `CadError.checked(…)`, `CadError.received(…)`, or the
  * `super(…)` of a class extending `CadError`) and the `code` of each object literal, written plainly, quoted or as a computed literal
- * key, which carries a refusal to the `CadError` an inspection raises. A code is read through:
+ * key, which carries a refusal to the `CadError` an inspection raises. The bodies of the two factories are not walked: they raise the
+ * code their caller gave, which is read at the call. A code is read through:
  * - each branch of a conditional and each side of `??`, `||` and `&&`;
  * - constants, properties of object literals (from the last: a spread or a computed key it cannot tell may hold one, and an absent one
  *   holds none) and elements of list literals, by a literal key or, for a key it cannot tell, through every element and property;
@@ -138,13 +139,22 @@ export function bareExpression(node: ts.Expression): ts.Expression {
 }
 
 /** The application's compiler options, from its TypeScript configuration, without output. */
+/** The application's compiler options, read once per test file. */
+let applicationOptions: ts.CompilerOptions | undefined;
 function programOptions(): ts.CompilerOptions {
+  if (applicationOptions) return applicationOptions;
   const configuration = ts.getParsedCommandLineOfConfigFile(path.join(root, 'tsconfig.app.json'), {}, {
     ...ts.sys, onUnRecoverableConfigFileDiagnostic: diagnostic => { throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')); }
   });
   if (!configuration) throw new Error('The application has no TypeScript configuration.');
-  return { ...configuration.options, noEmit: true };
+  return applicationOptions = { ...configuration.options, noEmit: true };
 }
+/**
+ * The platform and package declaration files, parsed once per test file and shared by every index built from given text. Each such
+ * index is a program over the same declarations with the same options; a parsed source file is never changed, and TypeScript keeps each
+ * checker's symbols apart from the files it reads, so programs can share them as its language service does.
+ */
+const declarationFiles = new Map<string, ts.SourceFile>();
 /** The name of the interface, type alias or class that declares a member. */
 function ownerName(declaration: ts.Declaration): string | undefined {
   const owner = ts.isTypeLiteralNode(declaration.parent) && ts.isTypeAliasDeclaration(declaration.parent.parent) ? declaration.parent.parent : declaration.parent;
@@ -258,9 +268,14 @@ export class CadSourceIndex {
       const { fileExists, readFile, getSourceFile } = host, text = (name: string) => given.get(name.replaceAll('\\', '/'));
       host.fileExists = name => text(name) !== undefined || fileExists.call(host, name);
       host.readFile = name => text(name) ?? readFile.call(host, name);
-      host.getSourceFile = (name, version, ...rest) => {
+      host.getSourceFile = (name, version, onError, fresh) => {
         const found = text(name);
-        return found === undefined ? getSourceFile.call(host, name, version, ...rest) : ts.createSourceFile(name, found, version, true);
+        if (found !== undefined) return ts.createSourceFile(name, found, version, true);
+        if (fresh || !name.endsWith('.d.ts')) return getSourceFile.call(host, name, version, onError, fresh);
+        const key = `${typeof version === 'object' ? `${version.languageVersion}:${version.impliedNodeFormat ?? ''}:${version.jsDocParsingMode ?? ''}` : version}\n${name}`;
+        let shared = declarationFiles.get(key);
+        if (!shared) { shared = getSourceFile.call(host, name, version, onError); if (shared) declarationFiles.set(key, shared); }
+        return shared;
       };
     }
     const program = ts.createProgram({ rootNames: files.map(absolute), options, host });
@@ -503,6 +518,8 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   const push = ({ file, node }: CadDiagnosticRoot, receiver = false) => {
     const name = (node as { name?: ts.Node }).name;
     if (name && ts.isIdentifier(name) && stop.has(`${file}:${name.text}`)) return;
+    // A factory's caller gave the code it raises (`cadErrorCode`); its body only passes that code on.
+    if (isCadErrorFactory(node)) return;
     const named = name && propertyName(name as ts.PropertyName);
     if (named) declarations.add(`${file}:${named}`);
     // A variable's initializer and a class's constructor and field initializers are what using them runs.
@@ -925,6 +942,12 @@ export function methodUse(access: CadMemberRead): 'called' | 'passed' | 'write' 
 }
 
 /** The name a function is called by and the declaration it resolves to: a function declaration, or a variable holding the function. */
+/** Whether `node` is `CadError.checked` or `CadError.received`, whose callers give the code they raise as their first argument. */
+function isCadErrorFactory(node: ts.Node): boolean {
+  return ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && (node.name.text === 'checked' || node.name.text === 'received')
+    && node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword) === true && ts.isClassDeclaration(node.parent) && node.parent.name?.text === 'CadError';
+}
+
 function functionName(owner: ts.FunctionLikeDeclaration): { readonly name: string; readonly declaration: ts.Node } | undefined {
   if (ts.isFunctionDeclaration(owner) && owner.name) return { name: owner.name.text, declaration: owner };
   const holder = owner.parent;

@@ -45,11 +45,11 @@ function placeLoftSolid(shape: Shape3D, frame: CadResolvedFrame): Shape3D {
     transform.SetDisplacement(reference, target);
     // Own the native builder explicitly; the convenience transform hides it.
     builder = new oc.BRepBuilderAPI_Transform(shape.wrapped, transform, true, false);
-    if (!builder.IsDone()) throw new CadError('loft-placement', 'The loft could not be moved onto its datum plane. Rebuild the part; if this repeats, recreate the datum plane.');
+    if (!builder.IsDone()) throw CadError.received('loft-placement', 'The loft could not be moved onto its datum plane. Rebuild the part; if this repeats, recreate the datum plane.', { kernelMessage: 'OpenCascade could not place the fitted loft in its datum frame.' });
     const raw = builder.Shape();
     try {
       const placed = cast(raw);
-      if (!isShape3D(placed)) { cadKernelDisposeOwned(placed); throw new CadError('loft-placement', 'The loft could not be moved onto its datum plane. Rebuild the part; if this repeats, recreate the datum plane.'); }
+      if (!isShape3D(placed)) { cadKernelDisposeOwned(placed); throw CadError.received('loft-placement', 'The loft could not be moved onto its datum plane. Rebuild the part; if this repeats, recreate the datum plane.', { kernelMessage: 'Datum placement did not preserve the native loft solid.' }); }
       result = placed;
     } finally { cadKernelDisposeOwned(raw); }
     validateLoftSolid(result);

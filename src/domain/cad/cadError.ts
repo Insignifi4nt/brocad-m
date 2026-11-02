@@ -13,7 +13,7 @@ export type CadErrorFacts<C extends string> = string extends C ? [facts: never]
  * other code with any: the constructor's types require this of a literal code, `CadError.checked` is the path for a code known only at
  * run time, and both check it as they run, so no refusal lacks the facts of its code. Raising one otherwise is a programming error,
  * which throws rather than make a refusal its readers would misread.
- * `kernelMessage` keeps the kernel's own words for a refusal that came back from the worker; the message never repeats them.
+ * `kernelMessage` keeps the kernel's own account of a refusal, its words or the check it failed; the message never repeats it.
  */
 export class CadError<C extends string = string> extends Error {
   readonly code: string;
@@ -36,7 +36,10 @@ export class CadError<C extends string = string> extends Error {
     return facts === undefined ? new raise(code, message) : new raise(code, message, facts);
   }
 
-  /** The refusal a worker reply carries back, checked as `checked` does, with the kernel's own text bounded. */
+  /**
+   * The refusal a worker reply carries back, or one the kernel raises with its own account of which check failed, checked as `checked`
+   * does, with that account bounded.
+   */
   static received(code: string, message: string, extra: { readonly facts?: CadRefusalFacts[CadRefusalFactCode]; readonly kernelMessage?: string }): CadError {
     const error = CadError.checked(code, message, extra.facts);
     if (extra.kernelMessage) (error as { kernelMessage?: string }).kernelMessage = cadBoundedText(extra.kernelMessage, MAX_CAD_KERNEL_MESSAGE);
