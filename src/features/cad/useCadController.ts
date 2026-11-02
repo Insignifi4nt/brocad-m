@@ -32,18 +32,20 @@ import { Value } from '@sinclair/typebox/value';
 import { isCadImportData } from '@/domain/cad/cadImportData';
 import { needsCadSketchPreparation, prepareCadEdits, type CadSketchEditWarning, type CadSketchWarningsRecord } from './cadEditPreparation';
 import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
+import { createCadKernelLoader, loadCadKernelClient } from './kernel/cadKernelLoader';
 import type { CadSketchConstraintInspection } from './cadSketchConstraintInspection';
 import { useCadSketchEditing } from './useCadSketchEditing';
 
 type App = Pick<ReturnType<typeof useWorkbenchAppController>, 'connectedWorkbench' | 'workbenchInteractionLocked' | 'runAgentWorkbenchOperation'>
   & Partial<Pick<ReturnType<typeof useWorkbenchAppController>, 'showStatusToast'>>;
-type Kernel = ReturnType<typeof import('./kernel/cadKernelClient').createCadKernelClient>;
 export function downloadCadBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url; anchor.download = name; anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
+/** Imports the kernel client's module, only once a CAD operation first needs it, and creates a client. */
+const loadKernel = () => import('./kernel/cadKernelClient').then(module => module.createCadKernelClient());
 const fileBase = (name: string) => name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').slice(0, 100) || 'part';
 function importUnitReceipt(declaration: DxfUnitDeclaration) {
   if (declaration.status !== 'malformed' || declaration.rawValue === null || declaration.rawValue.length <= 160) return declaration;
@@ -93,7 +95,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   const [sketchSolvers] = useState(() => createCadSketchSolverLoader(() => import('./sketch-solver/cadSketchSolverClient').then(module => module.createCadSketchSolverClient())));
   const constraintInspections = useRef(new WeakMap<CadDocument, Map<string, CadSketchConstraintInspection>>());
   const current = useRef({ app, open }); current.current = { app, open };
-  const kernel = useRef<Promise<Kernel> | null>(null);
+  // A kernel module that cannot be loaded refuses the request as kernel-unavailable, and the next request loads it again.
+  const [kernels] = useState(() => createCadKernelLoader(loadKernel));
   const buildAbort = useRef<AbortController | null>(null);
   const boundAdapter = useRef(app.connectedWorkbench?.adapter);
   const sketchEditing = useCadSketchEditing({ session, storage: app.connectedWorkbench?.adapter ?? null, open,
@@ -104,7 +107,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       const workbench = connected(); editable(expectedVersion); session.assertWorkflowClosed('editor');
       return { document: session.getSnapshot().document, storage: workbench.adapter };
     },
-    createKernel: async () => (await import('./kernel/cadKernelClient')).createCadKernelClient(),
+    createKernel: () => loadCadKernelClient(loadKernel),
     prepare: prepareDocument,
     onChange: setFeaturePreview
   }), session);
@@ -114,7 +117,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       const workbench = connected(); editable(expectedVersion); session.assertWorkflowClosed(scope);
       return { document: session.getSnapshot().document, storage: workbench.adapter };
     },
-    createKernel: async () => (await import('./kernel/cadKernelClient')).createCadKernelClient(),
+    createKernel: () => loadCadKernelClient(loadKernel),
     prepare: prepareDocument,
   }), session);
   useLayoutEffect(() => { featureInputCoordinator.invalidate(); }, [featureInputCoordinator, snapshot.version, app.connectedWorkbench?.adapter, open, app.workbenchInteractionLocked, storageBusy]);
@@ -127,10 +130,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     setOpen(value);
   }
 
-  function getKernel() {
-    kernel.current ??= import('./kernel/cadKernelClient').then(module => module.createCadKernelClient());
-    return kernel.current;
-  }
+  function getKernel() { return kernels.load(); }
   /** Prepares a previewed batch: every preview goes through here, and none looks for solve warnings. */
   async function prepareDocument(document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) {
     return needsCadSketchPreparation(document, edits)
@@ -189,7 +189,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     libraryAbort.current?.abort(); session.setWorkflowOpen(false, 'library');
     importAbort.current?.abort();
     buildAbort.current?.abort();
-    void kernel.current?.then(value => value.dispose()); kernel.current = null;
+    kernels.dispose();
     if (previewUrl.current) { const url = previewUrl.current; window.setTimeout(() => URL.revokeObjectURL(url), 60_000); }
   }, []);
 

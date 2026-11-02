@@ -37,6 +37,7 @@ import type { CadSketchLineExtendPreparation } from '@/domain/cad/cadSketchTrimE
 import { graphCellSelectionAt, intersectingCircleSketch, lensAreaMm2 } from '@/domain/cad/__tests__/cadIntersectingCellFixtures';
 import { CadError } from '@/domain/cad/cadError';
 import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { CAD_KERNEL_NOT_LOADED } from './kernel/cadKernelLoader';
 import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
 
 const kernel = vi.hoisted(() => ({ build: vi.fn(), section: vi.fn(), export: vi.fn(), importSolid: vi.fn(), importDxf: vi.fn(), importDxfCurve: vi.fn(), inspectTopology: vi.fn(), resolveTopologyPicks: vi.fn(), dispose: vi.fn() }));
@@ -222,6 +223,34 @@ describe('sketch solve warnings', () => {
     await act(async () => { await h.cad().edit(length(20)); });
     expect(createSketchClient).toHaveBeenCalledTimes(6); expect(sketchSolver.solve).toHaveBeenCalledOnce();
     expect(h.session.getSnapshot().version).not.toBe(before.version);
+  });
+
+  it('refuses a kernel request as an unavailable kernel when the kernel client\'s module cannot be loaded, a request waiting on that load included, and loads it for the next', async () => {
+    const words = 'Failed to fetch dynamically imported module: https://example.test/assets/cadKernelClient-1a2b3c.js';
+    const unloaded = () => { throw new TypeError(words); };
+    const h = await harness(true); const version = h.session.getSnapshot().version, request = { bodyId: 'p', plane: 'XY' as const, offset: 5 };
+    kernel.section.mockResolvedValue({ bodyId: 'p', plane: 'XY', offset: 5, contourCount: 1, entities: [{ type: 'circle', layer: 'CAD', center: { x: 0, y: 0 }, radius: 10 }] });
+    // The shared client: a request that waits on the failing load fails with it.
+    createClient.mockImplementationOnce(unloaded);
+    let refusals: unknown[] = [];
+    await act(async () => { refusals = await Promise.all([1, 2].map(() => h.cad().inspectSection(request, version, 'section').then(() => null, (error: unknown) => error))); });
+    const unavailable = { name: 'CadError', code: 'kernel-unavailable', message: CAD_KERNEL_NOT_LOADED, kernelMessage: words };
+    expect(refusals).toEqual([expect.objectContaining(unavailable), expect.objectContaining(unavailable)]);
+    expect(createClient).toHaveBeenCalledOnce();
+    await act(async () => { await h.cad().inspectSection(request, version, 'section'); });
+    expect(createClient).toHaveBeenCalledTimes(2); expect(kernel.section).toHaveBeenCalledOnce();
+    // A feature input's own client fails the same way, and the next input loads one.
+    await act(async () => h.session.edit([
+      { kind: 'add-feature', feature: { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null } },
+      { kind: 'add-feature', feature: { kind: 'fillet', id: 'round', name: 'Round', suppressed: false, targetId: 'pad', radius: 1, selection: null } }
+    ]));
+    const before = h.session.getSnapshot();
+    const mesh = { featureId: 'pad', name: 'Pad', positions: [], normals: [], indices: [], edges: [], faceGroups: [], edgeGroups: [], volume: 2000, bounds: { min: [0, 0, 0] as const, max: [20, 10, 10] as const } };
+    kernel.build.mockResolvedValue({ buildId: 'input-pad', meshes: [mesh], diagnostics: [], durationMs: 1 } satisfies CadBuildResult);
+    await act(async () => { await h.cad().inspectBuild(before.version); });
+    createClient.mockImplementationOnce(unloaded);
+    expect(await h.cad().buildFeatureInput({ featureId: 'round', bodyId: 'pad' }, before.version).catch((error: unknown) => error)).toMatchObject(unavailable);
+    expect((await h.cad().buildFeatureInput({ featureId: 'round', bodyId: 'pad' }, before.version)).result.buildId).toBe('input-pad');
   });
 
   it('looks for solve warnings only once an edit is committed, never while one is previewed', async () => {

@@ -440,6 +440,13 @@ describe('native instance loading and failures', () => {
     expect(second).toMatchObject({ kind: 'solved', diagnostics: { degreesOfFreedom: 3 } });
     expect(records).toMatchObject([{ native: 'failed', nativeReset: 'failure' }, { native: 'answer' }]);
     expect(loadNative).toHaveBeenCalledTimes(2);
+    // A solve queued behind one whose loads all failed loads again, and solves once a load succeeds.
+    let loads = 0;
+    const loading = runtime(async () => { if (++loads <= 3) throw new TypeError('Failed to fetch'); return loadCadSketchTestNativeSolver(); });
+    const [unloaded, queued] = await Promise.all([loading.solver.solve(input).catch((error: unknown) => error), loading.solver.solve(input)]);
+    expect(unloaded).toMatchObject({ code: 'sketch-failed', native: 'load-failed', message: CAD_SKETCH_NATIVE_LOAD_FAILED, kernelMessage: 'Failed to fetch' });
+    expect(queued).toMatchObject({ kind: 'solved', diagnostics: { degreesOfFreedom: 3 } });
+    expect(loading.records).toMatchObject([{ native: 'load-failed', loadAttempts: 3 }, { native: 'answer', loadAttempts: 1 }]); expect(loading.loadNative).toHaveBeenCalledTimes(4);
   });
 
   it('fetches the module again after a failed download, and compiles it once', async () => {

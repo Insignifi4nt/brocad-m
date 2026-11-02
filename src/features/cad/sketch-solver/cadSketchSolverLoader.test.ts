@@ -11,9 +11,11 @@ describe('sketch solver loading', () => {
   it('gives a solver module that cannot be loaded as the solver failing, with the browser\'s words, and loads it again on the next request', async () => {
     const loaded = client(), load = vi.fn<() => Promise<CadSketchSolverClient>>().mockRejectedValueOnce(new TypeError(CHUNK)).mockResolvedValue(loaded);
     const loader = createCadSketchSolverLoader(load);
-    const failed = await loader.load().then(() => null, (error: unknown) => error);
+    // A request queued behind the failing load fails with it rather than starting a second load.
+    const [failed, queued] = await Promise.all([loader.load(), loader.load()].map(request => request.then(() => null, (error: unknown) => error)));
     expect(failed).toBeInstanceOf(CadSketchSolverFailure);
     expect(failed).toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_NOT_LOADED, kernelMessage: CHUNK });
+    expect(queued).toBe(failed); expect(load).toHaveBeenCalledOnce();
     // The failed load is not kept: the next request loads the module again, and keeps what it loads.
     await expect(loader.load()).resolves.toBe(loaded);
     await expect(loader.load()).resolves.toBe(loaded);

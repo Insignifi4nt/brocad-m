@@ -5,6 +5,8 @@ import type { CadKernelRequest } from './cadKernelProtocol';
 import { createCadDocument } from '../../../domain/cad/cadSchema';
 import { isCadKernelReply } from './cadKernelProtocol';
 import type { CadTopologyInspectResult } from '../../../domain/cad/cadTopology';
+import { MAX_CAD_DIAGNOSTIC_MESSAGE, MAX_CAD_KERNEL_MESSAGE, cadBoundedText } from '../../../domain/cad/cadIssueCodes';
+import { cadKernelRequestFailure } from './cadKernelFailures';
 
 const inspectionResult: CadTopologyInspectResult = { bodyId: 'body', buildId: 'test-build', total: 1, nextOffset: null, descriptors: [{
   kind: 'edge', key: 'edge-key', curveType: 'line', length: 1, start: [0, 0, 0], end: [1, 0, 0], centroid: [.5, 0, 0], bounds: { min: [0, 0, 0], max: [1, 0, 0] }
@@ -232,6 +234,64 @@ describe('CAD worker lifetime and cancellation', () => {
       const disposed = await pending.catch((error: unknown) => error);
       expect([disposed instanceof CadError, (disposed as Error).name]).toEqual([false, 'AbortError']);
       expect(await client.build(createCadDocument()).catch((error: unknown) => error instanceof CadError ? 'kernel failure' : (error as Error).message)).toBe('CAD kernel client has been disposed.');
+    } finally { client.dispose(); }
+  });
+
+  it('retires a worker whose kernel could not load, so a queued request and the next one start another, while any other refusal keeps it', async () => {
+    const transports: TestTransport[] = [];
+    const client = createCadKernelClient(() => { const transport = new TestTransport(); transports.push(transport); return transport; });
+    const unloaded = (id: number) => ({ id, kind: 'error', code: 'kernel-unavailable', kernelMessage: 'WebAssembly.instantiate(): out of memory',
+      message: 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.' });
+    try {
+      const first = client.build(createCadDocument()).catch((error: unknown) => error), queued = client.build(createCadDocument());
+      transports[0].onmessage?.(new MessageEvent('message', { data: unloaded(1) }));
+      expect(await first).toMatchObject({ name: 'CadError', code: 'kernel-unavailable', kernelMessage: 'WebAssembly.instantiate(): out of memory' });
+      // The queued request goes to a new worker, which builds it.
+      expect([transports.length, transports[0].terminated, transports[1].messages.map(message => message.id)]).toEqual([2, true, [2]]);
+      transports[1].reply(2); await queued;
+      // So does the next request after another such failure.
+      const again = client.build(createCadDocument()).catch((error: unknown) => error);
+      transports[1].onmessage?.(new MessageEvent('message', { data: unloaded(3) }));
+      expect(await again).toMatchObject({ code: 'kernel-unavailable' }); expect(transports[1].terminated).toBe(true);
+      const next = client.build(createCadDocument()); transports[2].reply(4); await next;
+      // A refusal of a worker whose kernel runs leaves it running.
+      const refused = client.build(createCadDocument()).catch((error: unknown) => error);
+      transports[2].onmessage?.(new MessageEvent('message', { data: { id: 5, kind: 'error', code: 'invalid-parameter-metadata', message: 'Parameter metadata refers to missing parameter "width".' } }));
+      expect(await refused).toMatchObject({ code: 'invalid-parameter-metadata' });
+      expect([transports.length, transports[2].terminated]).toEqual([3, false]);
+    } finally { client.dispose(); }
+  });
+
+  it('never takes text a worker did not write as an app refusal for the message: a reply without a code is the request failing, its text apart', async () => {
+    const transport = new TestTransport(), client = createCadKernelClient(() => transport);
+    const words = 'BRep_API: command not done', long = 'Standard_Failure '.repeat(400).slice(0, MAX_CAD_DIAGNOSTIC_MESSAGE);
+    const requests = [
+      ['build', () => client.build(createCadDocument())],
+      ['export', () => client.export(createCadDocument(), 'step')],
+      ['section', () => client.section(createCadDocument(), { bodyId: 'body', plane: 'XY', offset: 2.5 })]
+    ] as const;
+    // Every shape of error reply the protocol admits: without a code, its text as the message, apart from it, both, or none; with a code.
+    const shapes: readonly (readonly [Record<string, unknown>, { readonly code: string; readonly message?: string; readonly kernelMessage?: string }])[] = [
+      [{ message: words }, { code: 'kernel-operation-failed', kernelMessage: words }],
+      [{ message: words, kernelMessage: 'Standard_ConstructionError' }, { code: 'kernel-operation-failed', kernelMessage: 'Standard_ConstructionError' }],
+      [{ message: long }, { code: 'kernel-operation-failed', kernelMessage: cadBoundedText(long, MAX_CAD_KERNEL_MESSAGE) }],
+      [{ message: '' }, { code: 'kernel-operation-failed' }],
+      [{ code: 'kernel-operation-failed', message: 'The part could not be rebuilt.', kernelMessage: words }, { code: 'kernel-operation-failed', message: 'The part could not be rebuilt.', kernelMessage: words }],
+      [{ code: 'invalid-section', message: 'Choose a body to section.' }, { code: 'invalid-section', message: 'Choose a body to section.' }]
+    ];
+    let id = 0;
+    try {
+      for (const [kind, send] of requests) for (const [reply, expected] of shapes) {
+        const failure = send().catch((error: unknown) => error);
+        transport.onmessage?.(new MessageEvent('message', { data: { id: ++id, kind: 'error', ...reply } }));
+        const received = await failure as CadError;
+        const message = expected.message ?? cadKernelRequestFailure(kind, words).message;
+        expect([received instanceof CadError, received.code, received.message, received.kernelMessage], `${kind} ${JSON.stringify(reply).slice(0, 80)}`)
+          .toEqual([true, expected.code, message, expected.kernelMessage]);
+        // A worker's text reaches the message only as an app refusal it carries under a code.
+        if (reply.code === undefined) expect(received.message).not.toBe(reply.message);
+      }
+      expect(transport.terminated).toBe(false);
     } finally { client.dispose(); }
   });
 

@@ -4,6 +4,8 @@ import { parseCadSectionRequest, type CadSectionRequest, type CadSectionResult }
 import { isCadKernelEnvelope, isCadKernelReply, type CadKernelReply, type CadKernelRequest } from './cadKernelProtocol';
 import { CadError } from '../../../domain/cad/cadError';
 import { cadReceivedDiagnostic } from '../../../domain/cad/cadIssueCodes';
+import { cadKernelRequestFailure } from './cadKernelFailures';
+import { cadKernelUnavailable as kernelUnavailable } from './cadKernelLoader';
 import { parseCadTopologyInspectRequest, parseCadTopologyResolvePicksRequest, type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '../../../domain/cad/cadTopology';
 import { parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest, type CadTopologyAdjacency, type CadTopologyAdjacencyRequest,
@@ -51,14 +53,15 @@ export const CAD_KERNEL_STOPPED = 'The CAD kernel failed with an unexpected erro
 /** The worker's reply could not be deserialized, or does not follow the kernel protocol. */
 export const CAD_KERNEL_UNREADABLE = 'The CAD kernel\'s reply could not be read, so the kernel was stopped. Retry the operation to restart it; if this repeats, reload the page.';
 /**
- * A failure of the worker itself rather than of the request, which fails every request it held alike, as a kernel that cannot load does:
- * `kernel-unavailable`, with the browser's own words, or the check the reply failed, as its kernel message.
+ * The failure error reply `reply` to request `kind` carries. A coded reply is a refusal the worker's own code wrote, every failure there
+ * passing `cadKernelRequestFailure`, which keeps the kernel's words apart from the message. A reply without a code, which no worker of
+ * this app sends, holds text the app did not write, so that text never becomes the message: it is `kernel-operation-failed` with the
+ * request's message, as the worker would have replied, and the text, bounded, as its kernel message.
  */
-function kernelUnavailable(message: string, cause: unknown): CadError {
-  // A DOMException, which a refused worker or hand-over raises, need not be an Error of this realm.
-  const words = typeof cause === 'object' && cause !== null ? (cause as { readonly message?: unknown }).message : cause;
-  const text = typeof words === 'string' ? words : '';
-  return CadError.received('kernel-unavailable', message, text ? { kernelMessage: text } : {});
+function receivedFailure(kind: string, reply: Extract<CadKernelReply, { kind: 'error' }>): CadError {
+  if (reply.code) return CadError.received(reply.code, reply.message, reply);
+  const failure = cadKernelRequestFailure(kind, reply.kernelMessage ?? reply.message);
+  return CadError.received(failure.code, failure.message, failure);
 }
 
 function matchesTopologyRequest(request: CadKernelRequest, reply: CadKernelReply): boolean {
@@ -128,7 +131,11 @@ export function createCadKernelClient(makeWorker: () => CadWorkerTransport = () 
         if (!isCadKernelReply(event.data)) { fail(kernelUnavailable(CAD_KERNEL_UNREADABLE, 'The reply does not follow the kernel protocol.')); return; }
         if (event.data.id !== active?.request.id) return; // A stale worker can never overwrite a newer request.
         if (!active || !matchesTopologyRequest(active.request, event.data)) { fail(new Error('CAD topology response does not match the requested body and build.')); return; }
-        finish(event.data.kind === 'error' ? event.data.code ? CadError.received(event.data.code, event.data.message, event.data) : new Error(event.data.message) : event.data);
+        if (event.data.kind !== 'error') { finish(event.data); return; }
+        const failure = receivedFailure(active.request.kind, event.data);
+        // A worker whose kernel could not load fails every request alike, so it is retired, and the next request, a queued one included,
+        // starts another; any other refusal leaves the worker running.
+        if (failure.code === 'kernel-unavailable') fail(failure); else finish(failure);
       };
       // An error event carries the worker's own words; a script that failed to load gives a plain event without them.
       transport.onerror = event => { if (worker === transport) fail(kernelUnavailable(CAD_KERNEL_STOPPED, (event as Partial<ErrorEvent> | null)?.message)); };

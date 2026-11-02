@@ -14,10 +14,16 @@ import { importCadDxfCurve, parseCadDxfCurveImportInput } from '../../../domain/
 import { inspectCadParameters } from '../../../domain/cad/cadParameters';
 import { cadSketchGraphWithoutPlacement } from '../../../domain/cad/cadSketchPlacedDimensions';
 
-/** Inspections never initialize WASM or reconstruct a missing/stale native snapshot. */
+/**
+ * Inspections never initialize WASM or reconstruct a missing/stale native snapshot. `initialize` loads the kernel each time it is called;
+ * the runtime keeps a load that succeeded, and never one that failed.
+ */
 export function createCadKernelRuntime(initialize: () => Promise<void>) {
-  // A kernel that fails to load fails every request alike, so the reply names that cause rather than the request's.
-  const load = () => initialize().catch((error: unknown) => {
+  // A kernel that fails to load fails every request alike, so the reply names that cause rather than the request's. The load is not kept,
+  // so the next request that needs the kernel loads it again, though the client retires a worker that replies so.
+  let loaded: Promise<void> | undefined;
+  const load = () => loaded ??= new Promise<void>(resolve => resolve(initialize())).catch((error: unknown) => {
+    loaded = undefined;
     const kernelMessage = cadKernelMessage(error);
     throw CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', kernelMessage ? { kernelMessage } : {});
   });
