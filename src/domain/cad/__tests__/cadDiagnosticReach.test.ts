@@ -17,6 +17,8 @@ const walk = (source: string, options?: CadDiagnosticReachOptions) => {
   expect(cadSkippedMemberReads(index, found), 'member reads skipped silently').toEqual([]);
   return found;
 };
+/** The report of a name the walk cannot resolve, which a source that declares nothing by that name uses. */
+const UNFOUND = (name: string) => `${FILE}: ${name}, a name the walk cannot resolve to a declaration of the source`;
 /** The codes and unread sites it finds. */
 const reach = (source: string, options?: CadDiagnosticReachOptions) => {
   const found = walk(source, options);
@@ -41,7 +43,7 @@ describe('CAD diagnostic reach', () => {
       if (kind === 'b') throw new CadError(codeFor(kind), '');
       const refusal = { code: 'hidden', ...extra(kind) };
       throw new CadError(refusal.code, '');
-    }`).unexpanded).toEqual([`${FILE}: code`, `${FILE}: codeFor(kind), from ${FILE}: codeFor(…)`, `${FILE}: refusal.code, from ${FILE}: extra(…).code`]);
+    }`).unexpanded).toEqual([`${FILE}: code`, `${FILE}: codeFor(kind), from ${FILE}: codeFor(…)`, UNFOUND('codeFor'), UNFOUND('extra'), `${FILE}: refusal.code, from ${FILE}: extra(…).code`]);
   });
 
   it('reads a parameter at each call the walk reaches, and reports a function passed on', () => {
@@ -56,7 +58,7 @@ describe('CAD diagnostic reach', () => {
       export function unused() { throw refuse({ code: 'unreached-refusal' }); }`;
     expect(reach(source)).toEqual({ codes: ['literal-refusal', 'pair-refusal', 'slot-refusal'], unexpanded: [] });
     expect(reach(`${source}\nexport const later = () => [1].map(refuse);`).unexpanded).toEqual([]);
-    expect(reach(source.replace('TABLE.slots.forEach(', 'later(refuse); TABLE.slots.forEach(')).unexpanded).toEqual([`${FILE}: refuse passed on`]);
+    expect(reach(source.replace('TABLE.slots.forEach(', 'later(refuse); TABLE.slots.forEach(')).unexpanded).toEqual([UNFOUND('later'), `${FILE}: refuse passed on`]);
   });
 
   it('takes a caught error\'s code where it is read, and lists the site', () => {
@@ -159,11 +161,11 @@ describe('CAD diagnostic reach', () => {
       if (!inspection.eligible) throw new CadError(inspection.code, inspection.message);
     }`;
     expect(reach(`function inspect(sketch: { name: string }) { return cache.get(sketch.name); }\n${check}`).unexpanded)
-      .toEqual([`${FILE}: inspection.code, from ${FILE}: cache.get(…).code`]);
+      .toEqual([UNFOUND('cache'), `${FILE}: inspection.code, from ${FILE}: cache.get(…).code`]);
     expect(reach(`function inspect(sketch: { name: string }) { let result = { eligible: true }; if (!sketch.name) result = { eligible: false, code: 'empty' }; return result; }\n${check}`).unexpanded)
       .toEqual([`${FILE}: inspection.code, from ${FILE}: result.code`]);
     expect(reach(`function inspect(sketch: { name: string }) { return new Inspection(sketch); }\n${check}`).unexpanded)
-      .toEqual([`${FILE}: inspection.code, from ${FILE}: new Inspection(sketch).code`]);
+      .toEqual([`${FILE}: Inspection, a class the walk cannot tell, constructed`, UNFOUND('Inspection'), `${FILE}: inspection.code, from ${FILE}: new Inspection(sketch).code`]);
   });
 });
 
@@ -391,8 +393,7 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
     const visit = (node: ts.Node): void => { if (ts.isNewExpression(node)) constructions.push(node); ts.forEachChild(node, visit); };
     visit(either.files.get(FILE)!);
     const classOf = (declaration: ts.Node) => (declaration.parent as ts.ClassDeclaration).name?.text;
-    expect(constructions.map(construction => either.calledDeclarations(construction, ts.isConstructorDeclaration).map(classOf))).toEqual([['Other', 'CadError']]);
-    expect(either.calledDeclarations(constructions[0], declaration => classOf(declaration) === 'CadError').map(classOf)).toEqual(['CadError']);
+    expect(constructions.map(construction => either.calledDeclarations(construction).map(classOf))).toEqual([['Other', 'CadError']]);
   });
 
   it('reports a raise whose code it cannot read, and a factory or the class used where it cannot read the code', () => {
@@ -420,5 +421,137 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
       `${FILE}: CadError.checked, a CadError factory whose code the walk did not read`,
       `${FILE}: CadError.received, a CadError factory whose code the walk did not read`,
       `${FILE}: CadError['checked'], a CadError factory whose code the walk did not read`]);
+  });
+});
+
+describe('CAD diagnostic reach through default exports, closed to what it cannot find', () => {
+  const ERRORS = { 'src/errors.ts': `export ${CAD_ERROR}` };
+  /** The walk from `check` in `src/check.ts` among `files` and the errors module, with what it finds and what its check finds skipped. */
+  const across = (files: Readonly<Record<string, string>>, options?: CadDiagnosticReachOptions) => {
+    const index = new CadSourceIndex({ ...ERRORS, ...files });
+    const found = cadDiagnosticReach(index, index.exported(FILE, 'check'), options);
+    return { index, found, result: { codes: [...found.codes].sort(), unexpanded: found.unexpanded, skipped: cadSkippedMemberReads(index, found) } };
+  };
+  const result = (files: Readonly<Record<string, string>>, options?: CadDiagnosticReachOptions) => across(files, options).result;
+  const subclass = (code: string, exported = 'export default class Refusal') =>
+    `import { CadError } from './errors'; ${exported} extends CadError { constructor() { super('${code}', ''); } }`;
+  const construct = (from: string, imported = 'Refusal') => `import ${imported} from '${from}'; export function check() { throw new Refusal(); }`;
+  const CALL_DEFAULT = `import refuse from './refusal'; export function check() { refuse(); }`;
+  const UNTOLD = (name: string) => `${FILE}: ${name}, a class the walk cannot tell, constructed`;
+
+  it('follows a default export, declared named or unnamed or an expression, through a default import, a renamed import and a re-export', () => {
+    const cases: readonly (readonly [string, Readonly<Record<string, string>>])[] = [
+      // A default class with a constructor of its own and a default function, which the walk took for undeclared names before.
+      ['default-subclass', { 'src/refusal.ts': subclass('default-subclass'), [FILE]: construct('./refusal') }],
+      ['default-function', { 'src/refusal.ts': `import { CadError } from './errors'; export default function refuse() { throw new CadError('default-function', ''); }`,
+        [FILE]: CALL_DEFAULT }],
+      ['anonymous-class', { 'src/refusal.ts': subclass('anonymous-class', 'export default class'), [FILE]: construct('./refusal') }],
+      ['anonymous-function', { 'src/refusal.ts': `import { CadError } from './errors'; export default function () { throw new CadError('anonymous-function', ''); }`,
+        [FILE]: CALL_DEFAULT }],
+      ['default-arrow', { 'src/refusal.ts': `import { CadError } from './errors'; export default () => { throw new CadError('default-arrow', ''); };`, [FILE]: CALL_DEFAULT }],
+      // A default function given on, to be called wherever it goes.
+      ['default-arrow-given', { 'src/refusal.ts': `import { CadError } from './errors'; export default () => { throw new CadError('default-arrow-given', ''); };`,
+        [FILE]: `import refuse from './refusal'; export function check(run: (each: () => void) => void) { run(refuse); }` }],
+      // Read only for a member, it runs that member alone.
+      ['default-object', { 'src/refusal.ts': `import { CadError } from './errors'; export default { refuse() { throw new CadError('default-object', ''); },
+        unread() { throw new CadError('default-object-unread', ''); } };`,
+        [FILE]: `import table from './refusal'; export function check() { table.refuse(); }` }],
+      // A default object given on, any of whose methods may then be called.
+      ['default-object-given', { 'src/refusal.ts': `import { CadError } from './errors'; export default { refuse() { throw new CadError('default-object-given', ''); } };`,
+        [FILE]: `import table from './refusal'; export function check(run: (value: object) => void) { run(table); }` }],
+      ['default-class-expression', { 'src/refusal.ts': `import { CadError } from './errors'; export default (class extends CadError { constructor() { super('default-class-expression', ''); } });`,
+        [FILE]: construct('./refusal') }],
+      ['default-named-import', { 'src/refusal.ts': subclass('default-named-import'), [FILE]: construct('./refusal', '{ default as Refusal }') }],
+      ['default-re-export', { 'src/refusal.ts': subclass('default-re-export'), 'src/barrel.ts': `export { default } from './refusal';`, [FILE]: construct('./barrel') }],
+      ['default-renamed-re-export', { 'src/refusal.ts': subclass('default-renamed-re-export'), 'src/barrel.ts': `export { default as Refusal } from './refusal';`,
+        [FILE]: construct('./barrel', '{ Refusal }') }],
+      ['named-as-default', { 'src/refusal.ts': `${subclass('named-as-default', 'class Refusal')} export { Refusal as default };`, [FILE]: construct('./refusal') }],
+      ['default-by-name', { 'src/refusal.ts': `${subclass('default-by-name', 'class Refusal')} export default Refusal;`, [FILE]: construct('./refusal') }],
+      ['default-imported-on', { 'src/refusal.ts': subclass('default-imported-on'), 'src/barrel.ts': `import Refusal from './refusal'; export default Refusal;`, [FILE]: construct('./barrel') }]
+    ];
+    for (const [code, files] of cases) expect(result(files), code).toEqual({ codes: [code], unexpanded: [], skipped: [] });
+  });
+
+  it('reads a parameter\'s code at each call through a renamed import, a default import and a default re-export', () => {
+    const raise = (declaration: string) => ({ 'src/raise.ts': `import { CadError } from './errors'; ${declaration}` });
+    const DEFAULT_FUNCTION = raise(`export default function refuse(code: string): never { throw new CadError(code, ''); }`);
+    const cases: readonly (readonly [string, Readonly<Record<string, string>>])[] = [
+      ['renamed-import', { ...raise(`export function refuse(code: string): never { throw new CadError(code, ''); }`),
+        [FILE]: `import { refuse as deny } from './raise'; export function check() { deny('renamed-import'); }` }],
+      ['default-parameter', { ...DEFAULT_FUNCTION, [FILE]: `import deny from './raise'; export function check() { deny('default-parameter'); }` }],
+      ['default-arrow-parameter', { ...raise(`export default (code: string): never => { throw new CadError(code, ''); };`),
+        [FILE]: `import deny from './raise'; export function check() { deny('default-arrow-parameter'); }` }],
+      ['default-re-exported-parameter', { ...DEFAULT_FUNCTION, 'src/barrel.ts': `export { default as deny } from './raise';`,
+        [FILE]: `import { deny } from './barrel'; export function check() { deny('default-re-exported-parameter'); }` }],
+      ['default-subclass-parameter', { 'src/sub.ts': `import { CadError } from './errors'; export default class Refusal extends CadError { constructor(code: string) { super(code, ''); } }`,
+        [FILE]: `import Denial from './sub'; export function check() { throw new Denial('default-subclass-parameter'); }` }]
+    ];
+    for (const [code, files] of cases) expect(result(files), code).toEqual({ codes: [code], unexpanded: [], skipped: [] });
+  });
+
+  it('reports, rather than skips, a name it cannot find in the source, a namespace used as a value, and code of the project it does not hold', () => {
+    // Forms the index has no rule for: a destructured export, a TypeScript namespace, and a default sought through `export *`, which carries none.
+    expect(result({ 'src/raise.ts': `import { CadError } from './errors'; export const { refuse } = { refuse: () => { throw new CadError('destructured-export', ''); } };`,
+      [FILE]: `import { refuse } from './raise'; export function check() { refuse(); }` })).toEqual({ codes: [], unexpanded: [UNFOUND('refuse')], skipped: [] });
+    expect(result({ 'src/raise.ts': `import { CadError } from './errors'; export const { Refusal } = { Refusal: class extends CadError { constructor() { super('destructured-class', ''); } } };`,
+      [FILE]: `import { Refusal } from './raise'; export function check() { throw new Refusal(); }` })).toEqual({ codes: [], unexpanded: [UNTOLD('Refusal'), UNFOUND('Refusal')], skipped: [] });
+    expect(result({ [FILE]: `import { CadError } from './errors'; namespace Refusals { export function refuse() { throw new CadError('namespace-member', ''); } }
+      export function check() { Refusals.refuse(); }` }).unexpanded).toContain(UNFOUND('Refusals'));
+    expect(result({ 'src/refusal.ts': subclass('star-default'), 'src/barrel.ts': `export * from './refusal';`, [FILE]: construct('./barrel') }).unexpanded)
+      .toEqual([UNTOLD('Refusal'), UNFOUND('Refusal')]);
+    // A namespace given on as a value runs all its exports.
+    expect(result({ 'src/raise.ts': `import { CadError } from './errors'; export function refuse(): never { throw new CadError('namespace-value', ''); }`,
+      [FILE]: `import * as raise from './raise'; export function check() { Object.values(raise).forEach(each => each()); }` }))
+      .toEqual({ codes: ['namespace-value'], unexpanded: [`${FILE}: raise, a namespace used as a value, which the walk cannot follow`], skipped: [] });
+    // Code of the project the index does not hold, here a file outside `src`.
+    expect(result({ 'packages/raise.ts': `import { CadError } from '../src/errors'; export function refuse() { throw new CadError('unindexed', ''); } export const table = { refuse };`,
+      [FILE]: `import { refuse, table } from '../packages/raise'; export function check(kind: number) { if (kind) refuse(); table.refuse(); }` }))
+      .toEqual({ codes: [], unexpanded: [UNFOUND('refuse'), UNFOUND('table'), `${FILE}: table.refuse, a member declared in code of the project the walk does not hold`], skipped: [] });
+    // The reviewer's element of a constant array.
+    expect(result({ 'src/refusal.ts': `import { CadError } from './errors'; class Refusal extends CadError { constructor() { super('array-subclass', ''); } } export const kinds = [Refusal] as const;`,
+      [FILE]: `import { kinds } from './refusal'; export function check() { throw new kinds[0](); }` }).unexpanded).toContain(UNTOLD('kinds[0]'));
+  });
+});
+
+describe('CAD diagnostic reach coverage, checked apart from the walk', () => {
+  const ERRORS = { 'src/errors.ts': `export ${CAD_ERROR}` };
+  const across = (files: Readonly<Record<string, string>>, options?: CadDiagnosticReachOptions) => {
+    const index = new CadSourceIndex({ ...ERRORS, ...files });
+    const found = cadDiagnosticReach(index, index.exported(FILE, 'check'), options);
+    expect(cadSkippedMemberReads(index, found), 'the walk as it is').toEqual([]);
+    return { index, found };
+  };
+  const sorted = (skipped: readonly string[]) => [...skipped].sort();
+  const RAISE = { 'src/raise.ts': `import { CadError } from './errors'; export function refuse(): never { throw new CadError('entered', ''); }` };
+
+  it('flags a name, a member read and a call of project code the walk neither entered nor reported', () => {
+    const { index, found } = across({ ...RAISE,
+      [FILE]: `import * as raise from './raise'; import { refuse } from './raise'; export function check(kind: number) { if (kind) refuse(); raise.refuse(); }` });
+    expect([...found.codes]).toEqual(['entered']);
+    const notEntered = { ...found, entries: found.entries.filter(entry => !(ts.isFunctionDeclaration(entry.node) && entry.node.name?.text === 'refuse')) };
+    const REFUSE = 'src/raise.ts: refuse, which the walk neither entered nor reported';
+    expect(sorted(cadSkippedMemberReads(index, notEntered))).toEqual([`${FILE}: raise.refuse(), a call of ${REFUSE}`,
+      `${FILE}: raise.refuse, a member read running ${REFUSE}`, `${FILE}: refuse(), a call of ${REFUSE}`, `${FILE}: refuse, a name of ${REFUSE}`]);
+  });
+
+  it('flags a name the walk did not resolve unless it reported it, and code of the project it does not hold', () => {
+    const destructured = across({ 'src/raise.ts': `import { CadError } from './errors'; export const { refuse } = { refuse: () => { throw new CadError('destructured-export', ''); } };`,
+      [FILE]: `import { refuse } from './raise'; export function check() { refuse(); }` });
+    expect(sorted(cadSkippedMemberReads(destructured.index, { ...destructured.found, unresolved: new Set() }))).toEqual([
+      `${FILE}: refuse(), a call of src/raise.ts: refuse, which the walk neither entered nor reported`,
+      `${FILE}: refuse, a name of src/raise.ts: refuse, which the walk neither entered nor reported`]);
+    const unindexed = across({ 'packages/raise.ts': `import { CadError } from '../src/errors'; export function refuse() { throw new CadError('unindexed', ''); }`,
+      [FILE]: `import { refuse } from '../packages/raise'; export function check() { refuse(); }` });
+    expect(sorted(cadSkippedMemberReads(unindexed.index, { ...unindexed.found, unresolved: new Set() }))).toEqual([
+      `${FILE}: refuse(), a call of packages/raise.ts: refuse, code the walk does not hold, not reported`,
+      `${FILE}: refuse, a name of packages/raise.ts: refuse, code the walk does not hold, not reported`]);
+  });
+
+  it('accepts a declaration `stop` names only as stopped at', () => {
+    const stopped = across({ ...RAISE, [FILE]: `import { refuse } from './raise'; export function check() { refuse(); }` }, { stop: new Set(['src/raise.ts:refuse']) });
+    expect([...stopped.found.codes]).toEqual([]);
+    expect(sorted(cadSkippedMemberReads(stopped.index, { ...stopped.found, stopped: new Set() }))).toEqual([
+      `${FILE}: refuse(), a call of src/raise.ts: refuse, which the walk neither entered nor reported`,
+      `${FILE}: refuse, a name of src/raise.ts: refuse, which the walk neither entered nor reported`]);
   });
 });

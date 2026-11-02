@@ -6,8 +6,12 @@ import ts from '@typescript/typescript6';
 
 /**
  * The `CadError` codes code can raise, found without running it. From each root it follows, through the source of `src`, every name a
- * walked function uses: the nearest declaration in scope and an import to the declaration it names. Every member read, by name or by
- * element, is followed or reported, never skipped (`accesses`):
+ * walked function uses: the nearest declaration in scope and an import to the declaration it names, a default export, named or not,
+ * being the export named `default`. It fails closed: a name it cannot resolve to a declaration of the source is reported, never taken
+ * for one outside it or for no code, and only a name TypeScript resolves to the platform's or a library's declarations alone, or to no
+ * value, is skipped; a namespace import used as a value is reported and runs all its exports; and a name or member declared in code of
+ * the project outside `src`, which the walk does not hold, is reported. Every member read, by name or by element, is followed or
+ * reported, never skipped (`accesses`):
  * - a namespace import's member is the export it names;
  * - a constant object literal's member, or one of the object a parameter stands for (`receivers`), is its last property of that name;
  * - any other member, `this` members included, is each declaration TypeScript gives it on the receiver's type, with the members that
@@ -33,16 +37,18 @@ import ts from '@typescript/typescript6';
  * - followed: each of these named by its own name, a constant that holds it, in turn, a namespace import's member by name or by a
  *   literal element, a re-export (`export { … } from`, `export *`, an import exported on), a namespace re-exported (`export * as`, a
  *   namespace import exported on), a class expression, a constant object's property, a readonly field's value or either branch of a
- *   conditional; and a class's base (`extends`) named any of these ways;
+ *   conditional; a default export of a class, a function, an expression or a name, or a name exported `as default`, through a default
+ *   import, `import { default as … }` and `export { default } from`; and a class's base (`extends`) named any of these ways;
  * - followed: a subclass with a constructor of its own, and a function, whose parameter gives the code, at each `new`, `super(…)` and
  *   call of it the walk reaches by its name, a namespace's member or a constant that holds it;
  * - reported where it is: a `new` or `super(…)` whose class the walk cannot tell, as one held by a parameter, a variable that is not
  *   constant, a call's result or a member it cannot read;
  * - reported: the class, a class raising it or a factory given on, returned, destructured or held other than by a constant; a factory
  *   called through `call` or `apply`; a subclass or function passed on, or unnamed; a raise whose code is missing or spread.
- * A check apart from the walk (`cadSkippedMemberReads`) asks TypeScript what each walked call and construction runs, each part of a union
- * callee included, and finds any raise or code argument the walk neither read nor reported; a part TypeScript's types reduced away, as a
- * class of the same shape as another, only the walk follows. A code is read through:
+ * A check apart from the walk (`cadSkippedMemberReads`) asks TypeScript what each name, member read, call and construction in the walked
+ * code resolves to, each part of a union callee included: each declaration of the project it gives must be one the walk entered,
+ * stopped at or reported, and each raise or code argument one it read or reported. A part TypeScript's types reduced away, as a class of
+ * the same shape as another, only the walk follows. A code is read through:
  * - each branch of a conditional and each side of `??`, `||` and `&&`;
  * - constants, properties of object literals (from the last: a spread or a computed key it cannot tell may hold one, and an absent one
  *   holds none) and elements of list literals, by a literal key or, for a key it cannot tell, through every element and property;
@@ -80,10 +86,17 @@ export interface CadDiagnosticReach {
   /** Each function or constructor whose parameter gives a code, with the calls and constructions at which it read that parameter. */
   readonly argumentsRead: ReadonlyMap<ts.Node, ReadonlySet<ts.Node>>;
   /**
-   * The functions and constructors among those whose calls it cannot all see, reported as passed on or unnamed, and the `CadError`
-   * factories once it reported one, or a class raising `CadError`, given on as a value.
+   * The functions and constructors among those whose calls it cannot all see, reported as passed on or unnamed, the methods it reported
+   * used as a value it does not follow, and the `CadError` factories once it reported one, or a class raising `CadError`, given on as a value.
    */
   readonly escaped: ReadonlySet<ts.Node>;
+  /**
+   * The names it reported because it cannot resolve them to a declaration of the source, and TypeScript does not show them to be outside
+   * it: no name is taken to run nothing because the walk cannot find what it names.
+   */
+  readonly unresolved: ReadonlySet<ts.Node>;
+  /** The declarations it did not enter because `stop` names them or the type that declares them. */
+  readonly stopped: ReadonlySet<ts.Node>;
 }
 export interface CadDiagnosticRoot { readonly file: string; readonly node: ts.Node }
 /** A node the walk entered. Under `held`, a constant object read only for its members, it walks no method or accessor of that object. */
@@ -117,6 +130,7 @@ interface CadReference { readonly file: string; readonly site: ts.Identifier | C
 interface Member { readonly file: string; readonly node: ts.Node }
 /** A member a call runs, with the type that declares the member called on the receiver, as `file:name`. */
 interface CalledMember extends Member { readonly through: string | undefined }
+interface CadAccessedMembers { readonly members: readonly CalledMember[]; readonly source: boolean; readonly unindexed: boolean }
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 
@@ -167,8 +181,7 @@ export function bareExpression(node: ts.Expression): ts.Expression {
   return node;
 }
 
-/** The application's compiler options, from its TypeScript configuration, without output. */
-/** The application's compiler options, read once per test file. */
+/** The application's compiler options, from its TypeScript configuration, without output, read once per test file. */
 let applicationOptions: ts.CompilerOptions | undefined;
 function programOptions(): ts.CompilerOptions {
   if (applicationOptions) return applicationOptions;
@@ -189,6 +202,37 @@ function ownerName(declaration: ts.Declaration): string | undefined {
   const owner = ts.isTypeLiteralNode(declaration.parent) && ts.isTypeAliasDeclaration(declaration.parent.parent) ? declaration.parent.parent : declaration.parent;
   return (ts.isInterfaceDeclaration(owner) || ts.isTypeAliasDeclaration(owner) || ts.isClassLike(owner)) && owner.name ? owner.name.text : undefined;
 }
+/** The export name of a module's default export. */
+const DEFAULT = 'default';
+function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
+  return ts.canHaveModifiers(node) && !!ts.getModifiers(node)?.some(modifier => modifier.kind === kind);
+}
+/**
+ * Whether `statement` is a module's default export written as a declaration or an expression: `export default function` or `class`,
+ * named or not, or `export default` of an expression other than a name, which an `export default name` exports as that name.
+ */
+function isDefaultDeclaration(statement: ts.Statement): statement is ts.FunctionDeclaration | ts.ClassDeclaration | ts.ExportAssignment {
+  if (ts.isExportAssignment(statement)) return !statement.isExportEquals && !ts.isIdentifier(statement.expression);
+  return (ts.isFunctionDeclaration(statement) && !!statement.body || ts.isClassDeclaration(statement))
+    && hasModifier(statement, ts.SyntaxKind.ExportKeyword) && hasModifier(statement, ts.SyntaxKind.DefaultKeyword);
+}
+/** What declaration `node` holds as a value it was given once: a `const` variable's initializer, or the expression a module exports as default. */
+function constantValue(node: ts.Node): ts.Expression | undefined {
+  if (ts.isVariableDeclaration(node)) return (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const) !== 0 ? node.initializer : undefined;
+  return ts.isExportAssignment(node) && !node.isExportEquals ? node.expression : undefined;
+}
+/** What declaration `node` is initialized to: a variable's initializer, or the expression a module exports as default. */
+function initialValue(node: ts.Node): ts.Expression | undefined {
+  return ts.isVariableDeclaration(node) ? node.initializer : ts.isExportAssignment(node) && !node.isExportEquals ? node.expression : undefined;
+}
+/** The name a declaration is used by in its own file, when it has one. */
+function declarationName(node: ts.Node): string | undefined {
+  return (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name ? node.name.text
+    : ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) ? node.name.text : undefined;
+}
+/** Where a program file stands: the indexed `source`; `outside`, the platform's or a library's declarations, or data; or `unindexed` code of the project. */
+export type CadSourcePlace = 'source' | 'outside' | 'unindexed';
+
 /** A declaration with no body or value of its own: a member an interface, a type or an abstract class declares. */
 function isSignature(declaration: ts.Declaration): boolean {
   return ts.isMethodSignature(declaration) || ts.isPropertySignature(declaration) || ts.isPropertyDeclaration(declaration) && !declaration.initializer
@@ -225,8 +269,16 @@ function lexical(identifier: ts.Identifier): ts.Node | 'parameter' | undefined {
 }
 /** Bindings' kinds are words; syntax kinds are numbers. */
 const isBinding = (found: ts.Node | Binding): found is Binding => typeof found.kind === 'string';
+/** What each identifier names, kept since the walk and its check ask again for the same name. */
+const bindings = new WeakMap<ts.Identifier, ts.Node | Binding | undefined>();
 /** What `identifier` names in its own file: its declaration, a {@link Binding}, or undefined for a name declared elsewhere. */
 function binding(identifier: ts.Identifier): ts.Node | Binding | undefined {
+  if (bindings.has(identifier)) return bindings.get(identifier);
+  const found = scopeBinding(identifier);
+  bindings.set(identifier, found);
+  return found;
+}
+function scopeBinding(identifier: ts.Identifier): ts.Node | Binding | undefined {
   const name = identifier.text, variable = { kind: 'variable' } as const;
   const inStatements = (statements: readonly ts.Statement[]) => {
     for (const statement of statements) {
@@ -279,14 +331,14 @@ export class CadSourceIndex {
   private readonly checker: ts.TypeChecker;
   /** The indexed path of each program source file that is the source's. */
   private readonly paths = new Map<ts.SourceFile, string>();
-  private readonly calls = new Map<string, { readonly members: readonly CalledMember[]; readonly source: boolean } | undefined>();
+  private readonly calls = new Map<string, CadAccessedMembers | undefined>();
   private readonly callKeys = new Map<ts.Node, number>();
 
   private readonly referenceCache = new Map<ts.Node, readonly CadReference[]>();
 
   /**
-   * Indexes the source of `src`, or `sources`, text by path, for a test of the walk itself. The files are those of one TypeScript program
-   * with the application's compiler options, so each receiver has a type.
+   * Indexes the source of `src`, or `sources`, text by path, for a test of the walk itself, of which it holds the files in `src`. The files
+   * are those of one TypeScript program with the application's compiler options, so each receiver has a type.
    */
   constructor(sources?: Readonly<Record<string, string>>) {
     const files = sources ? Object.keys(sources) : execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', 'src'], { cwd: root, encoding: 'utf8' })
@@ -311,7 +363,8 @@ export class CadSourceIndex {
     }
     const program = ts.createProgram({ rootNames: files.map(absolute), options, host });
     this.checker = program.getTypeChecker();
-    for (const file of files) {
+    // Given text outside `src` stays in the program as code of the project the index does not hold.
+    for (const file of files.filter(file => file.startsWith('src/'))) {
       const source = program.getSourceFile(absolute(file));
       if (!source) throw new Error(`The program has no source file for ${file}.`);
       this.files.set(file, source);
@@ -334,9 +387,11 @@ export class CadSourceIndex {
       const list = this.members.get(name), entry = { file, node };
       if (list) list.push(entry); else this.members.set(name, [entry]);
     };
-    const exported = (node: ts.Node) => ts.canHaveModifiers(node) && !!ts.getModifiers(node)?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword);
+    const exported = (node: ts.Node) => hasModifier(node, ts.SyntaxKind.ExportKeyword);
     for (const statement of source.statements) {
-      if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name && exported(statement))
+      // A default export is exported as `default` only, whatever its own name.
+      if (isDefaultDeclaration(statement)) exports.set(DEFAULT, { module: file, name: DEFAULT });
+      else if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isEnumDeclaration(statement)) && statement.name && exported(statement))
         exports.set(statement.name.text, { module: file, name: statement.name.text });
       if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name)) continue;
@@ -363,7 +418,7 @@ export class CadSourceIndex {
         else if (ts.isNamedExports(statement.exportClause)) for (const element of statement.exportClause.elements)
           exports.set(element.name.text, { module, name: (element.propertyName ?? element.name).text });
       }
-      if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) exports.set('default', { module: file, name: statement.expression.text });
+      if (ts.isExportAssignment(statement) && !statement.isExportEquals && ts.isIdentifier(statement.expression)) exports.set(DEFAULT, { module: file, name: statement.expression.text });
     }
     // Every class's and object literal's members, which may implement a member an interface or type declares.
     const visit = (node: ts.Node) => {
@@ -388,7 +443,51 @@ export class CadSourceIndex {
     if (local === 'parameter') return [];
     if (local) return [{ file, node: local }];
     const imported = this.imports.get(file)?.get(identifier.text);
-    return imported && imported.name !== '*' ? this.exported(imported.module, imported.name, new Set()) : [];
+    return imported && imported.name !== '*' ? this.exported(imported.module, imported.name) : [];
+  }
+  /** Every declaration module `module` exports, by name or as its default, its own or another module's through a re-export. */
+  moduleExports(module: string): readonly CadDiagnosticRoot[] {
+    const names = new Set<string>(), seen = new Set<string>();
+    const collect = (from: string, star: boolean) => {
+      if (seen.has(from)) return;
+      seen.add(from);
+      for (const name of this.exports.get(from)?.keys() ?? []) if (!star || name !== DEFAULT) names.add(name);
+      for (const next of this.starExports.get(from) ?? []) collect(next, true);
+    };
+    collect(module, false);
+    return [...names].flatMap(name => this.exported(module, name));
+  }
+  /** The path of the file that holds `node`, from the repository's root. */
+  where(node: ts.Node): string {
+    const source = node.getSourceFile();
+    return this.paths.get(source) ?? path.relative(root, source.fileName).replaceAll('\\', '/');
+  }
+  /** Where the file that holds `node` stands (`CadSourcePlace`). */
+  place(node: ts.Node): CadSourcePlace {
+    const source = node.getSourceFile();
+    if (this.paths.has(source)) return 'source';
+    return source.isDeclarationFile || /\.json$/i.test(source.fileName) || /[\\/]node_modules[\\/]/.test(source.fileName) ? 'outside' : 'unindexed';
+  }
+  /**
+   * The value TypeScript gives what `identifier` names, past imports and re-exports, a shorthand property's included: its declarations,
+   * none for a name it cannot resolve, and whether the name is of a value rather than only a type.
+   */
+  nameDeclarations(identifier: ts.Identifier): { readonly declarations: readonly ts.Declaration[]; readonly value: boolean } {
+    const parent = identifier.parent;
+    let symbol = ts.isShorthandPropertyAssignment(parent) && parent.name === identifier ? this.checker.getShorthandAssignmentValueSymbol(parent)
+      : this.checker.getSymbolAtLocation(identifier);
+    if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = this.checker.getAliasedSymbol(symbol);
+    return symbol ? { declarations: symbol.declarations ?? [], value: (symbol.flags & ts.SymbolFlags.Value) !== 0 } : { declarations: [], value: true };
+  }
+  /**
+   * Whether TypeScript shows that `identifier`, which the index cannot resolve to a declaration of the source, names nothing of it: a value
+   * every declaration of which is the platform's, a library's or data, a type, which runs nothing, or `undefined`, `arguments` or
+   * `globalThis`. Any other name, one TypeScript cannot resolve or one declared in code of the project, is not.
+   */
+  outsideName(identifier: ts.Identifier): boolean {
+    const { declarations, value } = this.nameDeclarations(identifier);
+    if (!declarations.length) return value && ['undefined', 'arguments', 'globalThis'].includes(identifier.text);
+    return !value || declarations.every(declaration => this.place(declaration) === 'outside');
   }
   /**
    * The module namespace `identifier` names in `file`, unless a declaration in scope shadows it: a namespace import, or a name imported
@@ -416,25 +515,49 @@ export class CadSourceIndex {
     }
     return undefined;
   }
-  exported(module: string, name: string, seen: Set<string>): readonly CadDiagnosticRoot[] {
+  private readonly exportCache = new Map<string, readonly CadDiagnosticRoot[]>();
+  /**
+   * The declaration module `module` exports as `name`: a function, class, enum or variable it declares, its default export (`export
+   * default` of a declaration, named or not, or of an expression), or what it exports on from another module, by name, by a default
+   * re-export or through `export *`, which never carries a default. Empty when the index finds none.
+   */
+  exported(module: string, name: string, seen: Set<string> = new Set()): readonly CadDiagnosticRoot[] {
+    // Kept per module and name; one being found gives none to a cycle of re-exports through it.
+    const key = `${module}\n${name}`, top = seen.size === 0;
+    if (top) {
+      const cached = this.exportCache.get(key);
+      if (cached) return cached;
+      this.exportCache.set(key, []);
+    }
+    const found = this.exportedOnce(module, name, seen);
+    if (top) this.exportCache.set(key, found);
+    return found;
+  }
+  private exportedOnce(module: string, name: string, seen: Set<string>): readonly CadDiagnosticRoot[] {
     if (seen.has(module)) return [];
     seen.add(module);
     const entry = this.exports.get(module)?.get(name);
     if (entry) {
-      if (entry.module !== module) return this.exported(entry.module, entry.name, new Set());
+      if (entry.module !== module) return this.exported(entry.module, entry.name);
       const source = this.files.get(module)!;
+      if (entry.name === DEFAULT) {
+        const declared = source.statements.find(isDefaultDeclaration);
+        return declared ? [{ file: module, node: declared }] : [];
+      }
       for (const statement of source.statements) {
         if (ts.isFunctionDeclaration(statement) && !statement.body) continue;
-        if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name?.text === entry.name) return [{ file: module, node: statement }];
+        if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isEnumDeclaration(statement)) && statement.name?.text === entry.name)
+          return [{ file: module, node: statement }];
         if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations)
           if (ts.isIdentifier(declaration.name) && declaration.name.text === entry.name) return [{ file: module, node: declaration }];
       }
       // An import exported on (`import { name } from …; export { name };`) is the declaration it imports.
       const imported = this.imports.get(module)?.get(entry.name);
-      return imported && imported.name !== '*' ? this.exported(imported.module, imported.name, new Set()) : [];
+      return imported && imported.name !== '*' ? this.exported(imported.module, imported.name) : [];
     }
+    if (name === DEFAULT) return [];
     for (const star of this.starExports.get(module) ?? []) {
-      const found = this.exported(star, name, seen);
+      const found = this.exportedOnce(star, name, seen);
       if (found.length) return found;
     }
     return [];
@@ -447,23 +570,23 @@ export class CadSourceIndex {
    * abstract class of the source declares, the members of that name of the source's object literals and classes whose type fits the
    * receiver's. A declaration outside the source, the platform's or a library's, runs nothing of the source, and nor does a signature no
    * object or class of the source fits. Only members `runs` says the read runs are tried against the receiver's type, which is the costly
-   * part. `source` when any declaration is the source's. Undefined when the type gives no declaration at all, as for a receiver of type
-   * `any`.
+   * part. `source` when any declaration is the source's; `unindexed` when any is code of the project the index does not hold. Undefined
+   * when the type gives no declaration at all, as for a receiver of type `any`.
    */
-  accessedMembers(access: CadMemberRead, name: string, runs: (member: ts.Node) => boolean): { readonly members: readonly CalledMember[]; readonly source: boolean } | undefined {
+  accessedMembers(access: CadMemberRead, name: string, runs: (member: ts.Node) => boolean): CadAccessedMembers | undefined {
     const id = this.callKeys.get(access) ?? this.callKeys.set(access, this.callKeys.size).get(access)!, key = `${id}:${name}`;
     const cached = this.calls.get(key);
     if (cached || this.calls.has(key)) return cached;
     const declarations = ts.isPropertyAccessExpression(access) ? this.checker.getSymbolAtLocation(access.name)?.declarations ?? []
       : this.propertyDeclarations(this.checker.getTypeAtLocation(access.expression), name);
-    let found: { members: CalledMember[]; source: boolean } | undefined;
+    let found: CadAccessedMembers | undefined;
     if (declarations.length) {
       const receiver = this.checker.getApparentType(this.checker.getNonNullableType(this.checker.getTypeAtLocation(access.expression)));
       const members = new Map<ts.Node, CalledMember>();
-      let candidates: readonly Member[] | undefined, source = false;
+      let candidates: readonly Member[] | undefined, source = false, unindexed = false;
       for (const declaration of declarations) {
         const file = this.paths.get(declaration.getSourceFile());
-        if (file === undefined) continue;
+        if (file === undefined) { unindexed ||= this.place(declaration) === 'unindexed'; continue; }
         source = true;
         candidates ??= this.membersNamed(name).filter(candidate => runs(candidate.node));
         const owner = ownerName(declaration), through = owner && `${file}:${owner}`;
@@ -473,22 +596,26 @@ export class CadSourceIndex {
         for (const candidate of candidates) if (candidate.node !== declaration && !members.has(candidate.node)
           && (isSignature(declaration) || this.overrides(candidate.node, name, declaration)) && this.fits(candidate.node, receiver)) members.set(candidate.node, { ...candidate, through });
       }
-      found = { members: [...members.values()], source };
+      found = { members: [...members.values()], source, unindexed };
     }
     this.calls.set(key, found);
     return found;
   }
-  /** The declarations TypeScript gives member `name` read by `access`: the source's, with their files, and whether any is outside it. */
-  memberDeclarations(access: CadMemberRead, name: string): { readonly members: readonly Member[]; readonly outside: boolean } {
+  /**
+   * The declarations TypeScript gives member `name` read by `access`: the source's, with their files, whether any is outside it, and
+   * whether any is code of the project the index does not hold.
+   */
+  memberDeclarations(access: CadMemberRead, name: string): { readonly members: readonly Member[]; readonly outside: boolean; readonly unindexed: boolean } {
     const declarations = ts.isPropertyAccessExpression(access) ? this.checker.getSymbolAtLocation(access.name)?.declarations ?? []
       : this.propertyDeclarations(this.checker.getTypeAtLocation(access.expression), name);
     const members: Member[] = [];
-    let outside = false;
+    let outside = false, unindexed = false;
     for (const declaration of declarations) {
       const file = this.paths.get(declaration.getSourceFile());
-      if (file === undefined) outside = true; else members.push({ file, node: declaration });
+      if (file !== undefined) members.push({ file, node: declaration });
+      else if (this.place(declaration) === 'outside') outside = true; else unindexed = true;
     }
-    return { members, outside };
+    return { members, outside, unindexed };
   }
   /** The string literals the type of key `key` allows, when it allows nothing else. */
   literalKeys(key: ts.Expression): readonly string[] | undefined {
@@ -533,6 +660,24 @@ export class CadSourceIndex {
     });
   }
   /**
+   * Every declaration TypeScript gives member read `access` on the receiver's type, past imports and re-exports, as a namespace's member
+   * is: for a key read by element, each literal its type allows. A check of the walk's coverage uses it.
+   */
+  readDeclarations(access: CadMemberRead): readonly ts.Declaration[] {
+    let symbols: readonly ts.Symbol[];
+    if (ts.isPropertyAccessExpression(access)) { const symbol = this.checker.getSymbolAtLocation(access.name); symbols = symbol ? [symbol] : []; }
+    else {
+      const receiver = this.checker.getTypeAtLocation(access.expression), key = this.checker.getTypeAtLocation(access.argumentExpression);
+      symbols = (key.isUnion() ? key.types : [key]).flatMap(part => part.isStringLiteral() || part.isNumberLiteral() ? this.propertySymbols(receiver, String(part.value)) : []);
+    }
+    return symbols.flatMap(symbol => (symbol.flags & ts.SymbolFlags.Alias ? this.checker.getAliasedSymbol(symbol) : symbol).declarations ?? []);
+  }
+  private propertySymbols(type: ts.Type, name: string): readonly ts.Symbol[] {
+    if (type.isUnionOrIntersection()) return type.types.flatMap(part => this.propertySymbols(part, name));
+    const symbol = this.checker.getPropertyOfType(this.checker.getApparentType(type), name);
+    return symbol ? [symbol] : [];
+  }
+  /**
    * Whether `member` overrides `declaration`: its class implements or extends a type whose member `name` is `declaration`, or is a member
    * of a class above it that overrides `declaration` in turn.
    */
@@ -544,34 +689,30 @@ export class CadSourceIndex {
       .some(inherited => inherited === declaration || this.overrides(inherited, name, declaration, seen))));
   }
   /**
-   * The declarations with a body of the source that call or construction `call` may run, as TypeScript resolves it, that `relevant`
-   * accepts: a function, method or constructor, inherited by a class without a constructor of its own, an overload standing for its
-   * implementation. None when it resolves to none of the source, as for the platform's, or a class with no constructor at any depth. A
-   * callee of a union type may run any part's, so each part's are given, as TypeScript resolves such a call to one part's declaration
-   * only; a part TypeScript reduced away, as a class of the same shape as another, it cannot give, so there the walk is the only check,
-   * following each branch by declaration. Otherwise only a call whose callee's type has a signature `relevant` accepts is resolved, since resolving one checks its
-   * arguments, callbacks included, which is the costly part. A check of the walk uses it.
+   * The code of the project that call or construction `call` may run, as TypeScript gives it: for each signature of the callee's type, each
+   * part of a union apart, the function, method or constructor with a body that implements it, inherited by a class without a constructor
+   * of its own, an overload standing for its implementation; for a `super(…)`, the constructor it resolves to. Code the index does not
+   * hold is given too. None for the platform's and libraries', a signature only a type declares, or a class with no constructor at any
+   * depth. A part TypeScript reduced away, as a class of the same shape as another, it cannot give, so there the walk is the only check,
+   * following each branch by declaration. No call is resolved against its arguments, which is the costly part. A check of the walk uses it.
    */
-  calledDeclarations(call: ts.CallExpression | ts.NewExpression, relevant: (declaration: ts.Node) => boolean): readonly ts.Node[] {
-    const accepted = (declaration: ts.SignatureDeclaration | ts.JSDocSignature | undefined) => {
-      const found = this.implementation(declaration);
-      return found !== undefined && relevant(found) ? [found] : [];
+  calledDeclarations(call: ts.CallExpression | ts.NewExpression): readonly ts.Node[] {
+    if (ts.isCallExpression(call) && call.expression.kind === ts.SyntaxKind.SuperKeyword) return this.implementation(this.checker.getResolvedSignature(call)?.declaration);
+    const type = this.checker.getNonNullableType(this.checker.getTypeAtLocation(call.expression));
+    const signatures = (part: ts.Type) => {
+      const apparent = this.checker.getApparentType(part);
+      return ts.isNewExpression(call) ? apparent.getConstructSignatures() : apparent.getCallSignatures();
     };
-    if (ts.isCallExpression(call) && call.expression.kind === ts.SyntaxKind.SuperKeyword) return accepted(this.checker.getResolvedSignature(call)?.declaration);
-    const type = this.checker.getTypeAtLocation(call.expression);
-    const signatures = (part: ts.Type) => ts.isNewExpression(call) ? part.getConstructSignatures() : part.getCallSignatures();
-    if (type.isUnion()) return [...new Set(type.types.flatMap(part => signatures(part).flatMap(signature => accepted(signature.declaration))))];
-    if (!signatures(type).some(signature => accepted(signature.declaration).length > 0)) return [];
-    return accepted(this.checker.getResolvedSignature(call)?.declaration);
+    return [...new Set((type.isUnion() ? type.types : [type]).flatMap(part => signatures(part).flatMap(signature => this.implementation(signature.declaration))))];
   }
-  /** The declaration of the source with a body that signature declaration `declaration` stands for: itself, or an overload's implementation. */
-  private implementation(declaration: ts.SignatureDeclaration | ts.JSDocSignature | undefined): ts.Node | undefined {
-    if (!declaration || ts.isJSDocSignature(declaration) || !this.paths.has(declaration.getSourceFile())) return undefined;
-    if (!isFunctionLike(declaration) || declaration.body) return declaration;
+  /** The code of the project that signature declaration `declaration` stands for: itself with a body, or an overload's implementation. */
+  private implementation(declaration: ts.SignatureDeclaration | ts.JSDocSignature | undefined): readonly ts.Node[] {
+    if (!declaration || ts.isJSDocSignature(declaration) || !isFunctionLike(declaration) || this.place(declaration) === 'outside') return [];
+    if (declaration.body) return [declaration];
     const owner = declaration.parent, name = declaration.name && propertyName(declaration.name);
     const siblings: readonly ts.Node[] = ts.isClassLike(owner) ? owner.members : ts.isSourceFile(owner) || ts.isBlock(owner) || ts.isModuleBlock(owner) ? owner.statements : [];
-    return siblings.find(sibling => isFunctionLike(sibling) && sibling.body !== undefined && sibling.kind === declaration.kind
-      && (ts.isConstructorDeclaration(sibling) || sibling.name !== undefined && propertyName(sibling.name) === name)) ?? declaration;
+    return siblings.filter(sibling => isFunctionLike(sibling) && sibling.body !== undefined && sibling.kind === declaration.kind
+      && (ts.isConstructorDeclaration(sibling) || sibling.name !== undefined && propertyName(sibling.name) === name)).slice(0, 1);
   }
   private factories: readonly ts.Node[] | undefined;
   /** The `CadError` factories the source declares. */
@@ -593,28 +734,58 @@ export class CadSourceIndex {
     if (type.isUnionOrIntersection()) return type.types.flatMap(part => this.propertyDeclarations(part, name));
     return this.checker.getPropertyOfType(this.checker.getApparentType(type), name)?.declarations ?? [];
   }
-  /**
-   * Every use of `name` in the source that resolves to `declaration`: the name itself, and a namespace's member that names it, by name or by
-   * a literal element.
-   */
-  references(declaration: CadDiagnosticRoot, name: string): readonly CadReference[] {
-    const cached = this.referenceCache.get(declaration.node);
-    if (cached) return cached;
-    const found: CadReference[] = [];
-    const names = (target: CadDiagnosticRoot) => target.node === declaration.node;
+  private importers: Map<ts.Node, { readonly file: string; readonly name: string }[]> | undefined;
+  /** The names each declaration of the source is imported by, in each file that imports it, under its own name, another or as a default. */
+  private importedNames(): ReadonlyMap<ts.Node, readonly { readonly file: string; readonly name: string }[]> {
+    if (this.importers) return this.importers;
+    const found = new Map<ts.Node, { readonly file: string; readonly name: string }[]>();
+    for (const [file, imports] of this.imports) for (const [local, { module, name }] of imports) {
+      if (name === '*') continue;
+      for (const { node } of this.exported(module, name)) (found.get(node) ?? found.set(node, []).get(node)!).push({ file, name: local });
+    }
+    return this.importers = found;
+  }
+  private namespaceMembers: readonly { readonly file: string; readonly site: CadMemberRead; readonly module: string; readonly key: string }[] | undefined;
+  /** Every member of a namespace the source reads by name or by a literal element, with the module and the export name it reads. */
+  private namespaceReads() {
+    if (this.namespaceMembers) return this.namespaceMembers;
+    const found: { file: string; site: CadMemberRead; module: string; key: string }[] = [];
     for (const [file, source] of this.files) {
-      if (!source.text.includes(name)) continue;
+      const imports = this.imports.get(file)!;
+      if (![...imports.values()].some(entry => entry.name === '*' || this.exportedNamespace(entry.module, entry.name, new Set()))) continue;
       const visit = (node: ts.Node) => {
-        if (ts.isIdentifier(node) && node.text === name && isReference(node) && this.resolve(file, node).some(names)) found.push({ file, site: node });
-        else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
           const key = ts.isPropertyAccessExpression(node) ? node.name : bareExpression(node.argumentExpression), receiver = bareExpression(node.expression);
-          const module = (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) && key.text === name && ts.isIdentifier(receiver) ? this.namespace(file, receiver) : undefined;
-          if (module && this.exported(module, name, new Set()).some(names)) found.push({ file, site: node });
+          const text = ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : undefined;
+          const module = text !== undefined && ts.isIdentifier(receiver) && imports.has(receiver.text) ? this.namespace(file, receiver) : undefined;
+          if (module && text !== undefined) found.push({ file, site: node, module, key: text });
         }
         ts.forEachChild(node, visit);
       };
       visit(source);
     }
+    return this.namespaceMembers = found;
+  }
+  /**
+   * Every use in the source that resolves to `declaration`: its name in its own file, each name it is imported by elsewhere, under its own
+   * name, another or as a default, and each namespace member that reads it, by name or by a literal element.
+   */
+  references(declaration: CadDiagnosticRoot): readonly CadReference[] {
+    const cached = this.referenceCache.get(declaration.node);
+    if (cached) return cached;
+    const found: CadReference[] = [];
+    const names = (target: CadDiagnosticRoot) => target.node === declaration.node, own = declarationName(declaration.node);
+    const scans = new Map<string, Set<string>>();
+    for (const { file, name } of [...own ? [{ file: declaration.file, name: own }] : [], ...this.importedNames().get(declaration.node) ?? []])
+      (scans.get(file) ?? scans.set(file, new Set()).get(file)!).add(name);
+    for (const [file, wanted] of scans) {
+      const visit = (node: ts.Node) => {
+        if (ts.isIdentifier(node) && wanted.has(node.text) && isReference(node) && this.resolve(file, node).some(names)) found.push({ file, site: node });
+        ts.forEachChild(node, visit);
+      };
+      visit(this.files.get(file)!);
+    }
+    for (const { file, site, module, key } of this.namespaceReads()) if (this.exported(module, key).some(names)) found.push({ file, site });
     this.referenceCache.set(declaration.node, found);
     return found;
   }
@@ -626,24 +797,28 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   const walkedHeld = new Set<ts.Node>(), entries: CadDiagnosticEntry[] = [], accesses = new Map<ts.Node, CadMemberOutcome>(), factoryReads = new Set<CadMemberRead>();
   const templated: { readonly file: string; readonly value: ts.TemplateExpression }[] = [];
   const raises = new Set<ts.Node>(), untold = new Set<ts.Node>(), argumentsRead = new Map<ts.Node, Set<ts.Node>>(), escaped = new Set<ts.Node>();
+  const unresolved = new Set<ts.Node>(), stopped = new Set<ts.Node>();
   /** The names, member reads, calls and constructions the walk visited, where it reads a parameter's arguments. */
   const visited = new Set<ts.Node>();
   const queue: CadDiagnosticEntry[] = [...roots];
   /** Enters declaration `found`; `receiver` when it is read only for a member, so a constant object runs its methods only as they are read. */
   const push = ({ file, node }: CadDiagnosticRoot, receiver = false) => {
     const name = (node as { name?: ts.Node }).name;
-    if (name && ts.isIdentifier(name) && stop.has(`${file}:${name.text}`)) return;
+    if (name && ts.isIdentifier(name) && stop.has(`${file}:${name.text}`)) { stopped.add(node); return; }
     // A factory's caller gives the code it raises, which is read at each call (`factoryRead`); its body only passes that code on. One
     // reached another way may raise a code the walk never reads.
     if (isCadErrorFactory(node)) { unexpanded.add(`${file}: ${(name as ts.Identifier).text}, a CadError factory reached where the walk cannot read its code`); return; }
     const named = name && propertyName(name as ts.PropertyName);
     if (named) declarations.add(`${file}:${named}`);
-    // A variable's initializer and a class's constructor and field initializers are what using them runs.
-    if (ts.isVariableDeclaration(node)) {
-      const value = node.initializer && bareExpression(node.initializer);
-      if (node.initializer) queue.push({ file, node: node.initializer, held: receiver && value && ts.isObjectLiteralExpression(value) ? value : undefined });
+    // A variable's initializer, the expression a module exports as default, and a class's constructor, field initializers and static
+    // blocks are what using them runs.
+    const initial = initialValue(node);
+    if (ts.isVariableDeclaration(node) || ts.isExportAssignment(node)) {
+      const value = initial && bareExpression(initial);
+      if (initial) queue.push({ file, node: initial, held: receiver && value && ts.isObjectLiteralExpression(value) ? value : undefined });
     } else if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
-      for (const element of node.members) if (ts.isConstructorDeclaration(element) || ts.isPropertyDeclaration(element) && element.initializer) queue.push({ file, node: element });
+      for (const element of node.members)
+        if (ts.isConstructorDeclaration(element) || ts.isPropertyDeclaration(element) && element.initializer || ts.isClassStaticBlockDeclaration(element)) queue.push({ file, node: element });
       // Constructing it runs the constructor and field initializers of the class it extends, which its `super(…)` gives arguments.
       const base = node.heritageClauses?.find(clause => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0];
       if (base) queue.push({ file, node: base.expression });
@@ -658,8 +833,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     const value = bareExpression(key);
     if (ts.isStringLiteralLike(value)) return value.text;
     if (!ts.isIdentifier(value)) return undefined;
-    const [found] = index.resolve(file, value);
-    const initializer = found && ts.isVariableDeclaration(found.node) && isConstant(found.node) && found.node.initializer && bareExpression(found.node.initializer);
+    const [found] = index.resolve(file, value), constant = found && constantValue(found.node), initializer = constant && bareExpression(constant);
     return initializer && ts.isStringLiteralLike(initializer) ? initializer.text : undefined;
   };
   /** Collects the codes `expression` gives once `path` is read off it; `at` is the site reported if it cannot. */
@@ -676,7 +850,8 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     };
     /** What a declaration of the source gives: a constant's value, or a function's results. */
     const declared = ({ file: owned, node }: CadDiagnosticRoot, rest: readonly string[]) => {
-      if (ts.isVariableDeclaration(node) && node.initializer && isConstant(node)) codesOf(owned, node.initializer, rest, at);
+      const constant = constantValue(node);
+      if (constant) codesOf(owned, constant, rest, at);
       else if (isFunctionLike(node)) called(owned, node, rest);
       else unread();
     };
@@ -772,7 +947,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   /** The object literals `receiver` names: a variable's value, or the object a parameter stands for (`receivers`). */
   const objectsOf = (file: string, receiver: ts.Identifier) => {
     const objects = index.resolve(file, receiver).flatMap(found => {
-      const value = ts.isVariableDeclaration(found.node) && found.node.initializer && bareExpression(found.node.initializer);
+      const initial = initialValue(found.node), value = initial && bareExpression(initial);
       return value && ts.isObjectLiteralExpression(value) ? [{ file: found.file, value }] : [];
     });
     if (lexical(receiver) === 'parameter') {
@@ -809,40 +984,44 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   };
   /**
    * The classes `expression` names, by declaration: a class or class expression, a constant that holds one, a namespace's export by name or
-   * literal element, a constant object's property, a readonly field's value, and each branch of a conditional, through each in turn.
-   * Empty for what is no class of the source, such as the platform's; undefined when it cannot tell, as for a parameter, a variable that
-   * is not constant, a call's result or a member it cannot read.
+   * literal element, a constant object's property, a readonly field's value, a module's default export, and each branch of a
+   * conditional, through each in turn. Empty for what is no class of the source, such as the platform's; undefined when it cannot tell,
+   * as for a parameter, a variable that is not constant, a call's result, a member it cannot read, a namespace, or a name or member it
+   * cannot find in the source that TypeScript does not show to be outside it.
    */
   const classesNamed = (file: string, expression: ts.Expression, seen = new Set<ts.Node>()): readonly CadDiagnosticRoot[] | undefined => {
     const value = bareExpression(expression);
     if (seen.has(value)) return [];
     seen.add(value);
     const all = (parts: readonly (readonly CadDiagnosticRoot[] | undefined)[]) => parts.includes(undefined) ? undefined : parts.flatMap(part => part ?? []);
-    const declared = (found: readonly CadDiagnosticRoot[]) => all(found.map(({ file: owner, node }) => ts.isClassLike(node) ? [{ file: owner, node }]
-      : ts.isVariableDeclaration(node) ? isConstant(node) && node.initializer ? classesNamed(owner, node.initializer, seen) : undefined
-        : ts.isPropertyAssignment(node) ? classesNamed(owner, node.initializer, seen)
-          : ts.isShorthandPropertyAssignment(node) ? classesNamed(owner, node.name, seen)
-            : ts.isPropertyDeclaration(node) ? node.initializer && ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Readonly ? classesNamed(owner, node.initializer, seen) : undefined
-              : ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isEnumDeclaration(node) ? [] : undefined));
+    const declared = (found: readonly CadDiagnosticRoot[]) => all(found.map(({ file: owner, node }) => {
+      if (ts.isClassLike(node)) return [{ file: owner, node }];
+      if (ts.isVariableDeclaration(node) || ts.isExportAssignment(node)) { const constant = constantValue(node); return constant ? classesNamed(owner, constant, seen) : undefined; }
+      if (ts.isPropertyAssignment(node)) return classesNamed(owner, node.initializer, seen);
+      if (ts.isShorthandPropertyAssignment(node)) return classesNamed(owner, node.name, seen);
+      if (ts.isPropertyDeclaration(node)) return node.initializer && ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Readonly ? classesNamed(owner, node.initializer, seen) : undefined;
+      return ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isEnumDeclaration(node) ? [] : undefined;
+    }));
     if (ts.isClassExpression(value)) return [{ file, node: value }];
     if (ts.isConditionalExpression(value)) return all([classesNamed(file, value.whenTrue, seen), classesNamed(file, value.whenFalse, seen)]);
     if (ts.isIdentifier(value)) {
       const bound = binding(value);
-      if (bound && isBinding(bound)) return undefined;
-      return index.namespace(file, value) ? [] : declared(index.resolve(file, value));
+      if (bound && isBinding(bound) || index.namespace(file, value)) return undefined;
+      const found = index.resolve(file, value);
+      return found.length ? declared(found) : index.outsideName(value) ? [] : undefined;
     }
     if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
       const key = ts.isPropertyAccessExpression(value) ? value.name.text : keyText(file, value.argumentExpression);
       if (key === undefined) return undefined;
       const receiver = bareExpression(value.expression), namespace = ts.isIdentifier(receiver) ? index.namespace(file, receiver) : undefined;
-      if (namespace) return declared(index.exported(namespace, key, new Set()));
+      if (namespace) { const found = index.exported(namespace, key); return found.length ? declared(found) : undefined; }
       const objects = ts.isIdentifier(receiver) ? objectsOf(file, receiver) : [];
       if (objects.length) {
         const properties = objects.map(({ file: owner, value: object }) => lastProperties(object, key)?.map(node => ({ file: owner, node })));
         return properties.includes(undefined) ? undefined : declared(properties.flatMap(found => found ?? []));
       }
-      const { members, outside } = index.memberDeclarations(value, key);
-      return members.length ? declared(members) : outside ? [] : undefined;
+      const { members, outside, unindexed } = index.memberDeclarations(value, key);
+      return unindexed ? undefined : members.length ? declared(members) : outside ? [] : undefined;
     }
     return undefined;
   };
@@ -863,8 +1042,8 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     else if (ts.isClassLike(node)) {
       const base = extendsOf(node);
       if (base && !node.members.some(ts.isConstructorDeclaration) && raisesClass(base)) found = 'class';
-    } else if (ts.isVariableDeclaration(node) && isConstant(node) && node.initializer) {
-      const value = bareExpression(node.initializer);
+    } else if (constantValue(node)) {
+      const value = bareExpression(constantValue(node)!);
       if (ts.isIdentifier(value)) found = index.resolve(file, value).map(raiser).find(Boolean);
       else if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
         const key = ts.isPropertyAccessExpression(value) ? value.name.text : keyText(file, value.argumentExpression);
@@ -935,7 +1114,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     const use = methodUse(access);
     let outcome: CadMemberOutcome = 'no-code';
     const follow = (found: CalledMember) => {
-      if (found.through && stop.has(found.through)) { if (outcome === 'no-code') outcome = 'stopped'; return; }
+      if (found.through && stop.has(found.through)) { stopped.add(found.node); if (outcome === 'no-code') outcome = 'stopped'; return; }
       push(found);
       outcome = 'followed';
     };
@@ -949,7 +1128,12 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         outcome = 'followed';
         continue;
       }
-      if (use === 'other') { unexpanded.add(`${file}: ${access.getText()}, a method used as a value the walk does not follow`); return 'unexpanded'; }
+      if (use === 'other') {
+        unexpanded.add(`${file}: ${access.getText()}, a method used as a value the walk does not follow`);
+        // What calls the methods it may give is unseen.
+        found.forEach(member => escaped.add(member.node));
+        return 'unexpanded';
+      }
       follow(each);
     }
     return outcome;
@@ -995,6 +1179,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     for (const name of names) {
       const declared = index.accessedMembers(access, name, member => runs(member, use));
       if (!declared) undeclared.push(name);
+      else if (declared.unindexed) { unexpanded.add(`${file}: ${access.getText()}, a member declared in code of the project the walk does not hold`); return 'unexpanded'; }
       else { found.push(...declared.members); source ||= declared.source; }
     }
     if (undeclared.length && index.untyped(access.expression)) {
@@ -1027,6 +1212,26 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     for (const found of index.getters(pattern, names)) push(found);
     if (rest) for (const found of index.getters(pattern, undefined, true)) push(found);
   };
+  /**
+   * A name the walk resolves to no declaration of the source. A parameter, a caught error and a loop or destructured variable stand for a
+   * value read where it is given. A namespace runs its exports as its members are read; used as a value any other way, it is reported, and
+   * runs them all, as a constant object does. Any other name is reported unless TypeScript shows it names nothing of the source
+   * (`outsideName`): the walk never takes a name it cannot find to run nothing.
+   */
+  const unfound = (file: string, name: ts.Identifier) => {
+    if (lexical(name) === 'parameter') return;
+    const namespace = index.namespace(file, name);
+    if (namespace) {
+      if (isReceiver(name) || ts.isTypeOfExpression(outermost(name).parent)) return;
+      unresolved.add(name);
+      unexpanded.add(`${file}: ${name.text}, a namespace used as a value, which the walk cannot follow`);
+      for (const found of index.moduleExports(namespace)) push(found);
+      return;
+    }
+    if (index.outsideName(name)) return;
+    unresolved.add(name);
+    unexpanded.add(`${file}: ${name.text}, a name the walk cannot resolve to a declaration of the source`);
+  };
   while (queue.length) {
     const entry = queue.pop()!, { file, node, held } = entry;
     if (walked.has(node) || held && walkedHeld.has(node)) continue;
@@ -1035,7 +1240,9 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     // Objects read only for their members: the held one and those its properties hold.
     const heldObjects = new Set<ts.Node>(held ? [held] : []);
     const visit = (child: ts.Node) => {
-      if (ts.isTypeNode(child) || ts.isInterfaceDeclaration(child) || ts.isTypeAliasDeclaration(child) || ts.isImportDeclaration(child)) return;
+      // The class a class written here extends is a value, which constructing it runs.
+      if (isExtended(child)) { visit(child.expression); return; }
+      if (isTypeOnly(child)) return;
       if (ts.isPropertyAssignment(child) && propertyName(child.name) === 'code') codesOf(file, child.initializer);
       else if (ts.isShorthandPropertyAssignment(child) && child.name.text === 'code') codesOf(file, child.name);
       if (ts.isIdentifier(child) || ts.isPropertyAccessExpression(child) || ts.isElementAccessExpression(child) || ts.isCallExpression(child) || ts.isNewExpression(child)) visited.add(child);
@@ -1048,11 +1255,15 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         if (!classes) { untold.add(child); unexpanded.add(`${file}: ${constructs.getText()}, a class the walk cannot tell, constructed`); }
         else if (classes.some(found => raiser(found) === 'class')) raisedAt(file, child as ts.NewExpression | ts.CallExpression);
       }
-      if (ts.isIdentifier(child) && isReference(child)) for (const found of index.resolve(file, child)) {
-        const raises = raiser(found);
-        if (raises === 'class') classRead(file, child);
-        else if (raises === 'factory') factoryRead(file, child);
-        push(found, isReceiver(child));
+      if (ts.isIdentifier(child) && isReference(child)) {
+        const found = index.resolve(file, child);
+        for (const each of found) {
+          const raises = raiser(each);
+          if (raises === 'class') classRead(file, child);
+          else if (raises === 'factory') factoryRead(file, child);
+          push(each, isReceiver(child));
+        }
+        if (!found.length) unfound(file, child);
       }
       if (ts.isPropertyAccessExpression(child) || ts.isElementAccessExpression(child)) member(file, child);
       if (ts.isObjectBindingPattern(child)) destructuredGetters(file, child);
@@ -1083,23 +1294,27 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   }
   // A parameter gives what each walked call passes it; a function passed on as a value has callers the walk cannot see.
   /**
-   * The walked uses of declaration `declaration`, named `name`: its name and the namespace members that name it (`references`), and those
-   * of each constant that holds it, in turn, instead of the constant's initializer.
+   * The walked uses of declaration `declaration`: its names and the namespace members that read it (`references`), and those of each
+   * constant that holds it, in turn, instead of the constant's initializer.
    */
-  const uses = (file: string, declaration: ts.Node, name: string, seen = new Set<ts.Node>()): readonly { readonly file: string; readonly site: ts.Expression; readonly outer: ts.Expression }[] => {
+  const uses = (file: string, declaration: ts.Node, seen = new Set<ts.Node>()): readonly { readonly file: string; readonly site: ts.Expression; readonly outer: ts.Expression }[] => {
     if (seen.has(declaration)) return [];
     seen.add(declaration);
-    return index.references({ file, node: declaration }, name).flatMap(({ file: caller, site }) => {
+    return index.references({ file, node: declaration }).flatMap(({ file: caller, site }) => {
       if (!visited.has(site)) return [];
       const outer = outermost(site), holder = outer.parent;
-      return heldByConstant(outer) && ts.isVariableDeclaration(holder) && ts.isIdentifier(holder.name) ? uses(caller, holder, holder.name.text, seen) : [{ file: caller, site, outer }];
+      return heldByConstant(outer) && ts.isVariableDeclaration(holder) && ts.isIdentifier(holder.name) ? uses(caller, holder, seen) : [{ file: caller, site, outer }];
     });
   };
-  /** The name a class is used by, and its declaration: its own, or the constant that holds a class expression. */
-  const className = (owner: ts.ClassLikeDeclaration): { readonly name: string; readonly declaration: ts.Node } | undefined => {
-    if (ts.isClassDeclaration(owner)) return owner.name ? { name: owner.name.text, declaration: owner } : undefined;
+  /**
+   * The declaration a class is used by: a class declaration, named or a module's default export, or the constant or default export that
+   * holds a class expression.
+   */
+  const className = (owner: ts.ClassLikeDeclaration): ts.Node | undefined => {
+    if (ts.isClassDeclaration(owner)) return owner.name || hasModifier(owner, ts.SyntaxKind.DefaultKeyword) ? owner : undefined;
     const holder = outermost(owner).parent;
-    return ts.isVariableDeclaration(holder) && ts.isIdentifier(holder.name) && isConstant(holder) ? { name: holder.name.text, declaration: holder } : undefined;
+    if (ts.isVariableDeclaration(holder) && ts.isIdentifier(holder.name) && isConstant(holder)) return holder;
+    return ts.isExportAssignment(holder) && !holder.isExportEquals ? holder : undefined;
   };
   /**
    * What each walked `new` of class `owner` gives parameter `position` of constructor `built`, its own or the one it inherits, and each
@@ -1108,7 +1323,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   const constructed = (file: string, owner: ts.ClassLikeDeclaration, built: ts.ConstructorDeclaration, position: number, path: readonly string[], at: string) => {
     const named = className(owner);
     if (!named) { unexpanded.add(`${at}, from ${file}: an unnamed class`); escaped.add(built); return; }
-    for (const { file: caller, site, outer } of uses(file, named.declaration, named.name)) {
+    for (const { file: caller, site, outer } of uses(file, named)) {
       const parent = outer.parent;
       if (ts.isNewExpression(parent) && parent.expression === outer) { argument(caller, parent, built, position, path, at, file); continue; }
       const clause = ts.isExpressionWithTypeArguments(parent) && ts.isHeritageClause(parent.parent) && parent.parent.token === ts.SyntaxKind.ExtendsKeyword ? parent.parent : undefined;
@@ -1147,7 +1362,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     if (ts.isConstructorDeclaration(owner)) { constructed(file, owner.parent, owner, position, path, at); continue; }
     const named = functionName(owner);
     if (!named) { unexpanded.add(`${at}, from ${file}: ${owner.parameters[position].name.getText()}`); escaped.add(owner); continue; }
-    for (const { file: caller, site, outer } of uses(file, named.declaration, named.name)) {
+    for (const { file: caller, site, outer } of uses(file, named)) {
       const call = outer.parent;
       if ((ts.isCallExpression(call) || ts.isNewExpression(call)) && call.expression === outer) argument(caller, call, owner, position, path, at, file);
       else { unexpanded.add(`${caller}: ${site.getText()} passed on`); escaped.add(owner); }
@@ -1163,7 +1378,16 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     }
     for (const variant of variants) codes.add(variant);
   }
-  return { codes, unexpanded: [...unexpanded].sort(), taken: [...taken].sort(), declarations, accesses, factoryReads, entries, raises, untold, argumentsRead, escaped };
+  return { codes, unexpanded: [...unexpanded].sort(), taken: [...taken].sort(), declarations, accesses, factoryReads, entries, raises, untold, argumentsRead, escaped, unresolved, stopped };
+}
+
+/** Whether `node` is the class a class extends, as its `extends` clause writes it, which is a value. */
+export function isExtended(node: ts.Node): node is ts.ExpressionWithTypeArguments {
+  return ts.isExpressionWithTypeArguments(node) && ts.isHeritageClause(node.parent) && node.parent.token === ts.SyntaxKind.ExtendsKeyword && ts.isClassLike(node.parent.parent);
+}
+/** Whether `node` is only a type, a type parameter or an import, none of which runs. */
+export function isTypeOnly(node: ts.Node): boolean {
+  return ts.isTypeNode(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isImportDeclaration(node) || ts.isTypeParameterDeclaration(node);
 }
 
 /** Whether `node` is read only for a member: the receiver of a member read. */
@@ -1199,7 +1423,6 @@ export function methodUse(access: ts.Expression): 'called' | 'passed' | 'write' 
   return 'other';
 }
 
-/** The name a function is called by and the declaration it resolves to: a function declaration, or a variable holding the function. */
 /** The names of the `CadError` factories. */
 const FACTORIES: ReadonlySet<string> = new Set(['checked', 'received']);
 /** Whether declaration `node` is the `CadError` class. */
@@ -1210,20 +1433,30 @@ export function isCadErrorFactory(node: ts.Node): boolean {
     && node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.StaticKeyword) === true && isCadErrorClass(node.parent);
 }
 
-function functionName(owner: ts.FunctionLikeDeclaration): { readonly name: string; readonly declaration: ts.Node } | undefined {
-  if (ts.isFunctionDeclaration(owner) && owner.name) return { name: owner.name.text, declaration: owner };
+/**
+ * The declaration a function is used by: a function declaration, named or a module's default export, or the variable or default export
+ * that holds the function.
+ */
+function functionName(owner: ts.FunctionLikeDeclaration): ts.Node | undefined {
+  if (ts.isFunctionDeclaration(owner)) return owner.name || hasModifier(owner, ts.SyntaxKind.DefaultKeyword) ? owner : undefined;
   const holder = owner.parent;
-  if ((ts.isArrowFunction(owner) || ts.isFunctionExpression(owner)) && ts.isVariableDeclaration(holder) && holder.initializer === owner && ts.isIdentifier(holder.name))
-    return { name: holder.name.text, declaration: holder };
-  return undefined;
+  if (!ts.isArrowFunction(owner) && !ts.isFunctionExpression(owner)) return undefined;
+  if (ts.isVariableDeclaration(holder) && holder.initializer === owner && ts.isIdentifier(holder.name)) return holder;
+  return ts.isExportAssignment(holder) && !holder.isExportEquals && holder.expression === owner ? holder : undefined;
 }
 
-/** Whether the identifier uses a value, rather than naming a declaration, a member or a property. */
-function isReference(node: ts.Identifier): boolean {
+/**
+ * Whether the identifier uses a value, rather than naming a declaration, a member, a property, a destructured or JSX attribute's key, an
+ * import or export, a label or a meta-property.
+ */
+export function isReference(node: ts.Identifier): boolean {
   const parent = node.parent;
   if ((ts.isPropertyAccessExpression(parent) || ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent) || ts.isPropertyDeclaration(parent)
-    || ts.isPropertySignature(parent) || ts.isGetAccessorDeclaration(parent) || ts.isSetAccessorDeclaration(parent) || ts.isEnumMember(parent)) && parent.name === node) return false;
+    || ts.isPropertySignature(parent) || ts.isGetAccessorDeclaration(parent) || ts.isSetAccessorDeclaration(parent) || ts.isEnumMember(parent)
+    || ts.isMetaProperty(parent) || ts.isJsxAttribute(parent)) && parent.name === node) return false;
+  if (ts.isBindingElement(parent) && parent.propertyName === node || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isJsxNamespacedName(parent)) return false;
+  if (ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)) return (parent as { label?: ts.Node }).label !== node;
   return !((ts.isVariableDeclaration(parent) || ts.isFunctionDeclaration(parent) || ts.isClassDeclaration(parent) || ts.isParameter(parent) || ts.isBindingElement(parent)
-    || ts.isFunctionExpression(parent) || ts.isClassExpression(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)
-    || ts.isExportSpecifier(parent) || ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)) && (parent as { name?: ts.Node; label?: ts.Node }).name === node);
+    || ts.isFunctionExpression(parent) || ts.isClassExpression(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isNamespaceExport(parent)
+    || ts.isEnumDeclaration(parent) || ts.isModuleDeclaration(parent) || ts.isTypeParameterDeclaration(parent)) && (parent as { name?: ts.Node }).name === node);
 }
