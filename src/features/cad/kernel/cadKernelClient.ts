@@ -3,6 +3,7 @@ import { parseCadDocument } from '../../../domain/cad/cadSchema';
 import { parseCadSectionRequest, type CadSectionRequest, type CadSectionResult } from '../../../domain/cad/cadSection';
 import { isCadKernelEnvelope, isCadKernelReply, type CadKernelReply, type CadKernelRequest } from './cadKernelProtocol';
 import { CadError } from '../../../domain/cad/cadError';
+import { cadReceivedDiagnostic } from '../../../domain/cad/cadIssueCodes';
 import { parseCadTopologyInspectRequest, parseCadTopologyResolvePicksRequest, type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '../../../domain/cad/cadTopology';
 import { parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest, type CadTopologyAdjacency, type CadTopologyAdjacencyRequest,
@@ -141,7 +142,10 @@ export function createCadKernelClient(makeWorker: () => CadWorkerTransport = () 
     async build(document, signal) {
       const reply = await request({ kind: 'build', document }, signal);
       if (reply.kind !== 'built') throw new Error('Unexpected CAD build response.');
-      return reply.result;
+      // Where a build crosses into the app, a refusal no registry lists becomes kernel-unrecognised, keeping the code it gave, and kernel
+      // text is cut to its bound, so neither costs the meshes that came with it.
+      const diagnostics = reply.result.diagnostics.map(cadReceivedDiagnostic);
+      return diagnostics.every((diagnostic, index) => diagnostic === reply.result.diagnostics[index]) ? reply.result : { ...reply.result, diagnostics };
     },
     async export(document, format, signal) {
       const reply = await request({ kind: 'export', document, format }, signal);

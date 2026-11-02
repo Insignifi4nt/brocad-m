@@ -1,6 +1,6 @@
 import type { CadDiagnostic, CadKernelOperation } from '../../../domain/cad/cadDocument';
 import { CadError } from '../../../domain/cad/cadError';
-import { MAX_CAD_KERNEL_MESSAGE, type CadRefusalFactCode, type CadRefusalFacts } from '../../../domain/cad/cadIssueCodes';
+import { MAX_CAD_DIAGNOSTIC_MESSAGE, MAX_CAD_KERNEL_MESSAGE, cadBoundedText, type CadRefusalFactCode, type CadRefusalFacts } from '../../../domain/cad/cadIssueCodes';
 
 /** The step a feature's rebuild is taking and the input it reads, which a failure in that step names. */
 export interface CadKernelStep { readonly operation: CadKernelOperation; readonly input: { readonly field: string; readonly id: string } | null }
@@ -37,7 +37,7 @@ const STEP_FAILURES: Readonly<Record<CadKernelOperation, string>> = {
 export function cadKernelFailure(featureId: string, error: unknown, step: CadKernelStep): CadDiagnostic {
   if (!(error instanceof CadError)) return { code: 'kernel-operation-failed', featureId, message: STEP_FAILURES[step.operation],
     details: { operation: step.operation, input: step.input, kernelMessage: cadKernelMessage(error) } };
-  return { code: error.code, featureId, message: error.message, details: { operation: step.operation, input: step.input, kernelMessage: error.kernelMessage ?? null },
+  return { code: error.code, featureId, message: cadBoundedText(error.message, MAX_CAD_DIAGNOSTIC_MESSAGE), details: { operation: step.operation, input: step.input, kernelMessage: error.kernelMessage ? cadBoundedText(error.kernelMessage, MAX_CAD_KERNEL_MESSAGE) : null },
     ...(error.facts ? { facts: error.facts } : {}) };
 }
 
@@ -61,13 +61,13 @@ export interface CadKernelRequestFailure {
 }
 /** The error reply of worker request `kind`: a refusal keeps its code, message and facts, and kernel text gets the request's message, with the text apart. */
 export function cadKernelRequestFailure(kind: string, error: unknown): CadKernelRequestFailure {
-  if (error instanceof CadError) return { code: error.code, message: error.message, ...(error.kernelMessage ? { kernelMessage: error.kernelMessage } : {}), ...(error.facts ? { facts: error.facts } : {}) };
+  if (error instanceof CadError) return { code: error.code, message: cadBoundedText(error.message, MAX_CAD_DIAGNOSTIC_MESSAGE), ...(error.kernelMessage ? { kernelMessage: cadBoundedText(error.kernelMessage, MAX_CAD_KERNEL_MESSAGE) } : {}), ...(error.facts ? { facts: error.facts } : {}) };
   const kernelMessage = cadKernelMessage(error);
   return { code: 'kernel-operation-failed', message: REQUEST_FAILURES[kind] ?? 'The CAD kernel could not complete this operation.', ...(kernelMessage ? { kernelMessage } : {}) };
 }
 
-/** The kernel's own text for a failure, bounded; null when it gave none. */
+/** The kernel's own text for a failure, cut to the bound with an ellipsis when longer, so the reply that carries it stays valid; null when it gave none. */
 export function cadKernelMessage(error: unknown): string | null {
   const text = error instanceof Error ? error.message : typeof error === 'string' ? error : typeof error === 'number' ? `Native exception ${error}` : '';
-  return text ? text.slice(0, MAX_CAD_KERNEL_MESSAGE) : null;
+  return text ? cadBoundedText(text, MAX_CAD_KERNEL_MESSAGE) : null;
 }

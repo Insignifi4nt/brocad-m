@@ -1,4 +1,4 @@
-import type { CadKernelFailureDetails, CadKernelOperation } from './cadDocument';
+import type { CadDiagnostic, CadKernelFailureDetails, CadKernelOperation } from './cadDocument';
 
 /**
  * Every code a feature can be refused with: the codes of each kind's `diagnostics` and of `CAD_FEATURE_SHARED_DIAGNOSTICS`, which this
@@ -46,16 +46,19 @@ export function isCadRefusalCode(code: unknown): code is CadRefusalCode { return
  * The facts a refusal code carries beyond its message, for consumers that need them; a code not listed carries none.
  * - `selection-count-mismatch`: how many elements a geometric selector requires and how many it matched, never none (that is `selection-empty`).
  * - `selection-empty`: how many it requires, or null when it asks for at least one.
+ * - `kernel-unrecognised`: the code a build gave that this list does not have (`cadReceivedDiagnostic`). No check raises it.
  */
 export interface CadRefusalFacts {
   readonly 'selection-count-mismatch': { readonly expected: number; readonly actual: number };
   readonly 'selection-empty': { readonly expected: number | null };
+  readonly 'kernel-unrecognised': { readonly refusalCode: string };
 }
 export type CadRefusalFactCode = keyof CadRefusalFacts;
 const atLeast = (value: unknown, least: number) => Number.isSafeInteger(value) && (value as number) >= least;
 const FACTS: { readonly [C in CadRefusalFactCode]: { readonly keys: readonly (keyof CadRefusalFacts[C])[]; readonly check: (facts: Readonly<Record<string, unknown>>) => boolean } } = {
   'selection-count-mismatch': { keys: ['expected', 'actual'], check: facts => atLeast(facts.expected, 1) && atLeast(facts.actual, 1) && facts.expected !== facts.actual },
-  'selection-empty': { keys: ['expected'], check: facts => facts.expected === null || atLeast(facts.expected, 1) }
+  'selection-empty': { keys: ['expected'], check: facts => facts.expected === null || atLeast(facts.expected, 1) },
+  'kernel-unrecognised': { keys: ['refusalCode'], check: facts => isText(facts.refusalCode, MAX_CAD_DIAGNOSTIC_CODE) && !isCadRefusalCode(facts.refusalCode) && !isCadRefusalFactCode(facts.refusalCode) }
 };
 export function isCadRefusalFactCode(code: unknown): code is CadRefusalFactCode { return typeof code === 'string' && Object.hasOwn(FACTS, code); }
 /** Whether `value` is the facts of `code`: exactly the fields it lists, each in range. A code that lists none has no facts. */
@@ -68,18 +71,53 @@ export function isCadRefusalFacts<C extends string>(code: C, value: unknown): va
 /** The steps a kernel failure can name. */
 export const CAD_KERNEL_OPERATIONS: readonly CadKernelOperation[] = Object.freeze(['import', 'profile', 'extrude', 'revolve', 'loft', 'sweep', 'pocket', 'join', 'cut',
   'intersect', 'fillet', 'chamfer', 'shell', 'transform', 'mirror', 'pattern', 'check', 'record'] satisfies readonly CadKernelOperation[]);
-/** The longest kernel text a failure keeps. */
+/** The longest kernel text a failure keeps; longer text is cut to it (`cadBoundedText`) before it is published. */
 export const MAX_CAD_KERNEL_MESSAGE = 2048;
-/** The longest input field name and input id a failure names. */
+/** The longest code a diagnostic gives. Codes are identifiers written in the source, far shorter. */
+export const MAX_CAD_DIAGNOSTIC_CODE = 128;
+/**
+ * The longest message a diagnostic or error reply gives. Messages are written in the source with names and values in them, far shorter;
+ * the worker still cuts a longer one to it (`cadBoundedText`) before it replies, as it does kernel text.
+ */
+export const MAX_CAD_DIAGNOSTIC_MESSAGE = 8192;
+/**
+ * The longest input field name and input id a failure names. A field is a feature field name written in the source, and an id a feature
+ * id, which the document schema holds to 96 characters, so no producer exceeds either.
+ */
 const MAX_INPUT_FIELD = 64, MAX_INPUT_ID = 96;
-const isText = (value: unknown, most: number) => typeof value === 'string' && value.length > 0 && value.length <= most;
+function isText(value: unknown, most: number) { return typeof value === 'string' && value.length > 0 && value.length <= most; }
+/** `text`, or when it is longer than `most` characters, its start cut to fit with an ellipsis after it. */
+export function cadBoundedText(text: string, most: number): string {
+  return text.length <= most ? text : `${text.slice(0, most - 1)}…`;
+}
+/**
+ * Diagnostic `diagnostic` as the app takes it in, the same object when nothing changes:
+ * - a code this list has is kept, and any other becomes `kernel-unrecognised`, which keeps the code it gave in its facts and its message,
+ *   feature and details as they were, so a refusal no registry lists still reaches the issue model under a code of its own, never renamed
+ *   to another refusal;
+ * - kernel text longer than `MAX_CAD_KERNEL_MESSAGE` is cut to it, as the worker cuts it before replying.
+ * A build reply passes through this where it is received, and the issues of a build pass it again, which changes nothing.
+ */
+export function cadReceivedDiagnostic(diagnostic: CadDiagnostic): CadDiagnostic {
+  let received = diagnostic;
+  const text = diagnostic.details?.kernelMessage;
+  if (diagnostic.details && text && text.length > MAX_CAD_KERNEL_MESSAGE) {
+    received = { ...received, details: { ...diagnostic.details, kernelMessage: cadBoundedText(text, MAX_CAD_KERNEL_MESSAGE) } };
+  }
+  if (isCadRefusalCode(diagnostic.code) || diagnostic.code === 'kernel-unrecognised') return received;
+  const { facts: _facts, ...rest } = received;
+  return { ...rest, code: 'kernel-unrecognised', facts: { refusalCode: cadBoundedText(diagnostic.code, MAX_CAD_DIAGNOSTIC_CODE) } };
+}
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> => typeof value === 'object' && value !== null && !Array.isArray(value);
-/** Whether `value` is a kernel failure's details: a known step, a bounded input or none, and bounded kernel text or none, and nothing else. */
-export function isCadKernelFailureDetails(value: unknown): value is CadKernelFailureDetails {
+/**
+ * Whether `value` is a kernel failure's details: a known step, a bounded input or none, and kernel text of at most `kernelMessageMost`
+ * characters or none, and nothing else. The worker boundary admits text of any length, which it cuts as it takes the reply in.
+ */
+export function isCadKernelFailureDetails(value: unknown, kernelMessageMost = MAX_CAD_KERNEL_MESSAGE): value is CadKernelFailureDetails {
   if (!isRecord(value) || Object.keys(value).length !== 3 || !CAD_KERNEL_OPERATIONS.includes(value.operation as CadKernelOperation)) return false;
   const input = value.input;
   if (input !== null && (!isRecord(input) || Object.keys(input).length !== 2 || !isText(input.field, MAX_INPUT_FIELD) || !isText(input.id, MAX_INPUT_ID))) return false;
-  return value.kernelMessage === null || isText(value.kernelMessage, MAX_CAD_KERNEL_MESSAGE);
+  return value.kernelMessage === null || isText(value.kernelMessage, kernelMessageMost);
 }
 
 /** The refusals of a sketch edit or of the accepted sketch's analysis: `sketch-` and the solver's reason, as edit preparation spells them. */

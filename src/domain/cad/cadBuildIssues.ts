@@ -1,6 +1,6 @@
 import type { CadBodyIssue } from './cadBodies';
 import type { CadBuildResult, CadDiagnostic, CadDocument, CadFeature, CadKernelOperation } from './cadDocument';
-import { isCadRefusalCode, isCadRefusalFactCode, isCadRefusalFacts, type CadRefusalCode } from './cadIssueCodes';
+import { cadReceivedDiagnostic, isCadRefusalFacts, type CadRefusalCode, type CadRefusalFactCode, type CadRefusalFacts } from './cadIssueCodes';
 import { cadBlockedFeatures, createCadIssue, createCadIssueList, type CadBodyIssueOf, type CadFeatureIssueOf, type CadIssue, type CadIssueRepair, type CadKernelFailure,
   type CadKernelIssueOf } from './cadIssues';
 
@@ -16,7 +16,7 @@ export const NO_CAD_BUILD_ISSUES: CadBuildIssues = Object.freeze({ items: Object
 /** What a feature reports when an input it reads did not rebuild, through a slot or the body it changes. */
 export const CAD_INPUT_BLOCKED = 'Not evaluated, because an input it reads did not rebuild.';
 /** Failures of a feature's chosen edges or opening, which choosing them again repairs. */
-const SELECTION_CODES: ReadonlySet<CadRefusalCode> = new Set<CadRefusalCode>(['selection-empty', 'selection-count-mismatch', 'unsupported-selection', 'selection-tangent-chain']);
+const SELECTION_CODES: ReadonlySet<string> = new Set<CadRefusalCode>(['selection-empty', 'selection-count-mismatch', 'unsupported-selection', 'selection-tangent-chain']);
 
 /**
  * The issues of build `build` of `document` at version `version`, the one adapter for what the kernel reports:
@@ -32,11 +32,13 @@ const SELECTION_CODES: ReadonlySet<CadRefusalCode> = new Set<CadRefusalCode>(['s
  */
 export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'parameters'>, build: Pick<CadBuildResult, 'diagnostics' | 'bodyIssues'>, version: string): CadBuildIssues {
   const featureOf = (id: string | undefined) => id === undefined ? undefined : document.features.find(feature => feature.id === id);
+  // A code no registry lists becomes kernel-unrecognised, keeping the code it gave, as where a build reply is received.
+  const diagnostics = build.diagnostics.map(cadReceivedDiagnostic);
   const key = (diagnostic: CadDiagnostic, index: number) => `kernel:${index}:${diagnostic.code}`;
   // Every feature's own failure, the first it reports, and what its failed or blocked inputs are, before any issue is made, so each
   // cause resolves to an issue of the list whichever order failures and blocks come in.
   const failureOf = new Map<string, string>();
-  build.diagnostics.forEach((diagnostic, index) => {
+  diagnostics.forEach((diagnostic, index) => {
     if (diagnostic.code !== 'rebuild-stopped' && diagnostic.featureId !== undefined && !failureOf.has(diagnostic.featureId)) failureOf.set(diagnostic.featureId, key(diagnostic, index));
   });
   const blocked = cadBlockedFeatures(document, [...failureOf.keys()]), inputsOf = new Map(blocked.map(entry => [entry.featureId, entry.inputs]));
@@ -45,12 +47,12 @@ export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'paramet
 
   const items: CadIssue[] = [], byFeature = new Map<string, CadIssue>();
   const show = (featureId: string | undefined, issue: CadIssue) => { if (featureId !== undefined && !byFeature.has(featureId)) byFeature.set(featureId, issue); };
-  build.diagnostics.forEach((diagnostic, index) => {
+  diagnostics.forEach((diagnostic, index) => {
     if (diagnostic.code === 'rebuild-stopped') return;
     const issue = kernelFailure(diagnostic, key(diagnostic, index), featureOf(diagnostic.featureId), causesOf(diagnostic.featureId), version);
     items.push(issue); show(diagnostic.featureId, issue);
   });
-  build.diagnostics.forEach((diagnostic, index) => {
+  diagnostics.forEach((diagnostic, index) => {
     if (diagnostic.code !== 'rebuild-stopped') return;
     const cause = diagnostic.featureId === undefined ? undefined : failureOf.get(diagnostic.featureId);
     // The reply guard admits a stop only after a failure of its feature.
@@ -74,21 +76,25 @@ function kernelFailure(diagnostic: CadDiagnostic, key: string, feature: CadFeatu
   const subject = diagnostic.featureId === undefined ? { kind: 'document' } as const
     : input ? { kind: 'reference-slot', featureId: diagnostic.featureId, field: input.field, inputId: input.id } as const : { kind: 'feature', featureId: diagnostic.featureId } as const;
   const failure: CadKernelFailure = { operation: diagnostic.details?.operation ?? cadKernelOperationOf(feature), input, kernelMessage: diagnostic.details?.kernelMessage ?? null };
-  // The reply guard admits only codes the registry lists, with the facts each carries; anything else is an unexpected kernel failure.
-  const code = isCadRefusalCode(diagnostic.code) && diagnostic.code !== 'rebuild-stopped' ? diagnostic.code : 'kernel-operation-failed';
+  // The caller recognised the code (`cadReceivedDiagnostic`) and keeps stops apart.
+  const code = diagnostic.code as Exclude<CadRefusalCode, 'rebuild-stopped'> | 'kernel-unrecognised';
   const common = { key, namespace: 'kernel', severity: 'error', state: 'failed', subject, message: diagnostic.message, causes,
     repairs: feature ? featureRepairs(feature, code, version) : [] } as const;
-  if (isCadRefusalFactCode(code)) {
-    if (!isCadRefusalFacts(code, diagnostic.facts)) throw new Error(`The ${code} failure of ${diagnostic.featureId ?? 'the document'} gives no facts.`);
-    return createCadIssue(code === 'selection-count-mismatch'
-      ? { ...common, code, details: { ...failure, ...(diagnostic.facts as { readonly expected: number; readonly actual: number }) } }
-      : { ...common, code, details: { ...failure, ...(diagnostic.facts as { readonly expected: number | null }) } });
+  /** The facts code `fact` carries, which the reply guard checked; a failure that gives none is a programming error. */
+  const factsOf = <C extends CadRefusalFactCode>(fact: C): CadRefusalFacts[C] => {
+    if (!isCadRefusalFacts(fact, diagnostic.facts)) throw new Error(`The ${fact} failure of ${diagnostic.featureId ?? 'the document'} gives no facts.`);
+    return diagnostic.facts as CadRefusalFacts[C];
+  };
+  switch (code) {
+    case 'selection-count-mismatch': return createCadIssue({ ...common, code, details: { ...failure, ...factsOf(code) } });
+    case 'selection-empty': return createCadIssue({ ...common, code, details: { ...failure, ...factsOf(code) } });
+    case 'kernel-unrecognised': return createCadIssue({ ...common, code, details: { ...failure, ...factsOf(code) } });
+    default: return createCadIssue({ ...common, code, details: failure });
   }
-  return createCadIssue({ ...common, code, details: failure });
 }
 
 /** Opening the feature's editor, where every input and dimension is changed, and choosing its edges or opening again when those failed. */
-function featureRepairs(feature: CadFeature, code: CadRefusalCode, version: string): readonly CadIssueRepair[] {
+function featureRepairs(feature: CadFeature, code: string, version: string): readonly CadIssueRepair[] {
   const repairs: CadIssueRepair[] = [];
   if (SELECTION_CODES.has(code) && (feature.kind === 'fillet' || feature.kind === 'chamfer' || feature.kind === 'shell')) {
     const field = feature.kind === 'shell' ? 'opening' : 'selection';

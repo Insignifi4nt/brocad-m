@@ -75,7 +75,7 @@ describe('CAD worker lifetime and cancellation', () => {
     expect(isCadKernelReply(reply({ ...failure, details }, stop))).toBe(true);
     expect(isCadKernelReply(reply({ ...failure, details: { ...details, input: null, kernelMessage: null } }))).toBe(true);
     for (const changed of [{ operation: 'nonsense' }, { input: { field: [], id: {} } }, { input: { field: 'targetId' } }, { input: { field: 'targetId', id: 'box', extra: 1 } },
-      { input: { field: 'f'.repeat(65), id: 'box' } }, { input: { field: 'targetId', id: 'i'.repeat(97) } }, { kernelMessage: {} }, { kernelMessage: 'x'.repeat(2049) },
+      { input: { field: 'f'.repeat(65), id: 'box' } }, { input: { field: 'targetId', id: 'i'.repeat(97) } }, { kernelMessage: {} }, { kernelMessage: 3 },
       { kernelMessage: '' }, { note: 'free text' }]) {
       expect(isCadKernelReply(reply({ ...failure, details: { ...details, ...changed } })), JSON.stringify(changed).slice(0, 80)).toBe(false);
     }
@@ -94,6 +94,22 @@ describe('CAD worker lifetime and cancellation', () => {
     expect(isCadKernelReply(reply({ ...failure, featureId: 'other' }, stop))).toBe(false);
     expect(isCadKernelReply(reply(failure, { ...stop, featureId: undefined }))).toBe(false);
     expect(isCadKernelReply(reply(failure, { ...stop, details }))).toBe(false);
+  });
+  it('takes in kernel text longer than its bound and a code no registry lists without losing the meshes before them', async () => {
+    const mesh = { featureId: 'body', name: 'Body', positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1], indices: [0, 1, 2], edges: [], volume: 1,
+      faceGroups: [{ start: 0, count: 3, key: 'face' }], edgeGroups: [], bounds: { min: [0, 0, 0], max: [1, 1, 1] } };
+    const long = { code: 'kernel-operation-failed', featureId: 'round', message: 'The fillet could not be applied.',
+      details: { operation: 'fillet', input: { field: 'targetId', id: 'body' }, kernelMessage: 'x'.repeat(2049) } };
+    const unregistered = { code: 'new-dynamic-refusal', featureId: 'later', message: 'The later feature failed.' };
+    const reply = { id: 1, kind: 'built', result: { buildId: 'long', meshes: [mesh], diagnostics: [long, unregistered], durationMs: 1 } };
+    expect(isCadKernelReply(reply)).toBe(true);
+    const transport = new TestTransport(), client = createCadKernelClient(() => transport), pending = client.build(createCadDocument());
+    transport.onmessage?.(new MessageEvent('message', { data: reply }));
+    const result = await pending;
+    expect(result.meshes).toEqual([mesh]);
+    expect(result.diagnostics).toEqual([{ ...long, details: { ...long.details, kernelMessage: `${'x'.repeat(2047)}…` } },
+      { ...unregistered, code: 'kernel-unrecognised', facts: { refusalCode: 'new-dynamic-refusal' } }]);
+    expect(transport.terminated).toBe(false); client.dispose();
   });
   it('checks preview triangle topology and rejects malformed buffers before rendering', () => {
     const mesh = { featureId: 'body', name: 'Body', positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1], indices: [0, 1, 2], edges: [], volume: 1,

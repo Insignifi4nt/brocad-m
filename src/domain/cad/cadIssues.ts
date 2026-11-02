@@ -59,8 +59,11 @@ interface CadIssueOf<N extends string, C extends string, D, S extends CadIssueSu
   readonly repairs: readonly CadIssueRepair[];
   readonly details: D;
 }
-/** Details of a code that carries no facts beyond its subject. */
-export type CadNoIssueDetails = Readonly<Record<string, never>>;
+/**
+ * Details of a code that carries no facts beyond its subject: an empty object. It names no property, so reading one is a compile error,
+ * and as a weak type it takes no object that gives one.
+ */
+export type CadNoIssueDetails = { readonly none?: never };
 
 type SketchItemSubject = SubjectOf<'sketch-relation' | 'sketch-entity' | 'sketch-point'>;
 /** Where a sketch item comes from: the analysis of the accepted sketch, the edit just refused, or the last accepted edit's warnings. */
@@ -77,9 +80,14 @@ export type CadSketchIssueOf =
   | CadIssueOf<'sketch', 'mirror-shrank', { readonly curves: readonly { readonly entityId: string; readonly beforeMm: number; readonly afterMm: number }[] },
     SubjectOf<'sketch-relation'>, 'failed'>;
 
+type FeatureSubject = SubjectOf<'document' | 'feature' | 'reference-slot'>;
+/** The refusals that carry facts; whichever namespace reports one carries them, so narrowing by code alone always finds them. */
+type RefusalFactCode = Extract<CadRefusalFactCode, CadRefusalCode>;
+type FeatureFactIssues = { readonly [C in RefusalFactCode]: CadIssueOf<'feature', C, CadRefusalFacts[C], FeatureSubject, 'failed'> }[RefusalFactCode];
 export type CadFeatureIssueOf =
   /** A check refused the feature, or the document, while the document was read. */
-  | CadIssueOf<'feature', Exclude<CadRefusalCode, 'rebuild-stopped'>, CadNoIssueDetails, SubjectOf<'document' | 'feature' | 'reference-slot'>, 'failed'>
+  | CadIssueOf<'feature', Exclude<CadRefusalCode, RefusalFactCode | 'rebuild-stopped'>, CadNoIssueDetails, FeatureSubject, 'failed'>
+  | FeatureFactIssues
   /** Inputs the feature reads failed or are blocked: the features its input slots name, in history order. */
   | CadIssueOf<'feature', 'input-blocked', { readonly inputs: readonly string[] }, SubjectOf<'feature'>, 'blocked'>;
 
@@ -89,6 +97,7 @@ type KernelSubject = SubjectOf<'document' | 'feature' | 'reference-slot'>;
 type KernelFactIssues = { readonly [C in CadRefusalFactCode]: CadIssueOf<'kernel', C, CadKernelFailure & CadRefusalFacts[C], KernelSubject, 'failed'> }[CadRefusalFactCode];
 export type CadKernelIssueOf =
   | CadIssueOf<'kernel', Exclude<CadRefusalCode, CadRefusalFactCode | 'rebuild-stopped'>, CadKernelFailure, KernelSubject, 'failed'>
+  /** Each code that carries facts, with them. `kernel-unrecognised` stands for a code no registry lists, which it keeps (`cadReceivedDiagnostic`). */
   | KernelFactIssues
   /** The rebuild stopped at the feature that failed; nothing after it was evaluated. */
   | CadIssueOf<'kernel', 'rebuild-stopped', CadNoIssueDetails, SubjectOf<'document' | 'feature'>, 'blocked'>;
@@ -138,28 +147,93 @@ export function createCadIssue<T extends CadIssue>(issue: T): T {
 const CHECKED = import.meta.env?.DEV === true;
 
 /**
+ * The causal structure of list `issues`, found without recursion, so a history of any length is safe, in whatever order the list gives
+ * it. The first issue of a repeated key stands for it. For each key:
+ * - `roots`: the failed issues naming no cause that it leads back to, in list order; itself when it is one;
+ * - `unresolved`: the causes it leads to that resolve to no root, those of the list first in list order: keys no issue of the list has,
+ *   itself when it names itself or is blocked yet names no cause, and the issues of a cycle it is in or leads to.
+ * `cycles` are the groups of two or more issues whose causes lead back to each other, each in list order.
+ */
+interface CadIssueGraph {
+  readonly byKey: ReadonlyMap<string, CadIssue>;
+  readonly roots: ReadonlyMap<string, readonly string[]>;
+  readonly unresolved: ReadonlyMap<string, readonly string[]>;
+  readonly cycles: readonly (readonly string[])[];
+}
+const NONE: readonly string[] = Object.freeze([]);
+function cadIssueGraph(issues: readonly CadIssue[]): CadIssueGraph {
+  const byKey = new Map<string, CadIssue>(), position = new Map<string, number>();
+  for (const [at, issue] of issues.entries()) if (!byKey.has(issue.key)) { byKey.set(issue.key, issue); position.set(issue.key, at); }
+  const roots = new Map<string, readonly string[]>(), unresolved = new Map<string, readonly string[]>(), cycles: (readonly string[])[] = [];
+  const ordered = (keys: Iterable<string>): readonly string[] => {
+    const listed = [...new Set(keys)];
+    return listed.length ? Object.freeze(listed.sort((a, b) => (position.get(a) ?? Infinity) - (position.get(b) ?? Infinity))) : NONE;
+  };
+  /** The union of `lists` and `extra`, sharing a lone list rather than copying it. */
+  const union = (lists: readonly (readonly string[])[], extra: readonly string[]) => {
+    const filled = lists.filter(list => list.length);
+    return !extra.length && filled.length <= 1 ? filled[0] ?? NONE : ordered([...filled.flat(), ...extra]);
+  };
+  // Every link out of a component leads to a component settled before it.
+  const settle = (members: readonly string[]) => {
+    const inside = new Set(members), cyclic = members.length > 1;
+    const found: (readonly string[])[] = [], lost: (readonly string[])[] = [], loose: string[] = cyclic ? [...members] : [];
+    let causeless = !cyclic;
+    for (const key of members) for (const cause of byKey.get(key)!.causes) {
+      causeless = false;
+      if (cause === key) loose.push(key);
+      else if (!byKey.has(cause)) loose.push(cause);
+      else if (!inside.has(cause)) { found.push(roots.get(cause)!); lost.push(unresolved.get(cause)!); }
+    }
+    // A blocked issue naming no cause is blocked by nothing the list says: no root, and itself unresolved.
+    if (causeless && byKey.get(members[0])!.state === 'blocked') { causeless = false; loose.push(members[0]); }
+    const rooted = causeless ? Object.freeze([members[0]]) : union(found, NONE), open = union(lost, loose);
+    for (const key of members) { roots.set(key, rooted); unresolved.set(key, open); }
+    if (cyclic) cycles.push(ordered(members));
+  };
+  // Tarjan's strongly connected components over the links from each issue to its causes, on an explicit stack: a component is complete
+  // only once every component it leads to is.
+  const order = new Map<string, number>(), low = new Map<string, number>(), stack: string[] = [], stacked = new Set<string>();
+  const enter = (key: string) => { low.set(key, order.size); order.set(key, order.size); stack.push(key); stacked.add(key); };
+  for (const start of byKey.keys()) {
+    if (order.has(start)) continue;
+    enter(start);
+    const frames = [{ key: start, next: 0 }];
+    while (frames.length) {
+      const frame = frames[frames.length - 1], causes = byKey.get(frame.key)!.causes;
+      if (frame.next < causes.length) {
+        const cause = causes[frame.next++];
+        if (cause === frame.key || !byKey.has(cause)) continue;
+        if (!order.has(cause)) { enter(cause); frames.push({ key: cause, next: 0 }); }
+        else if (stacked.has(cause)) low.set(frame.key, Math.min(low.get(frame.key)!, order.get(cause)!));
+        continue;
+      }
+      frames.pop();
+      const parent = frames[frames.length - 1];
+      if (parent) low.set(parent.key, Math.min(low.get(parent.key)!, low.get(frame.key)!));
+      if (low.get(frame.key) !== order.get(frame.key)) continue;
+      const members: string[] = [];
+      for (let member = ''; member !== frame.key;) { member = stack.pop()!; stacked.delete(member); members.push(member); }
+      settle(members);
+    }
+  }
+  cycles.sort((a, b) => position.get(a[0])! - position.get(b[0])!);
+  return { byKey, roots, unresolved, cycles };
+}
+
+/**
  * What is wrong with list `issues` as one causal graph: a repeated key, a cause naming no issue of the list or the issue itself, a blocked
- * issue with no cause, or a cycle of causes. Empty when it is well formed.
+ * issue with no cause, or a cycle of causes, named by its first issue. Empty when it is well formed.
  */
 export function cadIssueListProblems(issues: readonly CadIssue[]): readonly string[] {
-  const problems: string[] = [], byKey = new Map<string, CadIssue>();
-  for (const issue of issues) if (byKey.has(issue.key)) problems.push(`Issue key ${issue.key} is repeated.`); else byKey.set(issue.key, issue);
+  const problems: string[] = [], keys = new Set<string>();
+  for (const issue of issues) if (keys.has(issue.key)) problems.push(`Issue key ${issue.key} is repeated.`); else keys.add(issue.key);
   for (const issue of issues) {
     if (issue.state === 'blocked' && !issue.causes.length) problems.push(`Blocked issue ${issue.key} names no cause.`);
     if (new Set(issue.causes).size !== issue.causes.length) problems.push(`Issue ${issue.key} names a cause twice.`);
-    for (const cause of issue.causes) if (cause === issue.key || !byKey.has(cause)) problems.push(`Issue ${issue.key} names ${cause === issue.key ? 'itself' : `missing issue ${cause}`} as a cause.`);
+    for (const cause of issue.causes) if (cause === issue.key || !keys.has(cause)) problems.push(`Issue ${issue.key} names ${cause === issue.key ? 'itself' : `missing issue ${cause}`} as a cause.`);
   }
-  // Depth-first, each issue once: one reached again while its own causes are still being followed closes a cycle.
-  const state = new Map<string, 'open' | 'done'>();
-  const visit = (key: string): boolean => {
-    const at = state.get(key);
-    if (at) return at === 'open';
-    state.set(key, 'open');
-    const cyclic = (byKey.get(key)?.causes ?? []).some(cause => cause !== key && byKey.has(cause) && visit(cause));
-    state.set(key, 'done');
-    return cyclic;
-  };
-  for (const key of byKey.keys()) if (!state.has(key) && visit(key)) problems.push(`The causes of issue ${key} lead back to it.`);
+  for (const [first] of cadIssueGraph(issues).cycles) problems.push(`The causes of issue ${first} lead back to it.`);
   return problems;
 }
 
@@ -187,18 +261,15 @@ export function cadIssueFeatureId(subject: CadIssueSubject): string | null {
   }
 }
 
-/** The issues of list `issues` that `key` leads back to through its causes, in list order: those that name no cause, or itself when it names none. */
-export function cadIssueRootCauses(issues: readonly CadIssue[], key: string): readonly CadIssue[] {
-  const byKey = new Map(issues.map(issue => [issue.key, issue])), roots = new Set<string>(), seen = new Set<string>();
-  const visit = (at: string) => {
-    if (seen.has(at)) return;
-    seen.add(at);
-    const issue = byKey.get(at);
-    if (!issue) return;
-    if (!issue.causes.length) roots.add(at); else issue.causes.forEach(visit);
-  };
-  visit(key);
-  return issues.filter(issue => roots.has(issue.key));
+/**
+ * Where issue `key` of list `issues` leads back to through its causes: `roots`, the issues naming no cause, in list order, or itself when
+ * it names none; and `unresolved`, the causes that resolve to no root, which only a malformed list has (`CadIssueGraph`). A key no issue of
+ * the list has is itself unresolved.
+ */
+export function cadIssueRootCauses(issues: readonly CadIssue[], key: string): { readonly roots: readonly CadIssue[]; readonly unresolved: readonly string[] } {
+  const graph = cadIssueGraph(issues);
+  if (!graph.byKey.has(key)) return Object.freeze({ roots: Object.freeze([]), unresolved: Object.freeze([key]) });
+  return Object.freeze({ roots: Object.freeze(graph.roots.get(key)!.map(root => graph.byKey.get(root)!)), unresolved: graph.unresolved.get(key)! });
 }
 
 /** A feature that reads inputs which failed or are blocked: the features its input slots name, in history order. */
@@ -235,50 +306,58 @@ export interface CadIssueBlockedSummary {
   /** The first of them, in list order, at most `CAD_ISSUE_DIGEST_NAMED`. */
   readonly featureIds: readonly string[];
 }
+/** An issue whose causes resolve to no root, with the first of those causes (`cadIssueRootCauses`). */
+export interface CadIssueUnresolvedCauses {
+  readonly key: string;
+  readonly subject: CadIssueSubject;
+  readonly causes: readonly string[];
+}
 /**
  * A list of issues bounded for a reply, which grows with the failures, not with the features they block:
  * - `issues`: every issue but those causal blocking adds (`input-blocked`), in full and in list order. The causes of each are the root
  *   issues it leads back to, which `issues` lists, so no link names an issue left out.
  * - `blocked`: the features causal blocking reports, under each root cause they lead back to, with a count and the first ids.
- * - `omittedCount`: how many blocked features no summary names; a feature with several root causes is named under each, and left out only
- *   when none names it.
+ * - `unresolved`: how many issues lead to causes that resolve to no root, and the first of them. Only a malformed list has any, which
+ *   development refuses as it is made; the digest names them rather than fail or drop them.
+ * - `omittedCount`: how many blocked features neither a summary nor `unresolved` names; a feature with several root causes is named
+ *   under each.
+ * Each list it names is at most `CAD_ISSUE_DIGEST_NAMED` long.
  */
 export interface CadIssueDigest {
   readonly issues: readonly CadIssue[];
   readonly blocked: readonly CadIssueBlockedSummary[];
+  readonly unresolved: { readonly count: number; readonly issues: readonly CadIssueUnresolvedCauses[] };
   readonly omittedCount: number;
 }
 
 /** The digest of list `issues` (`CadIssueDigest`); the workbench shows the full list. */
 export function cadIssueDigest(issues: readonly CadIssue[], named = CAD_ISSUE_DIGEST_NAMED): CadIssueDigest {
-  const byKey = new Map(issues.map(issue => [issue.key, issue])), roots = new Map<string, readonly string[]>();
-  const rootsOf = (key: string): readonly string[] => {
-    const known = roots.get(key);
-    if (known) return known;
-    const issue = byKey.get(key);
-    // Each issue's roots are memoised. A blocked feature's causes are the issues of inputs before it in history, which the list gives
-    // first, so they are settled already when it is reached in list order below.
-    const found = !issue ? [] : !issue.causes.length ? [key] : [...new Set(issue.causes.flatMap(cause => roots.get(cause) ?? rootsOf(cause)))];
-    roots.set(key, found);
-    return found;
-  };
-  for (const issue of issues) rootsOf(issue.key);
+  const { roots, unresolved } = cadIssueGraph(issues);
   const kept: CadIssue[] = [], summaries = new Map<string, { count: number; featureIds: string[] }>(), namedIds = new Set<string>();
-  let blockedCount = 0;
+  const loose: CadIssueUnresolvedCauses[] = [];
+  let blockedCount = 0, looseCount = 0;
   for (const issue of issues) {
+    const open = unresolved.get(issue.key)!;
+    let listed = false;
+    if (open.length) {
+      looseCount++;
+      if (loose.length < named) { loose.push(detached({ key: issue.key, subject: issue.subject, causes: open.slice(0, named) })); listed = true; }
+    }
     if (issue.code !== 'input-blocked') {
-      const causes = issue.causes.length ? (roots.get(issue.key) ?? []).filter(root => root !== issue.key) : [];
+      const causes = issue.causes.length ? roots.get(issue.key)!.filter(root => root !== issue.key) : [];
       kept.push(causes.length === issue.causes.length && causes.every((cause, index) => cause === issue.causes[index]) ? issue : detached({ ...issue, causes }));
       continue;
     }
     blockedCount++;
     const featureId = issue.subject.featureId;
-    for (const root of roots.get(issue.key) ?? []) {
+    if (listed) namedIds.add(featureId);
+    for (const root of roots.get(issue.key)!) {
       const summary = summaries.get(root) ?? summaries.set(root, { count: 0, featureIds: [] }).get(root)!;
       summary.count++;
       if (summary.featureIds.length < named) { summary.featureIds.push(featureId); namedIds.add(featureId); }
     }
   }
   const blocked = [...summaries].map(([cause, summary]) => Object.freeze({ cause, count: summary.count, featureIds: Object.freeze(summary.featureIds) }));
-  return Object.freeze({ issues: Object.freeze(kept), blocked: Object.freeze(blocked), omittedCount: blockedCount - namedIds.size });
+  return Object.freeze({ issues: Object.freeze(kept), blocked: Object.freeze(blocked),
+    unresolved: Object.freeze({ count: looseCount, issues: Object.freeze(loose) }), omittedCount: blockedCount - namedIds.size });
 }

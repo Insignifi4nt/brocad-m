@@ -5,6 +5,7 @@ import { createCadDocument } from '../../../domain/cad/cadSchema';
 import { createCadKernelClient, type CadWorkerTransport } from './cadKernelClient';
 import { cadKernelFailure, cadKernelMessage, cadKernelRequestFailure } from './cadKernelFailures';
 import { isCadKernelReply, type CadKernelRequest } from './cadKernelProtocol';
+import { MAX_CAD_DIAGNOSTIC_MESSAGE } from '../../../domain/cad/cadIssueCodes';
 
 const fillet = { operation: 'fillet' as const, input: { field: 'targetId', id: 'box' } };
 
@@ -25,8 +26,15 @@ describe('kernel failures', () => {
       .toMatchObject({ code: 'selection-count-mismatch', facts: { expected: 2, actual: 3 } });
   });
 
-  it('bound the kernel text, and keep none when the kernel gave none', () => {
-    expect(cadKernelMessage(new Error('x'.repeat(MAX_CAD_KERNEL_MESSAGE * 2)))).toHaveLength(MAX_CAD_KERNEL_MESSAGE);
+  it('cut kernel text and messages to their bounds with an ellipsis, so the reply stays valid, and keep no text when the kernel gave none', () => {
+    expect(cadKernelMessage(new Error('x'.repeat(MAX_CAD_KERNEL_MESSAGE * 2)))).toBe(`${'x'.repeat(MAX_CAD_KERNEL_MESSAGE - 1)}…`);
+    expect(cadKernelMessage(new Error('x'.repeat(MAX_CAD_KERNEL_MESSAGE)))).toBe('x'.repeat(MAX_CAD_KERNEL_MESSAGE));
+    // A failure with 2,049 characters of kernel text, and a refusal with a message past its bound, make a reply the boundary admits as it is.
+    const failure = cadKernelFailure('round', new Error('x'.repeat(MAX_CAD_KERNEL_MESSAGE + 1)), fillet);
+    const refusal = cadKernelFailure('later', new CadError('missing-body', 'm'.repeat(MAX_CAD_DIAGNOSTIC_MESSAGE + 1)), fillet);
+    expect([failure.details?.kernelMessage?.length, refusal.message.length, refusal.message.endsWith('…')]).toEqual([MAX_CAD_KERNEL_MESSAGE, MAX_CAD_DIAGNOSTIC_MESSAGE, true]);
+    expect(isCadKernelReply({ id: 1, kind: 'built', result: { buildId: 'b', durationMs: 0, meshes: [], diagnostics: [failure, refusal] } })).toBe(true);
+    expect(cadKernelRequestFailure('section', new Error('x'.repeat(MAX_CAD_KERNEL_MESSAGE + 1))).kernelMessage).toHaveLength(MAX_CAD_KERNEL_MESSAGE);
     expect(cadKernelMessage(new Error(''))).toBeNull();
     expect(cadKernelMessage({})).toBeNull();
   });
@@ -45,7 +53,9 @@ describe('the worker boundary', () => {
   it('checks an error reply\'s kernel text and facts, and gives them to the client\'s refusal', async () => {
     const error = (extra: object) => ({ id: 1, kind: 'error', code: 'kernel-operation-failed', message: 'The part could not be rebuilt.', ...extra });
     expect(isCadKernelReply(error({ kernelMessage: 'Standard_Failure' }))).toBe(true);
-    for (const kernelMessage of ['', 'x'.repeat(MAX_CAD_KERNEL_MESSAGE + 1), 3]) expect(isCadKernelReply(error({ kernelMessage })), String(kernelMessage).slice(0, 8)).toBe(false);
+    for (const kernelMessage of ['', 3, null]) expect(isCadKernelReply(error({ kernelMessage })), String(kernelMessage)).toBe(false);
+    // Longer kernel text is admitted, and cut as the refusal is made below.
+    expect(isCadKernelReply(error({ kernelMessage: 'x'.repeat(MAX_CAD_KERNEL_MESSAGE + 1) }))).toBe(true);
     expect(isCadKernelReply(error({ code: 'selection-empty', facts: { expected: 2 } }))).toBe(true);
     expect(isCadKernelReply(error({ code: 'selection-empty' }))).toBe(false);
     expect(isCadKernelReply(error({ code: 'selection-empty', facts: { expected: 0 } }))).toBe(false);
@@ -59,6 +69,9 @@ describe('the worker boundary', () => {
     const deliver = transport.onmessage as NonNullable<CadWorkerTransport['onmessage']>;
     deliver.call(transport, new MessageEvent('message', { data: error({ code: 'selection-empty', facts: { expected: 2 }, kernelMessage: 'Standard_Failure' }) }));
     await expect(built).rejects.toMatchObject({ code: 'selection-empty', message: 'The part could not be rebuilt.', kernelMessage: 'Standard_Failure', facts: { expected: 2 } });
+    const longer = client.build(createCadDocument());
+    deliver.call(transport, new MessageEvent('message', { data: { ...error({ kernelMessage: 'x'.repeat(MAX_CAD_KERNEL_MESSAGE + 1) }), id: 2 } }));
+    await expect(longer).rejects.toMatchObject({ code: 'kernel-operation-failed', kernelMessage: `${'x'.repeat(MAX_CAD_KERNEL_MESSAGE - 1)}…` });
     client.dispose();
   });
 });

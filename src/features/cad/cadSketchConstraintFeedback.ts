@@ -102,7 +102,7 @@ function feedback({ sketchId, sketchName, graph, rejection, dragPointId }: Prepa
 }
 
 /** A failed candidate retains diagnosis and operand identities without owning accepted data or history. */
-export class CadSketchPreparationError extends CadError {
+export class CadSketchPreparationError extends CadError<`sketch-${Rejection['reason']}`> {
   readonly feedback: CadSketchConstraintFeedback;
   readonly diagnostics: CadSketchSolveDiagnostics;
   readonly solverMessage: string;
@@ -110,7 +110,7 @@ export class CadSketchPreparationError extends CadError {
   readonly marks: CadSketchDiagnosisMarks | null;
   constructor(input: PreparationFailureInput) {
     const presentation = feedback(input);
-    super(`sketch-${input.rejection.reason}`, presentation.message);
+    super(`sketch-${input.rejection.reason}` as const, presentation.message);
     this.name = 'CadSketchPreparationError'; this.feedback = presentation; this.solverMessage = input.rejection.message;
     const diagnostics = input.rejection.diagnostics;
     this.diagnostics = Object.freeze({ ...diagnostics, conflictingIds: Object.freeze([...diagnostics.conflictingIds]), redundantIds: Object.freeze([...diagnostics.redundantIds]),

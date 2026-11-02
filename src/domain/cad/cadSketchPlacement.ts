@@ -17,7 +17,7 @@ export const CadSketchPlacementRequestSchema = Type.Object({
 }, { additionalProperties: false });
 type Immutable<T> = { readonly [K in keyof T]: Immutable<T[K]> };
 export type CadSketchPlacementRequest = Immutable<Static<typeof CadSketchPlacementRequestSchema>>;
-export class CadSketchPlacementDependencyError extends CadError {
+export class CadSketchPlacementDependencyError extends CadError<'dependent-sketch-placement'> {
   readonly pointIds: readonly string[]; readonly entityIds: readonly string[]; readonly relationIds: readonly string[];
   constructor(message: string, subjects: { pointIds?: readonly string[]; entityIds?: readonly string[]; relationIds?: readonly string[] }) {
     super('dependent-sketch-placement', message);

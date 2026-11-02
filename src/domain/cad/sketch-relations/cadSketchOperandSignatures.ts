@@ -50,7 +50,7 @@ export const cadSketchMissingCapability = (slot: Pick<CadSketchOperandSlot, 'nee
   slot.needs?.find(capability => !cadSketchOperandCan(element, capability));
 
 const ALL_FIXED: CadSketchRefusal = { code: 'fixed-sketch-relation', message: 'A relation needs a sketch point or edge: the origin and the H and V axes are fixed already.' };
-const refuse = (refusal: CadSketchRefusal) => new CadError(refusal.code, refusal.message);
+const refuse = (refusal: CadSketchRefusal) => CadError.checked(refusal.code, refusal.message);
 /**
  * The origin or an axis in a slot, refused unless the slot takes its type and it gives what the slot needs. An `end` slot is the kind's
  * own to check, as an end of the edge before it.

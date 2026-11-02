@@ -33,7 +33,7 @@ export function CadLoftSections({ document, featureId, sketchIds, onChange, appl
       const sections = sketchIds.map(id => {
         const candidate = candidatesById.get(id);
         if (!candidate) throw new CadError('invalid-reference', 'Choose an earlier sketch.');
-        if (!candidate.inspection.eligible) throw new CadError(candidate.inspection.code, candidate.inspection.message);
+        if (!candidate.inspection.eligible) throw CadError.checked(candidate.inspection.code, candidate.inspection.message);
         return candidate.inspection.section;
       });
       return { resolved: resolveCadLoftSectionPlacements(sections), error: null };

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CadBuildResult, CadDocument, CadFeature } from '../cadDocument';
 import { createCadDocument, parseCadDocument } from '../cadSchema';
 import { CadError } from '../cadError';
@@ -20,6 +20,14 @@ const failed = (featureId: string, code = 'kernel-operation-failed', message = '
 const build = (diagnostics: CadBuildResult['diagnostics'], bodyIssues: CadBuildResult['bodyIssues'] = []) => ({ diagnostics, bodyIssues });
 const summary = (issue: CadIssue) => ({ key: issue.key, namespace: issue.namespace, code: issue.code, severity: issue.severity, state: issue.state, subject: issue.subject, causes: issue.causes });
 const keys = (issues: readonly CadIssue[]) => issues.map(issue => issue.key);
+// A pad and a chain of fillets, each rounding the last: one failure of the pad blocks every fillet.
+const chained = (count: number) => document([sketch('s'), pad('p', 's'), ...Array.from({ length: count }, (_, at) => fillet(`f${at}`, at ? `f${at - 1}` : 'p'))]);
+const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
+/** The issue model as production loads it, where no list is checked as it is made. */
+async function inProduction<T>(use: (model: typeof import('../cadIssues'), build: typeof import('../cadBuildIssues')) => T | Promise<T>): Promise<T> {
+  vi.stubEnv('DEV', false); vi.resetModules();
+  try { return await use(await import('../cadIssues'), await import('../cadBuildIssues')); } finally { vi.unstubAllEnvs(); vi.resetModules(); }
+}
 
 // A box, a peg beside it, a fillet of the box, the peg joined to the filleted box, a fillet of the peg, and a second box with its own fillet.
 const history = [sketch('box_sketch'), pad('box', 'box_sketch'), sketch('peg_sketch', 60, 10), pad('peg', 'peg_sketch'), fillet('round', 'box'),
@@ -69,7 +77,7 @@ describe('build issues', () => {
     const issues = cadBuildIssues(document(history), build([failed('box', 'empty-solid', 'The operation produced no solid.'), stopped('box')]), 'v7');
     const rib = issues.items.find(issue => issue.key === 'feature:blocked:rib')!;
     expect(rib.causes).toEqual(['feature:blocked:round']);
-    expect(keys(cadIssueRootCauses(issues.items, rib.key))).toEqual(['kernel:0:empty-solid']);
+    expect(keys(cadIssueRootCauses(issues.items, rib.key).roots)).toEqual(['kernel:0:empty-solid']);
   });
 
   it('link what reads a feature that failed on its own to that failure, which lists its own failed input as a cause too', () => {
@@ -83,7 +91,7 @@ describe('build issues', () => {
       { key: 'feature:blocked:f', namespace: 'feature', code: 'input-blocked', severity: 'warning', state: 'blocked', subject: { kind: 'feature', featureId: 'f' }, causes: ['kernel:1:empty-solid'] }
     ]);
     expect(cadIssueListProblems(issues.items)).toEqual([]);
-    expect(keys(cadIssueRootCauses(issues.items, 'feature:blocked:f'))).toEqual(['kernel:0:empty-sketch']);
+    expect(keys(cadIssueRootCauses(issues.items, 'feature:blocked:f').roots)).toEqual(['kernel:0:empty-sketch']);
   });
 
   it('link a feature that reads several failed inputs to every one of them', () => {
@@ -91,7 +99,7 @@ describe('build issues', () => {
     const issues = cadBuildIssues(parsed, build([failed('a', 'empty-solid', 'No solid.'), failed('b', 'invalid-solid', 'Invalid.')]), 'v7');
     const merge = issues.byFeature.get('merge')!;
     expect(merge).toMatchObject({ code: 'input-blocked', causes: ['kernel:0:empty-solid', 'kernel:1:invalid-solid'], details: { inputs: ['a', 'b'] } });
-    expect(keys(cadIssueRootCauses(issues.items, 'feature:blocked:round'))).toEqual(['kernel:0:empty-solid', 'kernel:1:invalid-solid']);
+    expect(keys(cadIssueRootCauses(issues.items, 'feature:blocked:round').roots)).toEqual(['kernel:0:empty-solid', 'kernel:1:invalid-solid']);
     expect(cadIssueListProblems(issues.items)).toEqual([]);
   });
 
@@ -102,6 +110,13 @@ describe('build issues', () => {
       details: { operation: 'fillet', input: { field: 'targetId', id: 'box' }, kernelMessage: 'BRep_API: command not done' } });
     // Without details, the step is the feature's own operation.
     expect(cadBuildIssues(document(history), build([failed('rib', 'cut-erased', 'Erased.')]), 'v7').items[0].details).toEqual({ operation: 'extrude', input: null, kernelMessage: null });
+  });
+
+  it('report a code no registry lists as kernel-unrecognised, keeping the code it gave', () => {
+    const [issue] = cadBuildIssues(document(history), build([failed('round', 'new-dynamic-refusal', 'Failed.'), stopped('round')]), 'v7').items;
+    expect(issue).toMatchObject({ key: 'kernel:0:kernel-unrecognised', namespace: 'kernel', code: 'kernel-unrecognised', state: 'failed', message: 'Failed.',
+      details: { operation: 'fillet', input: null, kernelMessage: null, refusalCode: 'new-dynamic-refusal' } });
+    expect(issue.repairs.map(repair => repair.label)).toEqual(['Edit feature']);
   });
 
   it('carry the facts a code gives, narrowed by its code', () => {
@@ -155,6 +170,21 @@ describe('issue codes and details', () => {
     const worded: CadIssue = { ...common, namespace: 'kernel', code: 'empty-solid', state: 'failed', subject: { kind: 'document' }, details: { operation: 'check', input: null, kernelMessage: null, note: 'x' } };
     expect([contradictory, unknown, countless, worded]).toHaveLength(4);
   });
+
+  it('give a feature issue the facts of a code that carries them, so reading them by code alone never gives undefined', () => {
+    const feature = { ...common, namespace: 'feature', severity: 'error', state: 'failed', subject: { kind: 'feature', featureId: 'p' } } as const;
+    // @ts-expect-error A feature issue with a count mismatch carries its counts too.
+    const factless: CadIssue = { ...feature, code: 'selection-count-mismatch', details: {} };
+    // @ts-expect-error Only a build reports a code no registry lists, so no feature issue has it.
+    const unrecognised: CadIssue = { ...feature, code: 'kernel-unrecognised', details: { refusalCode: 'x' } };
+    const counted = createCadIssue<CadIssue>({ ...feature, code: 'selection-count-mismatch', details: { expected: 2, actual: 3 } });
+    // The code narrows every namespace that has it to its facts.
+    const actual = (issue: CadIssue): number | null => issue.code === 'selection-count-mismatch' ? issue.details.actual : null;
+    expect(actual(counted)).toBe(3);
+    // @ts-expect-error A code that carries no facts has no details to read: its details have no index signature.
+    const nothing = (issue: CadIssue) => issue.namespace === 'feature' && issue.code !== 'input-blocked' && issue.code !== 'selection-count-mismatch' && issue.code !== 'selection-empty' ? issue.details.actual : null;
+    expect([factless, unrecognised, nothing]).toHaveLength(3);
+  });
 });
 
 describe('issue lists', () => {
@@ -175,12 +205,60 @@ describe('issue lists', () => {
     expect(() => createCadIssueList([issue('a', ['b']), issue('b', ['a'])])).toThrow('Malformed CAD issue list: The causes of issue a lead back to it.');
     expect(() => createCadIssueList([issue('b', ['a'])])).toThrow('names missing issue a');
   });
+
+  it('name in production the issues whose causes resolve to no root, rather than fail or drop them', () => inProduction(model => {
+    // A root, a cycle, an issue reading the cycle, a self link, a missing cause, a blocked issue naming none, and one reading the root and the cycle.
+    const list = model.createCadIssueList([issue('root'), issue('a', ['b']), issue('b', ['a']), issue('c', ['b']), issue('self', ['self']), issue('lost', ['gone']),
+      issue('bare', [], 'blocked'), issue('mixed', ['root', 'a'])]);
+    expect(list).toHaveLength(8);
+    const digest = model.cadIssueDigest(list);
+    expect(digest.unresolved.count).toBe(7);
+    expect(digest.unresolved.issues.map(({ key, causes }) => ({ key, causes }))).toEqual([{ key: 'a', causes: ['a', 'b'] }, { key: 'b', causes: ['a', 'b'] },
+      { key: 'c', causes: ['a', 'b'] }, { key: 'self', causes: ['self'] }, { key: 'lost', causes: ['gone'] }, { key: 'bare', causes: ['bare'] }, { key: 'mixed', causes: ['a', 'b'] }]);
+    expect(digest.unresolved.issues[0].subject).toEqual({ kind: 'feature', featureId: 'a' });
+    expect([keys(digest.issues), digest.blocked, digest.omittedCount]).toEqual([['root'], [{ cause: 'root', count: 1, featureIds: ['mixed'] }], 0]);
+    expect(model.cadIssueRootCauses(list, 'mixed')).toEqual({ roots: [list[0]], unresolved: ['a', 'b'] });
+    expect(model.cadIssueRootCauses(list, 'nowhere')).toEqual({ roots: [], unresolved: ['nowhere'] });
+  }));
+
+  it('count in production every issue of a long cycle and name the first, with a bounded digest', () => inProduction(model => {
+    const length = 6000, list = model.createCadIssueList(Array.from({ length }, (_, at) => issue(`c${at}`, [`c${(at + 1) % length}`])));
+    const digest = model.cadIssueDigest(list);
+    expect([digest.unresolved.count, digest.unresolved.issues.length, digest.omittedCount]).toEqual([length, CAD_ISSUE_DIGEST_NAMED, length - CAD_ISSUE_DIGEST_NAMED]);
+    expect(digest.unresolved.issues[0].causes).toEqual(Array.from({ length: CAD_ISSUE_DIGEST_NAMED }, (_, at) => `c${at}`));
+    expect(bytes(digest)).toBeLessThan(2048);
+    expect(cadIssueListProblems(list)).toEqual(['The causes of issue c0 lead back to it.']);
+  }));
+});
+
+describe('long histories', () => {
+  // A pad and 6,000 fillets, each rounding the last: the pad fails, and an early fillet and the last fail on their own as well.
+  const long = () => [chained(6000), build([failed('p', 'empty-solid', 'No solid.'), failed('f10'), failed('f5999')])] as const;
+  const first = Array.from({ length: CAD_ISSUE_DIGEST_NAMED }, (_, at) => `f${at}`);
+
+  it('build, check and digest in development without recursion, whatever order the list is in', () => {
+    const { items } = cadBuildIssues(...long(), 'v7');
+    expect(items).toHaveLength(6001);
+    expect(keys(cadIssueRootCauses(items, 'kernel:2:kernel-operation-failed').roots)).toEqual(['kernel:0:empty-solid']);
+    const digest = cadIssueDigest(items);
+    expect(digest.issues.map(({ key, causes }) => ({ key, causes }))).toEqual([{ key: 'kernel:0:empty-solid', causes: [] },
+      { key: 'kernel:1:kernel-operation-failed', causes: ['kernel:0:empty-solid'] }, { key: 'kernel:2:kernel-operation-failed', causes: ['kernel:0:empty-solid'] }]);
+    expect([digest.blocked, digest.unresolved, digest.omittedCount]).toEqual([[{ cause: 'kernel:0:empty-solid', count: 5998, featureIds: first }], { count: 0, issues: [] }, 5990]);
+    // Reversed, the longest chain is entered first.
+    const reversed = [...items].reverse();
+    expect(cadIssueListProblems(reversed)).toEqual([]);
+    expect(createCadIssueList(reversed)).toHaveLength(6001);
+    expect(cadIssueDigest(reversed)).toMatchObject({ blocked: [{ cause: 'kernel:0:empty-solid', count: 5998 }], unresolved: { count: 0 }, omittedCount: 5990 });
+  });
+
+  it('build and digest in production the same way', () => inProduction((model, production) => {
+    const { items } = production.cadBuildIssues(...long(), 'v7');
+    expect(items).toHaveLength(6001);
+    expect(model.cadIssueDigest([...items].reverse())).toMatchObject({ blocked: [{ cause: 'kernel:0:empty-solid', count: 5998 }], unresolved: { count: 0 }, omittedCount: 5990 });
+  }));
 });
 
 describe('issue digest', () => {
-  // A pad and a chain of fillets, each rounding the last: one failure of the pad blocks every fillet.
-  const chained = (count: number) => document([sketch('s'), pad('p', 's'), ...Array.from({ length: count }, (_, at) => fillet(`f${at}`, at ? `f${at - 1}` : 'p'))]);
-  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
   it('gives the failures in full and the features they block by count, with a reply that does not grow with them', () => {
     const issues = cadBuildIssues(chained(1200), build([failed('p', 'empty-solid', 'The pad produced no solid.'), stopped('p')]), 'v7').items;
     const digest = cadIssueDigest(issues);
@@ -188,7 +266,7 @@ describe('issue digest', () => {
     expect(keys(digest.issues)).toEqual(['kernel:0:empty-solid', 'kernel:1:rebuild-stopped']);
     expect(digest.blocked).toEqual([{ cause: 'kernel:0:empty-solid', count: 1200, featureIds: Array.from({ length: CAD_ISSUE_DIGEST_NAMED }, (_, at) => `f${at}`) }]);
     expect(digest.omittedCount).toBe(1200 - CAD_ISSUE_DIGEST_NAMED);
-    // Measured: the full list is 373,121 bytes of JSON, and the digest 910 however long the chain.
+    // Measured: the full list is 373,121 bytes of JSON, and the digest 947 however long the chain.
     expect([bytes(issues) > 360_000, bytes(digest) < 1024]).toEqual([true, true]);
     // A chain of 1,500 fillets gives the same digest but for its counts, which have as many digits.
     expect(bytes(cadIssueDigest(cadBuildIssues(chained(1500), build([failed('p', 'empty-solid', 'The pad produced no solid.'), stopped('p')]), 'v7').items))).toBe(bytes(digest));

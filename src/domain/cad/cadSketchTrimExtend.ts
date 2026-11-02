@@ -118,10 +118,11 @@ export interface CadSketchMiddleTrimResult {
 }
 export type CadSketchCircleTrimResult = Omit<CadSketchMiddleTrimResult, 'newEntityId'>;
 export type CadSketchTrimResult = CadSketchEndTrimResult | CadSketchMiddleTrimResult | CadSketchCircleTrimResult;
-abstract class CadSketchEditDependencyError extends CadError {
+type CadSketchEditDependencyCode = 'dependent-sketch-trim' | 'dependent-sketch-extend';
+abstract class CadSketchEditDependencyError extends CadError<CadSketchEditDependencyCode> {
   readonly relationIds: readonly string[];
   readonly pointIds: readonly string[];
-  constructor(code: string, message: string, relationIds: readonly string[], pointIds: readonly string[]) {
+  constructor(code: CadSketchEditDependencyCode, message: string, relationIds: readonly string[], pointIds: readonly string[]) {
     super(code, message);
     this.relationIds = Object.freeze([...relationIds]); this.pointIds = Object.freeze([...pointIds]);
   }
