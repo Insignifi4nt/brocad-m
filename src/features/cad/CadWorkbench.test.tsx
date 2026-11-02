@@ -1038,6 +1038,41 @@ describe('CAD sketch interaction', () => {
     await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
   });
 
+  it('opens the Pad editor to ask when a dragged Length would remove relations, applying nothing until Apply confirms and nothing on Cancel', async () => {
+    // The Pad's Length n also counts a polygon's sides; nine sides drop "c9" on the tenth corner.
+    setCadPreferences({ navigationMode: 'mouse', showOnPartDimensions: true });
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 100, y: 100, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 10 }).points.find(point => point.id === 'g-poly_v9')!.position;
+    const solid = solidDocument(), pad = solid.features[1];
+    const initial = parseCadDocument({ ...solid, schemaVersion: 2, parameters: { ...solid.parameters, n: 10 }, features: [solid.features[0], { ...pad, distance: ' n ' },
+      { id: 'poly-sketch', name: 'Polygon', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false, profiles: [],
+        graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'c9', kind: 'coincident', pointIds: ['u', 'g-poly_v9'] }] } }] });
+    const relations = (document: CadDocument) => { const sketch = document.features[2]; return sketch.kind === 'sketch' ? sketch.graph?.relations.map(relation => relation.id) : undefined; };
+    const asked = () => container.querySelector('.cad-property-form .cad-form-hint[role="status"]')?.textContent ?? null;
+    const prompt = /^This removes one relation on geometry the shape no longer has: .*. Apply removes it, or Cancel keeps it.$/;
+    await mount(initial, { build: topologyBuild, buildState: 'ready' });
+    async function drag() {
+      await selectTopology('face');
+      const control = viewportDepth; if (!control) throw new Error('A picked end face must expose its Pad depth.');
+      const token = control.begin(control.getState()?.definitionKey ?? ''); if (!token) throw new Error('Expected a drag.');
+      await act(async () => { control.setQuantity(token, 9); }); await act(async () => { control.release(token); });
+    }
+    // The release applies nothing and opens the Pad's editor at the dragged Length, where Apply asks before removing anything.
+    await drag();
+    expect(currentDocument).toBe(initial); expect(field('Length').value).toBe('9'); expect(currentSession.getSnapshot().canUndo).toBe(false);
+    await click('Apply');
+    expect(asked()).toMatch(prompt); expect(container.querySelector('.cad-property-form [role="alert"]')).toBeNull(); expect(currentDocument).toBe(initial);
+    await click('Apply');
+    expect(currentDocument.parameters.n).toBe(9); expect(relations(currentDocument)?.includes('c9')).toBe(false);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial); expect(currentSession.getSnapshot().canUndo).toBe(false);
+    // Cancel closes the question with the editor and keeps the part.
+    await drag();
+    expect(field('Length').value).toBe('9');
+    await click('Cancel');
+    expect(container.querySelector('input[aria-label="Length"]')).toBeNull(); expect(relations(currentDocument)).toEqual(relations(initial)); expect(currentDocument.parameters.n).toBe(10);
+  });
+
   it('keeps the correlated quantity preview while choosing areas and cancels only that choice before one Apply/Undo', async () => {
     const original = solidDocument();
     const initial = applyCadEdits(original, [{ kind: 'set-parameter', name: 'depth', value: 10 },

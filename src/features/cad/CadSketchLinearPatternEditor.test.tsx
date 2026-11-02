@@ -4,6 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { applyCadEdits, reduceCadEditIntents, type CadEdit } from '@/domain/cad/cadOperations';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadDocument } from '@/domain/cad/cadDocument';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CadSketchLinearPatternEditor, type CadSketchLinearPatternInteraction } from './CadSketchLinearPatternEditor';
 
 let root: Root, container: HTMLDivElement;
@@ -50,4 +52,43 @@ it('rejects an outdated preview and its canvas callbacks when source ownership c
   await h.render({ documentVersion: 'two' }); await act(async () => { interaction.onToggleInstance(1); gate.resolve(h.document); });
   expect(prepare.mock.calls[0][1].aborted).toBe(true); expect(h.cancelled).toHaveBeenCalledOnce(); expect(h.edit).not.toHaveBeenCalled();
   expect(h.preview.mock.calls.at(-1)?.[0] ?? null).toBeNull();
+});
+it('asks before a linked pitch removes relations as a generator regenerates, applies the confirmed removal with the pattern, and Cancel applies nothing', async () => {
+  // The pitch and a five-sided polygon both read n, and a user point sits on the polygon's fifth corner: four removes "c4".
+  const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+    geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+  const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+  const seed = parseCadDocument({ ...createCadDocument(), schemaVersion: 2, parameters: { n: 5 }, features: [{ id: 'sketch', kind: 'sketch', name: 'Hole row', plane: 'XY', offset: 0, suppressed: false, profiles: [],
+    graph: { points: [{ id: 'center', position: ['20', '20'] }, { id: 'u', position: corner }], entities: [{ id: 'seed', kind: 'circle', centerPointId: 'center', radius: '1', construction: false }],
+      relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } }] });
+  const document = applyCadEdits(seed, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'holes', kind: 'linear-pattern', seed: { kind: 'circle', entityId: 'seed', centerPointId: 'center' },
+    idPrefix: 'row', count: 3, direction: '+x', spacing: ' n ', omittedInstances: [] } }]);
+  const sketch = document.features[0]; if (sketch.kind !== 'sketch') throw new Error('Sketch missing');
+  // The part refuses an edit that does not confirm what it removes, as the workbench does.
+  const edit = vi.fn(async (edits: readonly CadEdit[], _signal?: AbortSignal) => { reduceCadEditIntents(document, edits); }), accepted = vi.fn(), cancelled = vi.fn();
+  const props: ComponentProps<typeof CadSketchLinearPatternEditor> = { document, documentVersion: 'one', sketch, request: { kind: 'edit', relationId: 'holes' }, interactionLocked: false,
+    onEditMany: edit, onPrepareEdits: async edits => reduceCadEditIntents(document, edits), onPreviewDocument: vi.fn(), onPendingChange: vi.fn(), onInteractionChange: vi.fn(), onCancel: cancelled, onAccepted: accepted };
+  const settle = async () => act(async () => vi.advanceTimersByTimeAsync(100));
+  const asked = () => container.querySelector('.cad-form-hint[role="status"]')?.textContent ?? null;
+  const prompt = /^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/;
+  await act(async () => root.render(<CadSketchLinearPatternEditor key="first" {...props} />));
+  await input('Pitch mm', '4'); await settle();
+  expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(container.textContent).not.toContain('removedRelationIds');
+  await settle(); expect(button('Apply').disabled).toBe(false);
+  await act(async () => button('Apply').click());
+  expect(edit).toHaveBeenCalledExactlyOnceWith([{ kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }], expect.any(AbortSignal));
+  expect(accepted).toHaveBeenCalledOnce();
+  // Asked again in a new session, Cancel ends it with no edit.
+  await act(async () => root.render(<CadSketchLinearPatternEditor key="second" {...props} />));
+  await input('Pitch mm', '4'); await settle(); expect(asked()).toMatch(prompt);
+  await act(async () => button('Cancel').click());
+  expect(cancelled).toHaveBeenCalledOnce(); expect(edit).toHaveBeenCalledOnce();
+  // A removal only the part finds on Apply asks the same way, and the next Apply confirms it.
+  await act(async () => root.render(<CadSketchLinearPatternEditor key="third" {...props} onPrepareEdits={async () => document} />));
+  await input('Pitch mm', '4'); await settle(); expect(asked()).toBeNull();
+  await act(async () => button('Apply').click());
+  expect(edit).toHaveBeenCalledTimes(2); expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull();
+  await settle(); await act(async () => button('Apply').click());
+  expect(edit).toHaveBeenLastCalledWith([{ kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }], expect.any(AbortSignal));
+  expect(accepted).toHaveBeenCalledTimes(2);
 });

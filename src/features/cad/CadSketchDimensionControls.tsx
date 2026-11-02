@@ -12,6 +12,8 @@ import { inspectCadSketchDimensions, type CadSketchDimensionQuantity } from '@/d
 import { cadSketchDimensionAnnotation, type CadAnnotationPoint } from './cadSketchDimensionAnnotations';
 import { formatCadQuantity } from './cadDisplayQuantity';
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
+import { cadGeneratorRemovals } from './cadGeneratorRemovals';
+import { useCadGeneratorRemovalConfirmation } from './useCadGeneratorRemovalConfirmation';
 import { CadContextMenu, type CadContextMenuItem } from './CadContextMenu';
 import { keepCadSketchDimensionPicks, NO_SKETCH_DIMENSIONS, sameCadSketchDimensionPick, selectCadSketchDimension, type CadSketchDimensionPick } from './cadSketchDimensionSelection';
 import './cad-sketch-dimensions.css';
@@ -86,12 +88,17 @@ export function CadSketchDimensionControls({ document: cadDocument, sketch, prof
   const root = useRef<HTMLDivElement>(null), editorDocument = useRef<CadDocument | null>(null), previous = useRef<HTMLElement | null>(null), pendingCallback = useRef(onPendingChange), previousCancel = useRef(cancelSignal);
   const previousProfile = useRef({ documentId: cadDocument.id, profileId: profile.id, sketchId: sketch.id });
   const close = () => { submission.cancel(); setEditor(null); editorDocument.current = null; onInspectInput?.(null); };
-  const commit = (edits: readonly CadEdit[]) => submission.submit(signal => {
+  /** Applies `edits`; a refusal of the editor's edits `asked` for the relations they remove asks for them as the check would. */
+  const commit = (edits: readonly CadEdit[], asked?: readonly CadEdit[] | null) => submission.submit(signal => {
     if (editorDocument.current !== cadDocument) throw new Error('The part changed. Cancel and reopen this dimension.');
     return edits.length ? onEditMany(edits, signal) : undefined;
-  }, close, error => setEditor(current => current ? { ...current, error: userFacingMessage(error, 'Unable to change this dimension.') } : current));
+  }, close, error => {
+    if (asked && hold(cadGeneratorRemovals(error), asked)) return;
+    setEditor(current => current ? { ...current, error: userFacingMessage(error, 'Unable to change this dimension.') } : current);
+  });
   const active = dimensions.find(dimension => dimension.name === editor?.name);
-  const binding = active ? bindingFor(active.scalar, parameters) : null;
+  // One binding per dimension and parameters, so the edits built from it keep their identity, which a confirmation is held by.
+  const binding = useMemo(() => active ? bindingFor(active.scalar, parameters) : null, [active, parameters]);
   const annotations = dimensions.map(dimension => ({ dimension, annotation: project && dimension.quantity ? cadSketchDimensionAnnotation(profile.geometry, parameters, dimension.quantity, project) : null }));
   const annotated = Boolean(project && profile.geometry.kind !== 'plugin');
   // A removal from a selected chip is pending like an open editor, so the workbench holds other edits until it settles.
@@ -107,7 +114,7 @@ export function CadSketchDimensionControls({ document: cadDocument, sketch, prof
     setSelection(NO_SKETCH_DIMENSIONS); setMenu(null);
     if (editor) close();
   }, [cadDocument.id, profile.id, sketch.id]);
-  const candidate = useMemo(() => {
+  const built = useMemo(() => {
     if (!editor || !active || !binding || binding.kind === 'expression' || !active.enabled) return { edits: null, issue: null };
     try {
       if (editorDocument.current !== cadDocument) throw new Error('The part changed. Cancel and reopen this dimension.');
@@ -118,11 +125,25 @@ export function CadSketchDimensionControls({ document: cadDocument, sketch, prof
       const edit: CadEdit = binding.kind === 'parameter' ? { kind: 'set-parameter', name: binding.name, value: scalarValue }
         : active.constraintId ? { kind: 'set-sketch-dimension', sketchId: sketch.id, profileId: profile.id, dimensionId: active.constraintId, value }
         : { kind: 'update-feature', feature: { ...sketch, profiles: sketch.profiles.map(entry => entry.id === profile.id ? { ...entry, geometry: changeDimension(entry.geometry, active.name, scalarValue) } : entry) } };
-      if (needsCadSketchPreparation(cadDocument, [edit])) reduceCadEditIntents(cadDocument, [edit]);
-      else applyCadEdits(cadDocument, [edit]);
       return { edits: [edit], issue: null };
     } catch (error) { return { edits: null, issue: userFacingMessage(error, 'Invalid dimension.') }; }
   }, [editor?.value, editor?.name, active, binding, cadDocument, sketch, profile.id]);
+  // A parameter that removes relations as a generator regenerates asks first; the next Apply removes them in the same edit.
+  const confirmation = useCadGeneratorRemovalConfirmation(cadDocument, built.edits), { hold } = confirmation;
+  const candidate = useMemo(() => {
+    const edits = confirmation.edits;
+    if (!edits?.length) return built;
+    try {
+      if (needsCadSketchPreparation(cadDocument, edits)) reduceCadEditIntents(cadDocument, edits);
+      else applyCadEdits(cadDocument, edits);
+      return { edits, issue: confirmation.issue };
+    } catch (error) {
+      const removals = cadGeneratorRemovals(error);
+      return removals ? { edits, issue: confirmation.issue, removals } : { edits: null, issue: userFacingMessage(error, 'Invalid dimension.') };
+    }
+  }, [built, confirmation.edits, confirmation.issue, cadDocument]);
+  const found = 'removals' in candidate ? candidate.removals : undefined;
+  useEffect(() => { hold(found); }, [found, hold]);
   useLayoutEffect(() => {
     const place = () => {
       const element = root.current, host = element?.offsetParent;
@@ -213,14 +234,15 @@ export function CadSketchDimensionControls({ document: cadDocument, sketch, prof
         }}><span>{dimension.symbol}</span><strong>{valueText(resolved)}</strong>{dimension.unit && <small>{dimension.unit}</small>}{dimensionBinding.kind === 'parameter' ? <LinkIcon size={10} /> : dimensionBinding.kind === 'expression' || !dimension.enabled ? <LockedIcon size={10} /> : null}</Button>;
     })}</div>
     {editor && active && binding && <form className="cad-dimension-edit" aria-busy={submission.applying || undefined} style={annotated ? { left: placement.x, top: placement.y } : undefined} role="dialog" aria-label={`${active.label} dimension`} onSubmit={event => {
-      event.preventDefault(); if (interactionLocked || submission.applying || !candidate.edits) return;
-      commit(candidate.edits);
+      event.preventDefault(); if (interactionLocked || submission.applying || !candidate.edits || candidate.issue) return;
+      commit(candidate.edits, built.edits);
     }}>
       <header><strong>{active.label}</strong><Button type="button" aria-label="Close dimension editor" onClick={close}><CloseIcon size={12} /></Button></header>
       {binding.kind === 'expression' || !active.enabled ? <><p className="cad-dimension-link"><LockedIcon size={11} /> {binding.kind === 'expression' ? binding.expression : 'Controlled by the profile'}</p><p>This dimension follows its linked configuration. Edit the referenced parameters or profile to change it.</p>{onConfigure && <Button type="button" className="cad-dimension-configure" onClick={() => { close(); onConfigure(active.name); }}>Profile configuration</Button>}</> : <>
         <label><span>{active.label}</span><Input aria-label={`${active.label} value`} inputMode={active.integer ? 'numeric' : 'decimal'} value={editor.value} disabled={interactionLocked || submission.applying} spellCheck={false} aria-invalid={Boolean(candidate.issue) || undefined} onChange={event => setEditor({ ...editor, value: event.target.value, error: '' })} /><small>{active.unit}</small></label>
         {binding.kind === 'parameter' && <p className="cad-dimension-link"><LinkIcon size={11} /> Updates {binding.name}{active.scale !== 1 ? ` (${active.label.toLowerCase()} ÷ ${active.scale})` : ''}</p>}
         {(editor.error || candidate.issue) && <p className="cad-dimension-error" role="alert">{editor.error || candidate.issue}</p>}
+        {!editor.error && !candidate.issue && confirmation.notice && <div className="cad-form-hint" role="status">{confirmation.notice}</div>}
         <footer>{active.constraintId && <Button type="button" title="Release this dimension without changing the contour" disabled={interactionLocked || submission.applying} onClick={() => commit([{ kind: 'remove-sketch-dimension', sketchId: sketch.id, profileId: profile.id, dimensionId: active.constraintId! }])}>Remove dimension</Button>}<Button type="button" onClick={close}>Cancel</Button><Button variant="primary" type="submit" className="cad-dimension-apply" disabled={interactionLocked || submission.applying || !candidate.edits}><ConfirmIcon size={11} /> Apply</Button></footer>
       </>}
     </form>}

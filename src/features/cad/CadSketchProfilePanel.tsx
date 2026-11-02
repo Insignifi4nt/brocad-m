@@ -13,6 +13,8 @@ import { formatCadQuantity } from './cadDisplayQuantity';
 import { CadContextHelp } from './CadContextHelp';
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
 import { cadPreviewMarks, useCadPreparedPreview, type CadPrepareEdits } from './useCadPreparedPreview';
+import { cadGeneratorRemovals } from './cadGeneratorRemovals';
+import { useCadGeneratorRemovalConfirmation } from './useCadGeneratorRemovalConfirmation';
 import type { CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
 import './cad-sketch-profile.css';
 
@@ -61,8 +63,8 @@ export function CadSketchProfilePanel({ document: cadDocument, sketch, profile, 
   useLayoutEffect(() => () => pendingCallback.current(false), []);
   useEffect(() => { if (previousCancel.current !== cancelSignal) { previousCancel.current = cancelSignal; close(); } }, [cancelSignal]);
   useEffect(() => { if (command && command.documentId === cadDocument.id && command.profileId === profile.id && previousCommand.current !== command.token) { previousCommand.current = command.token; begin(command.kind); onCommandConsumed?.(command.token); } }, [command]);
-  const candidate = useMemo(() => {
-    if (!editor) return { edits: null, document: null, issue: null };
+  const built = useMemo(() => {
+    if (!editor) return { edits: null, issue: null };
     try {
       if (captured.current !== cadDocument) throw new Error('The part changed. Cancel and reopen this edit.');
       const edits: CadEdit[] = [];
@@ -86,7 +88,9 @@ export function CadSketchProfilePanel({ document: cadDocument, sketch, profile, 
             const nextProfile = setCadSketchDimensionValue({ profile: constrained, quantity: editor.quantity, value });
             edits.push({ kind: 'update-feature', feature: { ...sketch, profiles: sketch.profiles.map(entry => entry.id === profile.id ? nextProfile : entry) } });
           } else if (typeof value !== 'number' || value !== Number(editor.initial)) {
-            if (profile.constraints?.some(constraint => constraint.id === editor.id) || editor.isNew) edits.push({ kind: 'set-sketch-dimension', sketchId: sketch.id, profileId: profile.id, dimensionId: editor.id, value });
+            // A value read from a parameter sets the parameter, as the dimension would, with an edit that can confirm the relations it removes.
+            const parameterBound = typeof scalar === 'string' && Object.hasOwn(cadDocument.parameters, scalar.trim());
+            if (!parameterBound && (profile.constraints?.some(constraint => constraint.id === editor.id) || editor.isNew)) edits.push({ kind: 'set-sketch-dimension', sketchId: sketch.id, profileId: profile.id, dimensionId: editor.id, value });
             else changedScalar(scalar, editor.value, editor.quantity === 'diameter' ? 2 : 1, { kind: 'set-sketch-dimension', sketchId: sketch.id, profileId: profile.id, dimensionId: editor.id, value });
           }
         }
@@ -99,13 +103,27 @@ export function CadSketchProfilePanel({ document: cadDocument, sketch, profile, 
           else changedScalar(profile.geometry.cornerRadius, editor.value, 1, edit);
         }
       }
-      const requiresSolve = needsCadSketchPreparation(cadDocument, edits);
+      return { edits, issue: null };
+    } catch (cause) { return { edits: null, issue: userFacingMessage(cause, 'Invalid sketch edit.') }; }
+  }, [editor, cadDocument, sketch, profile]);
+  // A parameter change that removes relations as a generator regenerates asks first; the next Apply removes them in the same edit.
+  const confirmation = useCadGeneratorRemovalConfirmation(cadDocument, built.edits), { hold } = confirmation;
+  const candidate = useMemo(() => {
+    const edits = confirmation.edits;
+    if (!edits) return { ...built, requiresSolve: false };
+    const requiresSolve = needsCadSketchPreparation(cadDocument, edits);
+    try {
       if (edits.length) reduceCadEditIntents(cadDocument, edits);
       return { edits, issue: null, requiresSolve };
-    } catch (cause) { return { edits: null, document: null, issue: userFacingMessage(cause, 'Invalid sketch edit.') }; }
-  }, [editor, cadDocument, sketch, profile]);
+    } catch (cause) {
+      const removals = cadGeneratorRemovals(cause);
+      return removals ? { edits, issue: null, requiresSolve, removals } : { edits: null, issue: userFacingMessage(cause, 'Invalid sketch edit.'), requiresSolve: false };
+    }
+  }, [built, confirmation.edits, cadDocument]);
   const preparedPreview = useCadPreparedPreview(cadDocument, candidate.edits, onPrepareEdits, Boolean(editor && !submission.applying));
-  const candidateIssue = candidate.issue ?? (preparedPreview.kind === 'error' ? preparedPreview.message : null);
+  const found = 'removals' in candidate ? candidate.removals : preparedPreview.kind === 'error' ? preparedPreview.removals : undefined;
+  useEffect(() => { hold(found); }, [found, hold]);
+  const candidateIssue = candidate.issue ?? confirmation.issue ?? (preparedPreview.kind === 'error' && !preparedPreview.removals ? preparedPreview.message : null);
   useLayoutEffect(() => {
     const document = preparedPreview.kind === 'ready' ? preparedPreview.document : null;
     const nextSketch = document?.features.find(entry => entry.id === sketch.id), nextProfile = nextSketch?.kind === 'sketch' ? nextSketch.profiles.find(entry => entry.id === profile.id) : null;
@@ -115,8 +133,9 @@ export function CadSketchProfilePanel({ document: cadDocument, sketch, profile, 
     onPreviewProfile?.(legacy ? nextProfile ?? null : null); onPreviewParameters?.(legacy ? document?.parameters ?? null : null);
     return () => { onPreviewDocument?.(null); onPreviewProfile?.(null); onPreviewParameters?.(null); };
   }, [preparedPreview, candidate.edits, candidate.requiresSolve, editor !== null, profile.id, sketch.id, onPreviewDocument, onPreviewProfile, onPreviewParameters]);
-  const commit = (edits: readonly CadEdit[], accepted = close) => submission.submit(signal => edits.length ? onEditMany(edits, signal) : undefined, accepted,
-    cause => setError(userFacingMessage(cause, 'Unable to apply this sketch edit.')));
+  /** Applies `edits`; a refusal of the editor's edits `asked` for the relations they remove asks for them as the preview would. */
+  const commit = (edits: readonly CadEdit[], accepted = close, asked?: readonly CadEdit[] | null) => submission.submit(signal => edits.length ? onEditMany(edits, signal) : undefined, accepted,
+    cause => { if (!asked || !hold(cadGeneratorRemovals(cause), asked)) setError(userFacingMessage(cause, 'Unable to apply this sketch edit.')); });
   const activeExpression = editor?.kind === 'dimension' ? cadSketchDimensionScalar(profile, editor.quantity) : editor?.kind === 'fillet' && profile.geometry.kind === 'rectangle' ? profile.geometry.cornerRadius : null;
   const expressionDriven = typeof activeExpression === 'string' && !Number.isFinite(Number(activeExpression));
   const compoundDriven = expressionDriven && !Object.hasOwn(cadDocument.parameters, activeExpression.trim());
@@ -145,13 +164,14 @@ export function CadSketchProfilePanel({ document: cadDocument, sketch, profile, 
       <label className="cad-check"><Input type="checkbox" checked={profile.construction} disabled={blocked} onChange={event => commit([{ kind: 'update-feature', feature: { ...sketch, profiles: sketch.profiles.map(entry => entry.id === profile.id ? { ...entry, construction: event.target.checked } : entry) } }], () => setError(null))} /> Construction</label>
       {exactGeometryEditor && <details className="cad-plugin-disclosure"><summary>Exact geometry</summary>{exactGeometryEditor}</details>}
     </>}
-    {editor && <form className="cad-sketch-intent-editor" aria-busy={submission.applying || undefined} aria-label={editor.kind === 'dimension' ? 'Driving dimension' : editor.kind === 'move' ? 'Move contour' : 'Sketch fillet'} onSubmit={event => { event.preventDefault(); if (blocked || !candidate.edits) return; commit(candidate.edits); }}>
+    {editor && <form className="cad-sketch-intent-editor" aria-busy={submission.applying || undefined} aria-label={editor.kind === 'dimension' ? 'Driving dimension' : editor.kind === 'move' ? 'Move contour' : 'Sketch fillet'} onSubmit={event => { event.preventDefault(); if (blocked || !candidate.edits) return; commit(candidate.edits, close, built.edits); }}>
       <fieldset className="cad-feature-fields" disabled={submission.applying}>
       {editor.kind === 'dimension' ? <><label><span>Dimension</span>{editor.isNew ? <Select aria-label="Dimension quantity" value={editor.quantity} disabled={interactionLocked} onChange={event => { const quantity = available.find(entry => entry === event.target.value); if (quantity) setEditor({ ...dimensionEditor(quantity), id: editor.id }); }}>{available.map(quantity => <option key={quantity} value={quantity}>{title(quantity)}</option>)}</Select> : <strong>{title(editor.quantity)}</strong>}</label><label><span>{editor.mode === 'expression' ? 'Expression' : 'Value'}</span><Input ref={input} aria-label={editor.mode === 'expression' ? 'Dimension expression' : 'Dimension value'} disabled={interactionLocked || editor.mode === 'value' && compoundDriven} spellCheck={false} value={editor.value} onChange={event => { setError(null); setEditor({ ...editor, value: event.target.value }); }} /><small>{editor.quantity === 'angle' ? '°' : 'mm'}</small></label></>
         : editor.kind === 'move' ? <div className="cad-placement-row"><label><span>ΔX</span><Input ref={input} aria-label="Move X" value={editor.x} disabled={interactionLocked} onChange={event => setEditor({ ...editor, x: event.target.value })} /></label><label><span>ΔY</span><Input aria-label="Move Y" value={editor.y} disabled={interactionLocked} onChange={event => setEditor({ ...editor, y: event.target.value })} /></label><small>mm</small></div>
         : <label><span>Radius <CadContextHelp label="Sketch fillet radius">One tangent radius rounds all four corners of this rectangle. It cannot exceed half the smaller side. This contour operation is separate from the generating cutter radius of a gear.</CadContextHelp></span><Input ref={input} aria-label={editor.mode === 'expression' ? 'Fillet expression' : 'Fillet radius'} disabled={interactionLocked || editor.mode === 'value' && compoundDriven} value={editor.value} spellCheck={false} onChange={event => setEditor({ ...editor, value: event.target.value })} /><small>mm</small></label>}
       {editor.kind !== 'move' && (editor.kind === 'fillet' || !editor.isNew) && <div className="cad-sketch-relation"><Button type="button" disabled={interactionLocked} onClick={() => { if (activeExpression === null) return; const value = editor.kind === 'dimension' && editor.quantity === 'diameter' ? '(' + activeExpression + ') * 2' : String(activeExpression); setError(null); setEditor({ ...editor, mode: 'expression', value, initial: value }); }}>Edit expression</Button>{expressionDriven && <Button type="button" disabled={interactionLocked} onClick={unlink}>Unlink expression</Button>}<CadContextHelp label="Sketch relation">Value editing retains a shared parameter link. Edit expression explicitly changes this contour's relation. Unlink freezes its exact current value. Dimensions stay visible; the shared parameter and other contours remain unchanged.</CadContextHelp></div>}
       {(error || candidateIssue) && <p className="cad-error" role="alert">{error || candidateIssue}</p>}
+      {!error && !candidateIssue && confirmation.notice && <div className="cad-form-hint" role="status">{confirmation.notice}</div>}
       </fieldset>
       <div className="cad-form-actions"><Button type="button" onClick={close}>Cancel</Button><Button variant="primary" type="submit" className="cad-primary" disabled={blocked || !candidate.edits || Boolean(candidateIssue)}><ConfirmIcon size={13} /> Apply</Button></div>
     </form>}

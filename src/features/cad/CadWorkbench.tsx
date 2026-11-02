@@ -312,6 +312,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Selecting keeps a feature highlighted; only an explicit open shows its editor. */
   const [openFeatureId, setOpenFeatureId] = useState<string | null>(null);
+  /** The parameters a Length dragged to a value that removes relations hands to its Pad's editor, which asks before applying them. */
+  const [openingParameters, setOpeningParameters] = useState<{ readonly featureId: string; readonly parameters: Readonly<Record<string, number>> } | null>(null);
   /** A selected origin plane, origin axis or the origin point; a datum plane is selected as its feature. */
   const [planeSelection, setPlaneSelection] = useState<{ documentId: string; plane?: CadSketchPlane; origin?: CadOriginSelection } | null>(null);
   // Pointer hover over a plane in either the tree or the design area; both views show it.
@@ -725,12 +727,13 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     ? cadDirectDepthTarget(document, topologyReady ? build?.meshes ?? [] : [], topologySelection, selectedId) : null;
   const directDepthEnvironment = useRef<CadDirectDepthEnvironment>({ document, documentVersion: props.documentVersion, enabled: false });
   directDepthEnvironment.current = { document, documentVersion: props.documentVersion, enabled: !locked };
-  const directDepthCallbacks = useRef({ preview: props.onFeaturePreview, commit: (_edits: CadFeatureCandidateEdits) => undefined as void });
+  const directDepthCallbacks = useRef({ preview: props.onFeaturePreview, commit: (_edits: CadFeatureCandidateEdits) => undefined as void, ask: (_edits: CadFeatureCandidateEdits) => undefined as void });
   const directDepth = useMemo(() => directDepthFeatureId ? createCadDirectDepthControl({
     featureId: directDepthFeatureId, baseVersion: props.documentVersion, owner: `${directDepthOwner}:${directDepthFeatureId}`,
     read: () => directDepthEnvironment.current,
     preview: command => directDepthCallbacks.current.preview?.(command),
     commit: edits => directDepthCallbacks.current.commit(edits),
+    ask: edits => directDepthCallbacks.current.ask(edits),
     onGestureChange: setDirectDepthActive
   }) : null, [directDepthFeatureId, props.documentVersion, directDepthOwner]);
   useEffect(() => () => directDepth?.dispose(), [directDepth]);
@@ -978,7 +981,14 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       try { return Promise.resolve(props.onEditMany(edits, signal)).finally(clear); }
       catch (cause) { clear(); throw cause; }
     }, () => { setPickedTopology(null); setSelectedId(featureId); });
+  }, ask: edits => {
+    // The drag has no dialog to ask in, so the Pad's editor opens with the dragged parameter and asks before Apply removes anything.
+    const feature = document.features.find(entry => entry.id === edits[0].feature.id);
+    if (!feature) return;
+    setOpeningParameters({ featureId: feature.id, parameters: Object.fromEntries(edits.flatMap(edit => edit.kind === 'set-parameter' ? [[edit.name, edit.value]] : [])) });
+    openFeatureEditor(feature);
   } };
+  useEffect(() => { if (openingParameters && openFeatureId !== openingParameters.featureId) setOpeningParameters(null); }, [openFeatureId, openingParameters]);
   const deleteProfile = (source: CadSketchFeature, id: string) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: withoutCadSketchProfile(source, id) }, signal),
     () => setProfileId(current => current === id ? null : current));
   const applyCanvasEdits = (edits: readonly CadEdit[], signal?: AbortSignal) => {
@@ -1046,7 +1056,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     setSketchReferenceCommand(null); setSketchReferenceInteraction(null);
     topologyResolution.current?.controller.abort(); topologyResolution.current = null; setResolvingTopology(null);
     setPickedTopology(null);
-    setCancelSignal((value) => value + 1); setNewFeature(null); setDrawingPending(false); setEditorPending(false); setParameterPending(false); setDimensionPending(false); setTreeRenamePending(false); setDeleteFeature(null); setFileMenu(false); setTool('select'); setError(null);
+    setCancelSignal((value) => value + 1); setOpeningParameters(null); setNewFeature(null); setDrawingPending(false); setEditorPending(false); setParameterPending(false); setDimensionPending(false); setTreeRenamePending(false); setDeleteFeature(null); setFileMenu(false); setTool('select'); setError(null);
     setInspectedParameter(null); setInspectedInput(null); setProfilePreview(null); setPreviewParameters(null); setProfileCommand(null); setNameDraft(document.name); setNamePending(false);
   }, [document.name, commandSubmission.cancel, endDimensionTool]);
   /** Cancel and the close control leave an open feature editor; the selection stays. */
@@ -1416,10 +1426,10 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     selectTopology({ documentVersion: props.documentVersion, buildId: build?.buildId ?? '', bodyId: hit.bodyId, picks: [hit.pick] }, additive);
   });
   const selectProfile = (id: string | null) => { if (!editorPending && !treeRenamePending) { setGraphPick(null); setGraphRelationCommand(null); setProfileId(id); setProfileCommand(null); } };
-  const applyFeature = async (feature: CadFeature, parameters: Readonly<Record<string, number>>, signal?: AbortSignal) => {
-    await props.onEditMany(cadFeatureCandidateEdits({ feature, isNew: Boolean(newFeature), parameters }), signal);
+  const applyFeature = async (feature: CadFeature, parameters: Readonly<Record<string, number>>, signal?: AbortSignal, removedRelationIds?: readonly string[]) => {
+    await props.onEditMany(cadFeatureCandidateEdits({ feature, isNew: Boolean(newFeature), parameters, removedRelationIds }), signal);
     signal?.throwIfAborted();
-    setPickedTopology(null);
+    setPickedTopology(null); setOpeningParameters(null);
     setNewFeature(null); setEditorPending(false); setSelectedId(feature.id); setOpenFeatureId(null); setError(null);
     if (feature.kind === 'sketch' && newFeature && !sketch) { setSketchId(feature.id); setTool('rectangle'); }
   };
@@ -2215,7 +2225,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
             onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })}
             onEditGenerator={id => { selectGraph(null); selectProfile(id); setInspectorCollapsed(false); }} /> : profile && sketch ? selectedProfileEditor : shapeGenerator && sketch ? <CadSketchGeneratorInputsEditor key={`${shapeGenerator.id}-${cancelSignal}`} generator={shapeGenerator} sketch={sketch} document={document}
             onApply={async (edits, signal) => { await props.onEditMany(edits, signal); signal?.throwIfAborted(); setEditorPending(false); }} onCancel={cancel} onPendingChange={setEditorPending}
-            onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} /> : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
+            onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} /> : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature}
+            initialParameters={openingParameters?.featureId === selected.id ? openingParameters.parameters : undefined} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
         </div>
       </CadInspectorTitleContext.Provider></aside>}
     </div>

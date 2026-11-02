@@ -1,5 +1,6 @@
 import type { CadDocument } from '@/domain/cad/cadDocument';
 import { CadError } from '@/domain/cad/cadError';
+import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchGeneratorRemovedRelation } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { describeCadSketchConstraintSource } from './cadSketchConstraintFeedback';
 
@@ -45,4 +46,23 @@ export function cadGeneratorRemovalText(document: CadDocument, removals: CadGene
 export function cadGeneratorRemovalPrompt(document: CadDocument, removals: CadGeneratorRemovals): string {
   const them = removals.relations.length === 1 ? 'it' : 'them';
   return `${cadGeneratorRemovalText(document, removals)} Apply removes ${them}, or Cancel keeps ${them}.`;
+}
+
+/** Why edits that remove `removals` cannot apply when none of them is an edit that can confirm the removal. */
+export function cadGeneratorRemovalRefusal(document: CadDocument, removals: CadGeneratorRemovals): string {
+  return `${cadGeneratorRemovalText(document, removals)} Remove ${removals.relations.length === 1 ? 'it' : 'them'} first, or keep the shape's inputs.`;
+}
+
+/**
+ * `edits` confirming they remove `relationIds` as generators regenerate: the first edit that sets a parameter or a generator carries all
+ * of them, as a batch removes what its edits confirm together, and no other edit carries any. Undefined when no edit can carry them.
+ */
+export function confirmCadGeneratorRemovals(edits: readonly CadEdit[], relationIds: readonly string[]): CadEdit[] | undefined {
+  const carrier = edits.findIndex(edit => edit.kind === 'set-parameter' || edit.kind === 'set-sketch-generator');
+  if (carrier < 0) return undefined;
+  return edits.map((edit, index) => {
+    if (edit.kind !== 'set-parameter' && edit.kind !== 'set-sketch-generator') return edit;
+    const { removedRelationIds: _removed, ...rest } = edit;
+    return index === carrier ? { ...rest, removedRelationIds: [...relationIds] } : rest;
+  });
 }

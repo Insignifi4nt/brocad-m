@@ -134,6 +134,7 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
       </CadScalarEditContext.Provider>
     </fieldset>
     {draft.issue && <p className="cad-error" role="alert">{draft.issue}</p>}
+    {draft.notice && <div className="cad-form-hint" role="status">{draft.notice}</div>}
     {draft.pending && <div className="cad-form-actions"><Button type="button" disabled={draft.applying} onClick={draft.reset}><CloseIcon size={13} /> Cancel</Button>
       <Button variant="primary" type="submit" disabled={!draft.canApply}><ConfirmIcon size={13} /> Apply</Button></div>}
   </form>;
