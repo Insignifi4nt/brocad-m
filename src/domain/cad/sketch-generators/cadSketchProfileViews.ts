@@ -72,9 +72,10 @@ export function cadSketchProfileEdits(sketch: CadSketchFeature, next: CadSketchP
   removedRelationIds: readonly string[] = []): CadEdit[] {
   const set: CadEdit[] = Object.entries(parameters).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([name, value]) => ({ kind: 'set-parameter', name, value }));
   const generator = cadSketchProfileGenerator(sketch, next.id), confirmed = removedRelationIds.length ? { removedRelationIds: [...removedRelationIds] } : {};
-  if (!generator) return [...set, { kind: 'update-feature', feature: withCadSketchProfile(sketch, next) }];
+  const confirming = () => [...set.slice(0, -1), { ...set[set.length - 1], ...confirmed }];
+  if (!generator) return [...set.length ? confirming() : [], { kind: 'update-feature', feature: withCadSketchProfile(sketch, next) }];
   const replaced = withCadSketchProfile(sketch, next).graph!.relations.find(relation => relation.id === next.id) as CadSketchGenerator;
-  if (Value.Equal(replaced, generator) && set.length) return [...set.slice(0, -1), { ...set[set.length - 1], ...confirmed }];
+  if (Value.Equal(replaced, generator) && set.length) return confirming();
   return [...set, { kind: 'set-sketch-generator', sketchId: sketch.id, generator: replaced, ...confirmed }];
 }
 

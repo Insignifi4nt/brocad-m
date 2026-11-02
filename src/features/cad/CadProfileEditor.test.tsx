@@ -9,6 +9,8 @@ import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { CadSession } from './cadSession';
 import { CadProfileEditor } from './CadFeatureEditor';
 import { cadSketchProfileEdits, cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { CAD_STAR_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
 
 const dxf = ['0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '4', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES',
   '0', 'LINE', '8', 'PROFILE', '10', '0', '20', '0', '11', '20', '21', '0',
@@ -201,5 +203,37 @@ describe('generator profile editing', () => {
     await click('Apply');
     expect(applied).toHaveBeenCalledExactlyOnceWith(['tie']);
     expect(session.getSnapshot().document).toEqual(shown);
+  });
+
+  it('confirms in a saved plugin profile\'s form the relations its shared parameter removes from a generator beside it', async () => {
+    const plugin = createCadPluginProfile(CAD_STAR_PLUGIN);
+    const hexagon = { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: 100, y: 0, radius: 10, sides: 'n', directionId: '@h' } } as const;
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [hexagon] }, { n: 6 }).points.find(point => point.id === 'hex_v5')!.position;
+    session = new CadSession(parseCadDocument({ ...createCadDocument('Star and hexagon', 'cad_star_hexagon'), schemaVersion: 2, parameters: { n: 6 }, features: [{ id: 'sketch',
+      name: 'Sketch', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'star', name: 'Star', construction: false, geometry: { ...plugin, inputs: { ...plugin.inputs, lobes: 'n' } } }],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [hexagon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'hex_v5'] }] } }] }));
+    const before = session.getSnapshot(), previews: (CadDocument | null)[] = [];
+    function Harness() {
+      const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
+      const sketch = snapshot.document.features[0] as CadSketchFeature;
+      return <CadProfileEditor profile={cadSketchProfileViews(sketch)[0]} document={snapshot.document} onPreviewDocument={candidate => { previews.push(candidate); }}
+        onApply={(next, parameters, _signal, removed) => { session.edit(cadSketchProfileEdits(sketch, next, parameters, removed), snapshot.version); }}
+        onCancel={() => undefined} onPendingChange={() => undefined} />;
+    }
+    await act(async () => root.render(<Harness />));
+    // The star's lobe count is the shared n: five lobes leave the hexagon five corners, and its sixth takes the tie with it.
+    const lobes = container.querySelector<HTMLInputElement>('input[aria-label="Lobes"]');
+    if (!lobes) throw new Error('Lobes field missing');
+    await input(lobes, '5');
+    const notice = [...container.querySelectorAll('[role="status"]')].find(element => element.textContent?.startsWith('This removes one relation'));
+    expect(notice?.textContent).toMatch(/^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/);
+    const shown = previews.filter(Boolean).at(-1)!;
+    expect(shown.parameters.n).toBe(5);
+    expect(session.getSnapshot()).toBe(before);
+    await click('Apply');
+    const applied = session.getSnapshot().document;
+    expect(applied).toEqual(shown);
+    expect((applied.features[0] as CadSketchFeature).graph!.relations.filter(relation => !relation.id.startsWith('hex_')).map(relation => relation.id)).toEqual(['hex']);
   });
 });

@@ -6,7 +6,9 @@ import { createCadDocument, parseCadDocument } from '../cadSchema';
 import type { CadSketchGenerator } from '../cadSketchGraph';
 import { storedCadDocument } from '../cadStoredDocument';
 import { cadSketchGeneratorPrefixFor } from '../sketch-generators/cadSketchGeneratorEdits';
-import { cadSketchProfileViews, cadSketchShapeEdits, refuseNewCadSketchProfiles, withCadSketchProfile, withoutCadSketchProfile } from '../sketch-generators/cadSketchProfileViews';
+import { cadSketchProfileEdits, cadSketchProfileViews, cadSketchShapeEdits, refuseNewCadSketchProfiles, withCadSketchProfile, withoutCadSketchProfile } from '../sketch-generators/cadSketchProfileViews';
+import { expandCadSketchGenerators } from '../sketch-generators/cadSketchGenerators';
+import { CAD_STAR_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugins';
 
 const plate: CadSketchGenerator = { id: 'plate', kind: 'generator', idPrefix: 'plate', construction: false,
   geometry: { kind: 'polygon', points: [[0, 0], [20, 0], [20, 10], [0, 10]] } };
@@ -57,6 +59,19 @@ describe('generators seen as the profiles they replace', () => {
       .toMatchObject({ code: 'driven-sketch-position' });
   });
 
+  it('confirm with the last parameter the relations a view that only reads changed parameters removes', () => {
+    const rounded: CadSketchGenerator = { id: 'rect', kind: 'generator', idPrefix: 'rect', construction: false,
+      geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 'r' } };
+    const document = parseCadDocument({ ...createCadDocument('Part', 'part'), schemaVersion: 2, parameters: { r: 0 }, features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch',
+      suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [0, 0] }], entities: [],
+        relations: [rounded, { id: 'tie', kind: 'coincident', pointIds: ['u', 'rect_p0'] }] } }] });
+    const sketch = sketchOf(document), [view] = cadSketchProfileViews(sketch);
+    // Rounding the corners takes the sharp corner the tie is on; the view itself is unchanged, so the parameter carries the confirmation.
+    const edits = cadSketchProfileEdits(sketch, view, { r: 2 }, ['tie']);
+    expect(edits).toEqual([{ kind: 'set-parameter', name: 'r', value: 2, removedRelationIds: ['tie'] }]);
+    expect(sketchOf(applyCadEdits(document, edits)).graph?.relations.filter(relation => !relation.id.startsWith('rect_')).map(relation => relation.id)).toEqual(['rect']);
+  });
+
   it('refuse profile dimensions on a generator, naming it', () => {
     expect(refusal(() => applyCadEdits(generated(), [{ kind: 'add-sketch-dimension', sketchId: 'sketch', profileId: 'bore', constraint: { id: 'd', kind: 'dimension', quantity: 'diameter' } }])))
       .toMatchObject({ code: 'generator-sketch-dimension', message: expect.stringContaining('Circle "bore"') });
@@ -76,6 +91,25 @@ describe('legacy profiles', () => {
     expect(refusal(() => refuseNewCadSketchProfiles(document, [fresh]))).toMatchObject({ code: 'legacy-sketch-profile' });
     // Removed and put back in one batch is still new.
     expect(refusal(() => refuseNewCadSketchProfiles(document, [{ kind: 'update-feature', feature: { ...sketch, profiles: [] } }, resized]))).toMatchObject({ code: 'legacy-sketch-profile' });
+  });
+
+  it('confirm with their parameter the relations it removes from a generator beside them, and apply the form in the same batch', () => {
+    const plugin = createCadPluginProfile(CAD_STAR_PLUGIN);
+    const hexagon: CadSketchGenerator = { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false,
+      geometry: { kind: 'regular-polygon', x: 100, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [hexagon] }, { n: 6 }).points.find(point => point.id === 'hex_v5')!.position;
+    const document = parseCadDocument({ ...createCadDocument('Part', 'part'), schemaVersion: 2, parameters: { n: 6 }, features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch',
+      suppressed: false, plane: 'XY', offset: 0, profiles: [{ id: 'star', name: 'Star', construction: false, geometry: { ...plugin, inputs: { ...plugin.inputs, lobes: 'n' } } }],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [hexagon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'hex_v5'] }] } }] });
+    const sketch = sketchOf(document), [star] = cadSketchProfileViews(sketch);
+    // The star's form changes the shared count to 5 and renames the star, which takes the hexagon's sixth corner, and the tie on it.
+    const edits = (removed?: readonly string[]) => cadSketchProfileEdits(sketch, { ...star, name: 'Five' }, { n: 5 }, removed);
+    expect(refusal(() => applyCadEdits(document, edits()))).toMatchObject({ code: 'unconfirmed-sketch-generator-removals', relationIds: ['tie'] });
+    const applied = applyCadEdits(document, edits(['tie']));
+    expect(applied.parameters.n).toBe(5);
+    expect(sketchOf(applied).profiles.map(profile => profile.name)).toEqual(['Five']);
+    expect(sketchOf(applied).graph?.relations.filter(relation => !relation.id.startsWith('hex_')).map(relation => relation.id)).toEqual(['hex']);
+    expect(sketchOf(applied).graph?.entities).toHaveLength(5);
   });
 });
 
