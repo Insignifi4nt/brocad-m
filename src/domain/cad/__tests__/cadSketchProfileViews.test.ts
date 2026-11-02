@@ -4,6 +4,7 @@ import { applyCadEdits, type CadEdit } from '../cadOperations';
 import { createCadPathProfile } from '../cadPathConstruction';
 import { createCadDocument, parseCadDocument } from '../cadSchema';
 import type { CadSketchGenerator } from '../cadSketchGraph';
+import { prepareCadSketchDeletion } from '../cadSketchGraphEdits';
 import { storedCadDocument } from '../cadStoredDocument';
 import { cadSketchGeneratorPrefixFor } from '../sketch-generators/cadSketchGeneratorEdits';
 import { cadSketchProfileEdits, cadSketchProfileViews, cadSketchShapeEdits, prepareCadSketchShapeDeletion, refuseNewCadSketchProfiles, withCadSketchProfile } from '../sketch-generators/cadSketchProfileViews';
@@ -117,6 +118,12 @@ describe('deleting a shape', () => {
     expect(deleted.graph).toEqual({ points: [{ id: 'free', position: [10, 0] }], entities: [], relations: [] });
     // The offset alone has nothing on it, so it names nothing.
     expect(prepareCadSketchShapeDeletion(sketchOf(document), 'off').removed).toEqual([]);
+    // The shape with the relation on it, listed in either order, is the same exact set, naming only the offset.
+    for (const relationIds of [['hex', 'tie'], ['tie', 'hex']]) {
+      const both = prepareCadSketchDeletion({ sketch: sketchOf(document), pointIds: [], entityIds: [], relationIds, name: '1 shape and 1 relation' });
+      expect(both.edit).toEqual({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: [], entityIds: [], relationIds, cascade: false });
+      expect(both.removed.map(relation => relation.relationId)).toEqual(['off']);
+    }
   });
 });
 

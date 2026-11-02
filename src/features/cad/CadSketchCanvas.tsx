@@ -730,7 +730,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
     onCancel: () => { suppressProfileClick.current = true; },
     project: projectSelection });
   const boxSelections = boxSelection.box?.selections;
-  const dimensionStatus = tool === 'select' && sourceSketch.kind === 'sketch' ? cadSketchDimensionSelectionStatus(sourceSketch.graph, graphControls?.dimensionSelection ?? []) : null;
+  const dimensionStatus = tool === 'select' && sourceSketch.kind === 'sketch' ? cadSketchDimensionSelectionStatus(sourceSketch.graph, graphControls?.relationSelection ?? graphControls?.dimensionSelection ?? []) : null;
   // Moving a dimension leaves the relation marks as they are.
   const relationsShown = Boolean(graphControls) && graphControls?.showRelations !== false, sourceGraphValue = sourceSketch.kind === 'sketch' && sourceSketch.graph ? cadSketchGraphPlacedFrom(sourceSketch.graph) : undefined;
   const glyphCount = useMemo(() => relationsShown && sourceGraphValue ? countCadSketchRelationGlyphs(sourceGraphValue) : 0, [relationsShown, sourceGraphValue]);

@@ -56,6 +56,11 @@ export interface CadSketchGraphControls {
   /** Relation IDs of the dimensions selected on the canvas; a geometry selection replaces them. */
   readonly dimensionSelection?: readonly string[];
   /**
+   * Relation IDs the status line counts: every selected relation Delete removes, rows of the relations list the canvas draws no mark for
+   * among them. Without it the status line counts the dimension selection.
+   */
+  readonly relationSelection?: readonly string[];
+  /**
    * Label commands name the dimension the label was drawn for. Delete without one removes the dimension selection; a focused label's
    * Delete or Backspace passes its dimension and key, and the owner removes the selection and that dimension only while nothing is selected.
    */

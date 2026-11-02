@@ -241,25 +241,31 @@ export function isCadSketchOriginPair(graph: CadSketchGraph, relations: readonly
   return identity(first.pointId) === identity(second.pointId);
 }
 /**
- * What the canvas status line says about the selected dimensions and relations; selection never opens the editor. X and Y held at 0 on
- * one point, drawn as one Coincident glyph with the origin, read as that glyph.
+ * What the canvas status line says about the selected dimensions and relations, rows of the relations list without a mark among them;
+ * selection never opens the editor. X and Y held at 0 on one point, drawn as one Coincident glyph with the origin, read as that glyph. A
+ * linear pattern detaches through its editor, so it is never counted.
  */
 export function cadSketchDimensionSelectionStatus(graph: CadSketchGraph | undefined, ids: readonly string[]): string | null {
   if (!graph || !ids.length) return null;
-  const relations = ids.flatMap(id => graph.relations.filter(item => item.id === id && isCadSketchAnnotationRelation(item)));
+  // Each relation once, though a row and its mark may both name it.
+  const named = new Set(ids), relations = graph.relations.filter(item => named.has(item.id) && item.kind !== 'linear-pattern');
   if (!relations.length) return null;
   const dimensions = relations.filter(isCadSketchDimensionRelation);
   if (isCadSketchOriginPair(graph, relations)) return `${CAD_SKETCH_ORIGIN_PAIR_NAME} selected · Delete removes`;
   if (relations.length === 1) return dimensions.length ? `${cadSketchDimensionName(graph, dimensions[0])} selected · Double-click or Enter edits · Delete removes`
-    : `${cadSketchRelationName(graph, relations[0])} selected · Delete removes`;
-  return `${cadSketchAnnotationCount(graph, ids)} selected · Delete removes them`;
+    : `${cadSketchRelationName(graph, relations[0])} selected · Delete ${relations[0].kind === 'external-reference' ? 'detaches' : 'removes'}`;
+  return `${cadSketchAnnotationCount(graph, relations.map(relation => relation.id))} selected · Delete removes them`;
 }
-/** "2 dimensions and 1 relation": the annotations the IDs name, as the status line and a Delete command count them. */
+/**
+ * "1 shape, 2 dimensions and 1 relation": the relations the IDs name, as the status line, a Delete command and its dialog count them. A
+ * generator counts as the shape it deletes, and a source reference as the relation it is.
+ */
 export function cadSketchAnnotationCount(graph: CadSketchGraph, ids: readonly string[]): string {
-  const relations = graph.relations.filter(relation => ids.includes(relation.id) && isCadSketchAnnotationRelation(relation));
-  const dimensions = relations.filter(isCadSketchDimensionRelation).length, others = relations.length - dimensions;
-  const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
-  return !others ? count(dimensions, 'dimension') : !dimensions ? count(others, 'relation') : `${count(dimensions, 'dimension')} and ${count(others, 'relation')}`;
+  const relations = graph.relations.filter(relation => ids.includes(relation.id));
+  const shapes = relations.filter(relation => relation.kind === 'generator').length, dimensions = relations.filter(isCadSketchDimensionRelation).length;
+  const parts = ([[shapes, 'shape'], [dimensions, 'dimension'], [relations.length - shapes - dimensions, 'relation']] as const)
+    .flatMap(([n, noun]) => n ? [`${n} ${noun}${n === 1 ? '' : 's'}`] : []);
+  return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : parts[0] ?? '0 relations';
 }
 
 /** Geometry a relation names directly, the origin and the axes among it, plus the origin or the axis a coordinate is measured from. */
