@@ -56,6 +56,8 @@ function matchingSectionResult(value: unknown, request: CadSectionRequest, param
   }
   return value;
 }
+/** What a section is cut for: a Section for CAM step, or a DXF export, which is no CAM step. */
+export type CadSectionIntent = 'section' | 'dxf-export';
 type CadPreviewArtifact = PreviewCaptureArtifact & { documentId: string; viewState: CadViewportState; sketchId: string | null; curveId: string | null };
 
 export function useCadController(app: App, session: CadSession, open: boolean, setOpen: (open: boolean) => void,
@@ -729,14 +731,18 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     return inputToken === undefined ? topology.tangentChain(request, expectedVersion, signal, scope)
       : featureInputCoordinator.tangentChain(request, expectedVersion, signal, scope, inputToken);
   }
-  async function inspectSection(request: CadSectionRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
+  /**
+   * The section `request` cuts, for `intent`, which every caller states: a Section for CAM step names its body as the source of a refusal,
+   * the visible dialog's preview and the agent's alike, and a DXF export's section is no CAM step. `scope` is only the workflow the caller
+   * may run inside, so an agent, which owns none, still names its intent.
+   */
+  async function inspectSection(request: CadSectionRequest, expectedVersion: string, intent: CadSectionIntent, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     signal?.throwIfAborted();
     const section = { ...parseCadSectionRequest(request) };
     const document = session.getSnapshot().document;
-    // A Section for CAM names its body as the source of a refusal; a DXF export's section is no CAM step.
     const result = await (await getKernel()).section(document, section, signal)
-      .catch((error: unknown) => { throw scope === 'section' ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }) : error; });
+      .catch((error: unknown) => { throw intent === 'section' ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }) : error; });
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     return matchingSectionResult(result, section, document.parameters);
   }
@@ -824,7 +830,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   async function exportSectionDxf(request: CadSectionRequest, expectedVersion: string, signal?: AbortSignal, scope?: 'dxf-export') {
     editable(expectedVersion); session.assertWorkflowClosed(scope); signal?.throwIfAborted();
     const document = session.getSnapshot().document;
-    const section = await inspectSection(request, expectedVersion, signal, scope);
+    const section = await inspectSection(request, expectedVersion, 'dxf-export', signal, scope);
     const { cadEntitiesToDxf } = await import('@/domain/cad/cadDxfExport');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const notes = document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document)

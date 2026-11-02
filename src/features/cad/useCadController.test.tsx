@@ -1878,11 +1878,11 @@ describe('CAD controller asynchronous guards', () => {
     const h = await harness(true, true), version = h.session.getSnapshot().version;
     const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
     kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
-    const exported = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, undefined, 'dxf-export'));
+    const exported = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, 'dxf-export', undefined, 'dxf-export'));
     expect([(exported as CadError).code, cadRefusalIssue(exported)]).toEqual(['empty-section', null]);
     await act(async () => h.session.setWorkflowOpen(true, 'section'));
     kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
-    const inspected = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, undefined, 'section'));
+    const inspected = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, 'section', undefined, 'section'));
     expect(cadRefusalIssue(inspected)).toMatchObject({ namespace: 'cam', code: 'empty-section', message: 'The section plane misses the body.',
       subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
     kernel.section.mockRejectedValueOnce(new CadError('tangent-section', 'The plane only touches the body.'));
@@ -1893,6 +1893,36 @@ describe('CAD controller asynchronous guards', () => {
     expect(cadRefusalIssue(sketch)).toMatchObject({ namespace: 'cam', code: 'missing-sketch', message: (sketch as CadError).message,
       subject: { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'missing' } });
     expect(h.workbench().manifest.projects).toHaveLength(0);
+  });
+  it.each([
+    // A DXF export's refusal is the document check's when its code is one a feature can be refused with, and none otherwise.
+    { code: 'empty-section', exported: null, refuse: () => new CadError('empty-section', 'The section plane misses the body.') },
+    { code: 'kernel-operation-failed', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.',
+      { kernelMessage: 'BRepAlgoAPI_Section failed' }) },
+  ])('gives the Section for CAM dialog and the agent the same $code issue, and a DXF export the same refusal through either', async ({ code, exported: exportedIssue, refuse }) => {
+    const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
+    const tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
+    const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
+    kernel.section.mockImplementation(async () => { throw refuse(); });
+    // The dialog previews inside its own workflow, as App wires it; the agent owns no workflow and states the same intent.
+    await act(async () => h.session.setWorkflowOpen(true, 'section'));
+    const shown = await refusal(() => h.cad().inspectSection(request, version, 'section', undefined, 'section'));
+    await act(async () => h.session.setWorkflowOpen(false, 'section'));
+    const issue = cadRefusalIssue(shown);
+    expect(issue).toMatchObject({ namespace: 'cam', code, subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
+    const reply = await tool('cad_inspect_section').execute({ expectedVersion: version, section: request });
+    expect(reply).toEqual({ ok: false, error: { code, message: (shown as CadError).message, details: { issue: cadAgentIssue(issue!, (shown as CadError).kernelMessage) } } });
+    // A DXF export's section is no CAM step, through the export dialog or the agent.
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    const exported = await refusal(() => h.cad().exportSectionDxf(request, version, undefined, 'dxf-export'));
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    const exportIssue = cadRefusalIssue(exported);
+    expect(exportIssue === null ? null : { namespace: exportIssue.namespace, subject: exportIssue.subject }).toEqual(exportedIssue);
+    const exportReply = await tool('cad_export_section_dxf').execute({ expectedVersion: version, section: request });
+    expect(exportReply).toMatchObject({ ok: false, error: { code, ...exportIssue ? { details: { issue: cadAgentIssue(exportIssue, (exported as CadError).kernelMessage) } } : {} } });
+    if (!exportIssue) expect(exportReply).not.toHaveProperty('error.details.issue');
+    expect(kernel.section).toHaveBeenCalledTimes(4);
+    expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
   });
   it('hands a reviewed final-solid section through the ordinary saved CAD and portable CAM operations', async () => {
     const h = await harness(true, true); kernel.section.mockResolvedValue(section);
@@ -1948,7 +1978,7 @@ describe('CAD controller asynchronous guards', () => {
   it('rejects a section result after a draft edit while the kernel was running', async () => {
     const h = await harness(true); const result = deferred<CadSectionResult>(); kernel.section.mockReturnValue(result.promise);
     const before = h.session.getSnapshot(); let operation: Promise<unknown> | undefined;
-    await act(async () => { operation = h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, before.version); });
+    await act(async () => { operation = h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, before.version, 'section'); });
     await act(async () => h.session.edit([{ kind: 'rename-document', name: 'Changed' }]));
     await act(async () => { result.resolve(section); await expect(operation).rejects.toMatchObject({ code: 'STALE_STATE' }); });
   });

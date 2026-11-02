@@ -180,11 +180,11 @@ function WorkbenchApp({ services }: AppProps) {
             onClose={closeCadDxfExport}
             onExportSketch={(id, version, signal) => cad.exportDxf(id, version, signal, 'dxf-export')}
             onExportCurve={(id, version, signal) => cad.exportCurveDxf(id, version, signal, 'dxf-export')}
-            onInspectSection={(request, version, signal) => cad.inspectSection(request, version, signal, 'dxf-export')}
+            onInspectSection={(request, version, signal) => cad.inspectSection(request, version, 'dxf-export', signal, 'dxf-export')}
             onExportSection={(request, version, signal) => cad.exportSectionDxf(request, version, signal, 'dxf-export')} /></Suspense>}
           {cadSection && <CadSectionDialog bodies={cad.build?.meshes ?? []} initialBodyId={cadSection.bodyId} version={cadSection.version}
             onClose={closeCadSection}
-            onInspect={(request, version, signal) => cad.inspectSection(request, version, signal, 'section')}
+            onInspect={(request, version, signal) => cad.inspectSection(request, version, 'section', signal, 'section')}
             onSend={(request, version, signal) => cad.sendSectionToCam(request, version, signal, 'section')} />}
           {cad.importFile && <CadImportDialog file={cad.importFile.file} onImport={cad.confirmImport} onCancel={cad.cancelImport} />}
         </Suspense>

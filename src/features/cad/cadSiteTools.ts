@@ -449,7 +449,7 @@ export function cadSiteTools(getController: () => CadController) {
     }),
     tool('cad_save_document', 'Save the exact shared CAD draft through the active workbench adapter with cross-tab conflict detection and journal recovery. Returns a durable save receipt. Does not generate controller output.', object(version), (cad, input, signal) => cad.save(input.expectedVersion, signal), false),
     tool('cad_inspect_section', 'Compute a final solid section on XY, XZ or YZ with a parameterized offset along the plane normal (+Z, -Y or +X respectively). Returns paginated exact local 2D lines/arcs/circles and closed-contour count. Choose a plane inside the material. Tangent, open, branching, ellipse and spline sections are rejected; no approximation. Does not save.', object({ ...version, section: CadSectionRequestSchema, ...pageFields }), async (cad, input, signal) => {
-      const result = await cad.inspectSection(input.section, input.expectedVersion, signal);
+      const result = await cad.inspectSection(input.section, input.expectedVersion, 'section', signal);
       const { entities, ...summary } = result;
       return { version: input.expectedVersion, ...summary, entities: page(entities, input) };
     }),
