@@ -351,9 +351,9 @@ describe('unified feature history and dependency tree', () => {
     expect(onCopyProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'sketch' }), 'wall');
     await menu('hex'); await menuAction('Delete shape');
     expect(onDeleteProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'sketch' }), 'hex');
-    // A shape has no profile to rename.
+    // A shape has no profile to rename, so F2 starts no rename that would hold the tree's rows disabled.
     await act(async () => row('wall').dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true })));
-    expect(container.querySelector('input[aria-label="Profile name"]')).toBeNull();
+    expect(container.querySelector('input[aria-label="Profile name"]')).toBeNull(); expect(row('wall').disabled).toBe(false);
   });
   it('presents real diagnostics, suppression and parameter highlights without changing model data', async () => {
     const document = sample(), source = JSON.stringify(document);

@@ -493,7 +493,8 @@ describe('CAD sketch interaction', () => {
       await act(async () => row().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })));
       const edit = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent?.trim() === 'Edit shape'); if (!edit) throw new Error('Edit shape missing.');
       await act(async () => edit.click());
-      expect(viewport().getState().selectedProfileId).toBe('pat');
+      // The shape replaces the row's selection, so Delete or a field acts on the shape alone.
+      expect(viewport().getState().selectedProfileId).toBe('pat'); expect(row().classList.contains('is-selected')).toBe(false);
     };
     await editFromMenu();
     // With relation marks hidden the row has its own menu, which has Edit shape too.
