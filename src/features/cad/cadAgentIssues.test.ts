@@ -127,19 +127,19 @@ describe('CAD issues in agent replies', () => {
   it('gives the kernel\'s own words with a refusal that came back from it, in its issue, or in the details when no issue covers it', async () => {
     const session = new CadSession(parseCadDocument({ ...createCadDocument('Part', 'cad_agent'), features: [sketch, pad] }));
     const version = session.getSnapshot().version;
-    let refusal = CadError.received('kernel-operation-failed', 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.', { kernelMessage: 'Standard_ConstructionError: gp_Dir() - input vector has zero norm' });
+    let refusal = CadError.received('kernel-operation-failed', 'The part could not be rebuilt, for a reason the kernel did not name. Rebuild again; if this repeats, undo the last change.', { kernelMessage: 'Standard_ConstructionError: gp_Dir() - input vector has zero norm' });
     const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build: null, buildIssues: NO_CAD_BUILD_ISSUES,
       buildIssuesOf: () => NO_CAD_BUILD_ISSUES, inspectBuild: vi.fn(async () => { throw refusal; }) } as unknown as CadController;
     const tools = cadSiteTools(() => controller), build = () => tools.find(tool => tool.name === 'cad_build')!.execute({ expectedVersion: version });
     const failed = await build();
-    expect(failed).toMatchObject({ ok: false, error: { code: 'kernel-operation-failed', message: 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.',
+    expect(failed).toMatchObject({ ok: false, error: { code: 'kernel-operation-failed', message: 'The part could not be rebuilt, for a reason the kernel did not name. Rebuild again; if this repeats, undo the last change.',
       details: { issue: { code: 'kernel-operation-failed', subject: { kind: 'document' }, details: { kernelMessage: 'Standard_ConstructionError: gp_Dir() - input vector has zero norm' } } } } });
     // The message never repeats the kernel's words.
     expect((failed as { error: { message: string } }).error.message).not.toContain('Standard_ConstructionError');
     refusal = CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', { kernelMessage: 'WebAssembly.instantiate(): Out of memory' });
     expect(await build()).toMatchObject({ ok: false, error: { code: 'kernel-unavailable', details: { kernelMessage: 'WebAssembly.instantiate(): Out of memory' } } });
     // However long the kernel's words, a refusal gives them within their byte budget, with an ellipsis where they were cut.
-    refusal = CadError.received('kernel-operation-failed', 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.', { kernelMessage: '孔'.repeat(2048) });
+    refusal = CadError.received('kernel-operation-failed', 'The part could not be rebuilt, for a reason the kernel did not name. Rebuild again; if this repeats, undo the last change.', { kernelMessage: '孔'.repeat(2048) });
     const long = await build() as { error: { details: { issue: { details: { kernelMessage: string } } } } };
     expect(long.error.details.issue.details.kernelMessage).toMatch(/^孔+…$/); expect(jsonByteLength(long.error.details.issue.details.kernelMessage)).toBeLessThanOrEqual(CAD_AGENT_KERNEL_BYTES);
     refusal = CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', { kernelMessage: '\u0001'.repeat(2048) });

@@ -75,7 +75,7 @@ it('shows a refused Section with its own message and the code of its CAM issue',
   expect(host.querySelector('details')).toBeNull();
 });
 it('keeps the kernel\'s own words for a failed Section under a closed disclosure, out of the alert', async () => {
-  const message = 'The section could not be cut through this body. Move the section plane slightly or choose another body.';
+  const message = 'The section could not be cut through this body, for a reason the kernel did not name. Move the section plane slightly or choose another body.';
   const inspect = vi.fn(async () => { throw cadRefusalAt(CadError.received('kernel-operation-failed', message, { kernelMessage: 'BRepAlgoAPI_Section: not done' }),
     { kind: 'cam-operation', operation: 'section', sourceId: 'pad' }); });
   await act(async () => root.render(<CadSectionDialog bodies={[body]} initialBodyId="pad" version="v1" onInspect={inspect} onSend={async () => undefined} onClose={vi.fn()} />));

@@ -142,7 +142,7 @@ describe('canonical datum loft construction', () => {
     const done = vi.spyOn(getOC().BRepBuilderAPI_Transform.prototype, 'IsDone').mockReturnValue(false);
     try {
       expect(() => buildCadLoftSolid(resolved, false)).toThrow(expect.objectContaining({ code: 'loft-placement',
-        message: 'The loft could not be moved onto its datum plane. Rebuild the part; if this repeats, recreate the datum plane.',
+        message: 'The loft could not be moved onto its datum plane. The move copies the loft exactly, so the loft built before it is likely damaged; rebuild the part, and if this repeats, revise its sections or recreate the datum plane.',
         kernelMessage: 'OpenCascade could not place the fitted loft in its datum frame.' }));
     } finally { done.mockRestore(); }
   });

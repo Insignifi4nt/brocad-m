@@ -23,8 +23,8 @@ const STEP_FAILURES: Readonly<Record<CadKernelOperation, string>> = {
   fillet: 'The fillet could not be applied. The radius may be too large for an edge or a face next to it; reduce the radius or choose other edges.',
   chamfer: 'The chamfer could not be applied. The distance may be too large for an edge or a face next to it; reduce the distance or choose other edges.',
   shell: 'The shell could not be made. The thickness may be too large for a thin or curved region; reduce the thickness or choose another opening.',
-  transform: 'The body could not be moved. A translation or rotation value may be out of range; revise the values.',
-  mirror: 'The body could not be mirrored. Choose another mirror plane.',
+  transform: 'The body could not be moved. A move copies its source body exactly, so the source body is likely damaged; rebuild the part, and if this repeats, revise the feature that made the source body.',
+  mirror: 'The body could not be mirrored. A mirror copies its source body exactly, so the source body is likely damaged; rebuild the part, and if this repeats, revise the feature that made the source body.',
   pattern: 'The pattern could not be built. Copies may touch each other only along a face or an edge; change the spacing or the count.',
   check: 'The result is not a valid closed solid. A dimension may make faces meet or vanish; revise the inputs of this feature.',
   record: 'The result could not be prepared for display and selection. A dimension may make a face too small to draw; revise the dimensions of this feature slightly.',
@@ -41,15 +41,18 @@ export function cadKernelFailure(featureId: string, error: unknown, step: CadKer
     ...(error.facts ? { facts: error.facts } : {}) };
 }
 
-/** What each worker request reports when the kernel fails in its own words. */
+/**
+ * What each worker request reports when the kernel fails in its own words outside every feature step. Nothing says why, so the message says
+ * the kernel named no reason, apart from reading a file, whose likely cause is the file; either way it gives the next step.
+ */
 const REQUEST_FAILURES: Readonly<Record<string, string>> = {
-  build: 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.',
-  export: 'The part could not be written to the file. Rebuild the part and export again.',
-  section: 'The section could not be cut through this body. Move the section plane slightly or choose another body.',
-  'inspect-topology': 'The faces and edges of this body could not be read. Rebuild the part and select again.',
-  'resolve-topology-picks': 'The faces and edges of this body could not be read. Rebuild the part and select again.',
-  'inspect-adjacency': 'The faces and edges of this body could not be read. Rebuild the part and select again.',
-  'inspect-tangent-chain': 'The faces and edges of this body could not be read. Rebuild the part and select again.',
+  build: 'The part could not be rebuilt, for a reason the kernel did not name. Rebuild again; if this repeats, undo the last change.',
+  export: 'The part could not be written to the file, for a reason the kernel did not name. Rebuild the part and export again.',
+  section: 'The section could not be cut through this body, for a reason the kernel did not name. Move the section plane slightly or choose another body.',
+  'inspect-topology': 'The faces and edges of this body could not be read, for a reason the kernel did not name. Rebuild the part and select again.',
+  'resolve-topology-picks': 'The faces and edges of this body could not be read, for a reason the kernel did not name. Rebuild the part and select again.',
+  'inspect-adjacency': 'The faces and edges of this body could not be read, for a reason the kernel did not name. Rebuild the part and select again.',
+  'inspect-tangent-chain': 'The faces and edges of this body could not be read, for a reason the kernel did not name. Rebuild the part and select again.',
   'import-solid': 'The file could not be read as a solid. It may be damaged or hold no closed solid; export it again from the program that made it.',
   'import-dxf': 'The DXF file could not be read. It may be damaged; save it again as DXF and retry.',
   'import-dxf-curve': 'The DXF file could not be read. It may be damaged; save it again as DXF and retry.',
@@ -63,7 +66,7 @@ export interface CadKernelRequestFailure {
 export function cadKernelRequestFailure(kind: string, error: unknown): CadKernelRequestFailure {
   if (error instanceof CadError) return { code: error.code, message: cadBoundedText(error.message, MAX_CAD_DIAGNOSTIC_MESSAGE), ...(error.kernelMessage ? { kernelMessage: cadBoundedText(error.kernelMessage, MAX_CAD_KERNEL_MESSAGE) } : {}), ...(error.facts ? { facts: error.facts } : {}) };
   const kernelMessage = cadKernelMessage(error);
-  return { code: 'kernel-operation-failed', message: REQUEST_FAILURES[kind] ?? 'The CAD kernel could not complete this operation.', ...(kernelMessage ? { kernelMessage } : {}) };
+  return { code: 'kernel-operation-failed', message: REQUEST_FAILURES[kind] ?? 'The CAD kernel could not complete this operation, for a reason it did not name. Retry the operation; if this repeats, reload the page.', ...(kernelMessage ? { kernelMessage } : {}) };
 }
 
 /** The kernel's own text for a failure, cut to the bound with an ellipsis when longer, so the reply that carries it stays valid; null when it gave none. */

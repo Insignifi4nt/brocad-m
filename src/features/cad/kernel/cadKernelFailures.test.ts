@@ -17,6 +17,11 @@ describe('kernel failures', () => {
     // A native exception thrown as a number still names the step.
     expect(cadKernelFailure('round', 8_812_344, { operation: 'check', input: null })).toMatchObject({ message: expect.stringMatching(/^The result is not a valid closed solid\./),
       details: { kernelMessage: 'Native exception 8812344' } });
+    // A mirror or a move copies its source exactly, so its failure names the source body as the likely cause.
+    for (const operation of ['mirror', 'transform'] as const) {
+      expect(cadKernelFailure('copy', new Error('BRepBuilderAPI_Transform: not done'), { operation, input: { field: 'sourceId', id: 'pad' } }).message, operation)
+        .toMatch(/ copies its source body exactly, so the source body is likely damaged; rebuild the part, and if this repeats, revise the feature that made the source body\.$/);
+    }
   });
 
   it('keep a refusal\'s code, message and facts, with the step it was taken in', () => {
@@ -41,7 +46,11 @@ describe('kernel failures', () => {
 
   it('give each worker request its own message for kernel text, and pass refusals through with their facts', () => {
     expect(cadKernelRequestFailure('section', new Error('BRepAlgoAPI_Section failed'))).toEqual({ code: 'kernel-operation-failed',
-      message: 'The section could not be cut through this body. Move the section plane slightly or choose another body.', kernelMessage: 'BRepAlgoAPI_Section failed' });
+      message: 'The section could not be cut through this body, for a reason the kernel did not name. Move the section plane slightly or choose another body.', kernelMessage: 'BRepAlgoAPI_Section failed' });
+    // A request that fails outside every feature step says the kernel named no reason, and keeps its words apart; reading a file names the file.
+    for (const kind of ['build', 'export', 'inspect-topology', 'resolve-topology-picks', 'inspect-adjacency', 'inspect-tangent-chain', 'unlisted']) {
+      expect(cadKernelRequestFailure(kind, new Error('Standard_Failure')), kind).toMatchObject({ code: 'kernel-operation-failed', message: expect.stringMatching(/, for a reason (the kernel|it) did not name\. /), kernelMessage: 'Standard_Failure' });
+    }
     expect(cadKernelRequestFailure('import-solid', 3)).toMatchObject({ message: expect.stringMatching(/^The file could not be read as a solid\./), kernelMessage: 'Native exception 3' });
     expect(cadKernelRequestFailure('build', new CadError('STALE_BUILD', 'Rebuild.'))).toEqual({ code: 'STALE_BUILD', message: 'Rebuild.' });
     expect(cadKernelRequestFailure('resolve-topology-picks', new CadError('selection-empty', 'Matched none.', { expected: 2 })))
