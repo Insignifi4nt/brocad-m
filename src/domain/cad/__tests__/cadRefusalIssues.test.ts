@@ -96,6 +96,27 @@ describe('refusals in the CAD issue model', () => {
     expect(cadRefusalSubject(missing)).toEqual(slot);
   });
 
+  it('gives a sketch or reference curve DXF export\'s refusal as an export issue about that export and its source, with codes its own format raises', () => {
+    const sketch = { kind: 'export-operation', format: 'dxf-sketch', sourceId: 'sketch1' } as const, curve = { kind: 'export-operation', format: 'dxf-curve', sourceId: 'rail' } as const;
+    for (const [subject, error] of [[sketch, new CadError('empty-sketch', 'Sketch needs at least one non-construction contour for DXF export.')],
+      [sketch, new CadError('unknown-parameter', 'Unknown parameter "r".')], [sketch, new CadError('dxf-geometry', 'DXF coordinates must be finite.')],
+      [curve, new CadError('suppressed-curve', 'Unsuppress the Curve before exporting its geometry.')], [curve, new CadError('dxf-arc-precision', 'DXF bulges cannot retain the complete Curve.')]] as const) {
+      expect(cadRefusalIssue(cadRefusalAt(error, subject))).toEqual({ key: 'refusal', namespace: 'export', code: error.code, severity: 'error', state: 'failed',
+        subject, message: error.message, causes: [], repairs: [], details: {} });
+    }
+    // No format takes another's codes: a curve is written as one polyline, never by the writer of sketches and sections.
+    for (const [subject, code] of [[sketch, 'empty-section'], [sketch, 'missing-curve'], [sketch, 'dxf-arc-precision'], [curve, 'missing-sketch'], [curve, 'dxf-geometry'],
+      [{ kind: 'export-operation', format: 'dxf-section', sourceId: 'body' }, 'missing-curve']] as const) {
+      expect(cadRefusalIssue(cadRefusalAt(new CadError(code, 'No.'), subject)), `${subject.format} ${code}`).toBeNull();
+    }
+    // A sketch export's record is replaced by a curve export's, and by an export of another sketch.
+    const refused = cadRefusalAt(new CadError('unknown-parameter', 'Unknown parameter "r".'), sketch);
+    cadRefusalAt(refused, curve);
+    expect(cadRefusalSubject(refused)).toEqual(curve);
+    cadRefusalAt(refused, { ...sketch, sourceId: 'other' });
+    expect(cadRefusalSubject(refused)).toEqual({ ...sketch, sourceId: 'other' });
+  });
+
   it('names the nearest step of one propagation, which a refusal raised again starts over', () => {
     const slot = (featureId: string, inputId: string) => ({ kind: 'reference-slot', featureId, field: 'sketchId', inputId }) as const;
     // The reviewer's probe: an independent check rethrows a cached refusal while checking a different feature.

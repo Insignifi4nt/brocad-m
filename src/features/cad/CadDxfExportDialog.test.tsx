@@ -117,6 +117,45 @@ it('shows a refused section export with the code of its export issue, and the ke
   expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
   expect(host.querySelector('details')).toBeNull();
 });
+it('shows a refused sketch or reference curve download with the code of its export issue, and keeps the dialog open', async () => {
+  const sketch = { kind: 'export-operation', format: 'dxf-sketch', sourceId: 'sketch' } as const, curve = { kind: 'export-operation', format: 'dxf-curve', sourceId: 'rail' } as const;
+  const callbacks = props({ initialFeatureId: 'sketch',
+    onExportSketch: vi.fn(async () => { throw cadRefusalAt(new CadError('dxf-geometry', 'DXF coordinates must be finite.'), sketch); }),
+    onExportCurve: vi.fn(async () => { throw cadRefusalAt(new CadError('dxf-arc-precision', 'DXF bulges cannot retain the complete Curve.'), curve); }) });
+  await act(async () => root.render(<CadDxfExportDialog {...callbacks} />));
+  const alert = () => host.querySelector<HTMLElement>('[role=alert]');
+  await act(async () => button('Download DXF').click());
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual(['DXF coordinates must be finite.', 'dxf-geometry']);
+  expect(host.querySelector('details')).toBeNull();
+  await act(async () => host.querySelector<HTMLInputElement>('input[value=curve]')?.click());
+  await act(async () => button('Download DXF').click());
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual(['DXF bulges cannot retain the complete Curve.', 'dxf-arc-precision']);
+  expect(callbacks.onClose).not.toHaveBeenCalled();
+});
+it('refuses a source it cannot resolve as its export would, with that export\'s code, before any download', async () => {
+  // A sketch whose radius names a parameter the part no longer has: the download it disables would refuse it as unknown-parameter.
+  const sized = parseCadDocument({ ...createCadDocument('Sized plate', 'sized_plate'), parameters: { r: 10 }, features: [
+    { id: 'sketch', name: 'Sized outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'outline', name: 'Plate', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 'r' } }] }] });
+  const callbacks = props({ document: { ...sized, parameters: {} }, initialFeatureId: 'sketch' });
+  await act(async () => root.render(<CadDxfExportDialog {...callbacks} />));
+  const alert = () => host.querySelector<HTMLElement>('[role=alert]');
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual(['Unknown parameter "r".', 'unknown-parameter']);
+  expect(button('Download DXF').disabled).toBe(true);
+  // A section offset naming no parameter is the section export's refusal the same way.
+  await act(async () => host.querySelector<HTMLInputElement>('input[value=section]')?.click());
+  const offset = host.querySelector<HTMLInputElement>('[aria-label="Section offset (mm)"]');
+  if (!offset) throw new Error('Missing offset');
+  await type(offset, 'missing / 2');
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual(['Unknown parameter "missing".', 'unknown-parameter']);
+  // A source with nothing to write is no refusal: the download waits for a source with geometry.
+  await act(async () => root.unmount()); root = createRoot(host);
+  await act(async () => root.render(<CadDxfExportDialog {...props({ document: parseCadDocument({ ...createCadDocument('Guide only', 'guide_only'), features: [
+    { id: 'guide', name: 'Guide', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'reference', name: 'Reference', construction: true, geometry: { kind: 'circle', x: 0, y: 0, radius: 5 } }] }] }), initialFeatureId: 'guide' })} />));
+  expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['Choose a source with exportable geometry.', false]);
+  expect(host.querySelector('details')).toBeNull();
+});
 it.each(['close', 'stale', 'cancel'] as const)('aborts an outstanding section on %s and never publishes its late preview', async change => {
   let signal: AbortSignal | undefined, resolve: ((result: CadSectionResult) => void) | undefined;
   const callbacks = props({ onInspectSection: vi.fn((_request, _version, current) => { signal = current; return new Promise<CadSectionResult>(done => { resolve = done; }); }) });

@@ -58,7 +58,11 @@ beforeAll(() => {
       ...exported('src/features/cad/kernel/cadKernelFailures.ts', 'cadKernelRequestFailure'), ...exported(CAM, 'cadEntitiesToCam')],
     // A section DXF export: the same section, read back the same way, and the DXF writer its curves go to instead of the path planner.
     'dxf-section': [{ file: KERNEL, node: section }, { file: CONTROLLER, node: matching }, ...exported('src/domain/cad/cadSection.ts', 'parseCadSectionRequest'),
-      ...exported('src/features/cad/kernel/cadKernelFailures.ts', 'cadKernelRequestFailure'), ...exported('src/domain/cad/cadDxfExport.ts', 'cadEntitiesToDxf')]
+      ...exported('src/features/cad/kernel/cadKernelFailures.ts', 'cadKernelRequestFailure'), ...exported('src/domain/cad/cadDxfExport.ts', 'cadEntitiesToDxf')],
+    // A sketch DXF export: the sketch's entities, as a sketch sent to CAM evaluates them, and the DXF writer they go to.
+    'dxf-sketch': exported(CAM, 'cadSketchToDxf'),
+    // A reference curve DXF export: the curve's resolved edges and the open polyline written from them, read back to check it keeps them.
+    'dxf-curve': exported('src/domain/cad/cadCurveDxf.ts', 'cadCurveToDxf')
   };
 }, 60_000);
 

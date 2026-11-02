@@ -2031,6 +2031,43 @@ describe('CAD controller asynchronous guards', () => {
     const reply = await cadSiteTools(h.cad).find(entry => entry.name === 'cad_export_section_dxf')!.execute({ expectedVersion: version, section: request });
     expect(reply).toEqual({ ok: false, error: { code: 'dxf-geometry', message: 'DXF coordinates must be finite.', details: { issue: cadAgentIssue(issue!, undefined) } } });
   });
+  it.each([
+    // The sketch named is gone, suppressed or only construction geometry, or the DXF writer refuses its curves.
+    { format: 'dxf-sketch', sourceId: 'absent', code: 'missing-sketch', writer: false },
+    { format: 'dxf-sketch', sourceId: 'hidden', code: 'suppressed-sketch', writer: false },
+    { format: 'dxf-sketch', sourceId: 'guide', code: 'empty-sketch', writer: false },
+    { format: 'dxf-sketch', sourceId: 'outline', code: 'dxf-geometry', writer: true },
+    // The curve named is gone or suppressed.
+    { format: 'dxf-curve', sourceId: 'absent', code: 'missing-curve', writer: false },
+    { format: 'dxf-curve', sourceId: 'quiet', code: 'suppressed-curve', writer: false }
+  ] as const)('gives the DXF export dialog and the agent the same $format export issue for $code', async ({ format, sourceId, code, writer }) => {
+    const h = await harness(), tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
+    const circle = (id: string, construction: boolean) => ({ id, name: id, construction, geometry: { kind: 'circle', x: 0, y: 0, radius: 5 } }) as const;
+    const sketch = (id: string, suppressed: boolean, profiles: readonly ReturnType<typeof circle>[]) => ({ id, name: id, kind: 'sketch', suppressed, plane: 'XY', offset: 0, profiles }) as const;
+    const curve = (id: string, suppressed: boolean) => ({ id, name: id, kind: 'curve', suppressed, plane: 'XY', offset: 0, segments: [{ kind: 'line', start: [0, 0], end: [10, 0] }] }) as const;
+    await act(async () => h.session.replace(parseCadDocument({ ...createCadDocument('Exports', 'cad_exports'), features: [
+      sketch('outline', false, [circle('plate', false)]), sketch('hidden', true, [circle('plate', false)]), sketch('guide', false, [circle('reference', true)]),
+      curve('rail', false), curve('quiet', true)] })));
+    const version = h.session.getSnapshot().version, refuse = () => new CadError('dxf-geometry', 'DXF coordinates must be finite.');
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    // The dialog's download, inside its own workflow as App wires it.
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    if (writer) dxfWriter.refuse = refuse;
+    let shown: unknown;
+    await act(async () => { shown = await (format === 'dxf-sketch' ? h.cad().exportDxf(sourceId, version, undefined, 'dxf-export')
+      : h.cad().exportCurveDxf(sourceId, version, undefined, 'dxf-export')).then(() => undefined, (error: unknown) => error); });
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    const issue = cadRefusalIssue(shown);
+    expect(issue).toMatchObject({ namespace: 'export', code, message: (shown as CadError).message, subject: { kind: 'export-operation', format, sourceId } });
+    // A sketch export's refusal names the export, never CAM, which sends sketches through the same checks.
+    expect((shown as CadError).message).not.toContain('CAM');
+    if (writer) dxfWriter.refuse = refuse;
+    const reply = await tool(format === 'dxf-sketch' ? 'cad_export_dxf' : 'cad_export_curve_dxf').execute({ expectedVersion: version,
+      ...format === 'dxf-sketch' ? { sketchId: sourceId } : { curveId: sourceId } });
+    expect(reply).toEqual({ ok: false, error: { code, message: (shown as CadError).message, details: { issue: cadAgentIssue(issue!, undefined) } } });
+    expect(click).not.toHaveBeenCalled();
+    expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
+  });
   it('reads the section back as part of the step, so an offset naming no parameter is the step\'s refusal there too', async () => {
     const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 'depth / 2' } as const;
     kernel.section.mockResolvedValue(section);

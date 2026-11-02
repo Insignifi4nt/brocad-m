@@ -10,19 +10,25 @@ import { cadSketchToEntities } from './cadSketchGeometry';
 import { cadEntitiesToDxf } from './cadDxfExport';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 
-function entitiesForSketch(document: CadDocument, sketchId: string): DxfEntity[] {
+/** What a sketch's contours are for, which its refusals name: sending it to CAM or writing it as DXF. */
+const SKETCH_PURPOSE = {
+  cam: { missing: 'Choose an existing sketch for CAM.', inactive: 'A suppressed sketch cannot be transferred to CAM.', empty: 'Sketch needs at least one non-construction contour for CAM.' },
+  dxf: { missing: 'Choose an existing sketch for DXF export.', inactive: 'Unsuppress the sketch before exporting it as DXF.', empty: 'Sketch needs at least one non-construction contour for DXF export.' }
+} as const;
+
+function entitiesForSketch(document: CadDocument, sketchId: string, purpose: keyof typeof SKETCH_PURPOSE): DxfEntity[] {
   parseCadDocument(document);
-  const sketch = document.features.find(feature => feature.id === sketchId);
-  if (sketch?.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch for CAM.');
-  if (!cadFeatureActive(sketch, document)) throw new CadError('suppressed-sketch', 'A suppressed sketch cannot be transferred to CAM.');
+  const sketch = document.features.find(feature => feature.id === sketchId), words = SKETCH_PURPOSE[purpose];
+  if (sketch?.kind !== 'sketch') throw new CadError('missing-sketch', words.missing);
+  if (!cadFeatureActive(sketch, document)) throw new CadError('suppressed-sketch', words.inactive);
   const entities = cadSketchToEntities(sketch, document.parameters);
-  if (entities.length === 0) throw new CadError('empty-sketch', 'Sketch needs at least one non-construction contour for CAM.');
+  if (entities.length === 0) throw new CadError('empty-sketch', words.empty);
   return entities;
 }
 
 /** Sketch-local millimetres, independent of its XY/XZ/YZ display plane and offset. */
 export function cadSketchToCam(document: CadDocument, sketchId: string): PathPlanningDocument {
-  const result = cadEntitiesToCam(entitiesForSketch(document, sketchId));
+  const result = cadEntitiesToCam(entitiesForSketch(document, sketchId, 'cam'));
   const sketch = document.features.find(feature => feature.id === sketchId);
   if (sketch?.kind !== 'sketch') return result;
   return appendPluginNotes(result, [sketch]);
@@ -57,7 +63,7 @@ export function cadEntitiesToCam(entities: readonly DxfEntity[], sourceDocument?
 
 /** Portable ASCII DXF with an explicit millimetre unit declaration and exact analytic arcs. */
 export function cadSketchToDxf(document: CadDocument, sketchId: string): string {
-  const entities = entitiesForSketch(document, sketchId);
+  const entities = entitiesForSketch(document, sketchId, 'dxf');
   const sketch = document.features.find(feature => feature.id === sketchId);
   const notes = sketch?.kind === 'sketch' ? sketch.profiles.flatMap(profile => {
     if (profile.construction || profile.geometry.kind !== 'plugin') return [];

@@ -808,21 +808,27 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     return handoffToCam({ kind: 'section', section: { ...parseCadSectionRequest(request) } }, expectedVersion, signal, scope);
   }
   async function exportDxf(sketchId: string, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, scope?: 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     const { cadSketchToDxf } = await import('@/domain/cad/cadCam');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const document = session.getSnapshot().document;
-    const text = cadSketchToDxf(document, sketchId);
+    // Each refusal names the export and the sketch it writes.
+    let text: string;
+    try { text = cadSketchToDxf(document, sketchId); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-sketch', sourceId: sketchId }, since); }
     const fileName = `${fileBase(document.name)}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);
     return { fileName, downloadRequested: true, sketchId, version: expectedVersion };
   }
   async function exportCurveDxf(curveId: string, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, scope?: 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     const { cadCurveToDxf } = await import('@/domain/cad/cadCurveDxf');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const document = session.getSnapshot().document;
-    const text = cadCurveToDxf(document, curveId);
+    // Each refusal names the export and the curve it writes.
+    let text: string;
+    try { text = cadCurveToDxf(document, curveId); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-curve', sourceId: curveId }, since); }
     const fileName = `${fileBase(document.name)}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);
     return { fileName, downloadRequested: true, curveId, version: expectedVersion };

@@ -174,16 +174,34 @@ export function isCadCamCode<O extends CadCamOperation>(operation: O, code: unkn
  * - `dxf-section`: a section DXF export: the request, the body it names, its offset expression, a model with diagnostics, the plane's cut of
  *   the body, contours the path planner cannot close, which the section counts, or curves DXF cannot write; a kernel failure without a code
  *   of its own is `kernel-operation-failed`.
+ * - `dxf-sketch`: a sketch DXF export: the sketch it names, which must be active and have a contour that is no construction geometry, its
+ *   contours as a sketch sent to CAM evaluates them (expressions, relations, cells, plugins and profiles), or curves DXF cannot write.
+ * - `dxf-curve`: a reference curve DXF export: the curve it names, which must be active, its edges as the curve resolves them (expressions,
+ *   an imported DXF source, and a chain that is open, connected and does not cross itself), or an open polyline that cannot keep them exactly.
  * A step's other failures are no problem of the export or its source and give no issue (`cadRefusalIssue`).
  */
 export const CAD_EXPORT_STEP_CODES = Object.freeze({
   'dxf-section': Object.freeze(['cam-geometry', 'degenerate-section', 'division-by-zero', 'dxf-geometry', 'empty-section', 'expression-limit', 'invalid-expression',
     'invalid-plane', 'invalid-scalar', 'invalid-section', 'kernel-operation-failed', 'missing-body', 'open-section', 'section-failed', 'tangent-section',
-    'unknown-parameter', 'unsupported-entity', 'unsupported-section-curve'] as const)
+    'unknown-parameter', 'unsupported-entity', 'unsupported-section-curve'] as const),
+  'dxf-sketch': Object.freeze(['already-driven-sketch-radius', 'already-driven-sketch-tangent', 'division-by-zero', 'duplicate-sketch-id', 'dxf-geometry',
+    'empty-sketch', 'expression-limit', 'fixed-sketch-relation', 'invalid-corner-geometry', 'invalid-corner-topology', 'invalid-distance',
+    'invalid-expression', 'invalid-gear', 'invalid-plugin', 'invalid-plugin-inputs', 'invalid-plugin-rules', 'invalid-profile', 'invalid-profile-role',
+    'invalid-radius', 'invalid-region-selection', 'invalid-scalar', 'invalid-sketch-angle', 'invalid-sketch-angle-ray', 'invalid-sketch-cell-id',
+    'invalid-sketch-cells', 'invalid-sketch-cycle', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair', 'invalid-sketch-midpoint',
+    'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve', 'invalid-sketch-point-on-line',
+    'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair', 'invalid-sketch-reference', 'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry',
+    'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'missing-sketch', 'missing-sketch-entity', 'missing-sketch-point', 'open-profile',
+    'owned-sketch-pattern', 'plugin-limit', 'plugin-size', 'profile-intersection', 'self-intersection', 'sketch-graph-precision', 'stale-sketch-region',
+    'suppressed-sketch', 'unknown-parameter', 'unlowerable-sketch-operand', 'unsupported-entity', 'unsupported-sketch-cells', 'unsupported-sketch-operand'] as const),
+  'dxf-curve': Object.freeze(['closed-curve', 'disconnected-curve', 'division-by-zero', 'dxf-arc-precision', 'dxf-inexact', 'empty-curve', 'expression-limit',
+    'invalid-curve', 'invalid-dxf-source', 'invalid-expression', 'invalid-profile', 'invalid-scalar', 'missing-curve', 'self-intersection', 'suppressed-curve',
+    'unknown-parameter'] as const)
 });
-/** The export steps whose refusals are issues: a section DXF export. */
+/** The export steps whose refusals are issues: a section, sketch or reference curve DXF export. */
 export type CadExportFormat = keyof typeof CAD_EXPORT_STEP_CODES;
 export type CadExportCodeOf<F extends CadExportFormat> = (typeof CAD_EXPORT_STEP_CODES)[F][number];
-const EXPORT_CODES: { readonly [F in CadExportFormat]: ReadonlySet<unknown> } = { 'dxf-section': new Set(CAD_EXPORT_STEP_CODES['dxf-section']) };
+const EXPORT_CODES: { readonly [F in CadExportFormat]: ReadonlySet<unknown> } = { 'dxf-section': new Set(CAD_EXPORT_STEP_CODES['dxf-section']),
+  'dxf-sketch': new Set(CAD_EXPORT_STEP_CODES['dxf-sketch']), 'dxf-curve': new Set(CAD_EXPORT_STEP_CODES['dxf-curve']) };
 /** Whether export step `format` can raise `code`. */
 export function isCadExportCode<F extends CadExportFormat>(format: F, code: unknown): code is CadExportCodeOf<F> { return EXPORT_CODES[format].has(code); }

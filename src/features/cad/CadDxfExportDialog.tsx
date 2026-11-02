@@ -13,7 +13,7 @@ import { resolveCadCurveGeometry } from '@/domain/cad/cadCurve';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { cadBodyFeatureId, cadBodyLineage } from '@/domain/cad/cadBodies';
 import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
-import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
+import { cadRefusalAt, cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 import { CadContextHelp } from './CadContextHelp';
 import { CadKernelMessage, cadKernelMessageOf } from './CadKernelMessage';
 import { CadSectionPreview } from './CadSectionDialog';
@@ -72,15 +72,22 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
     // Preserve valid selections and custom heights; initialize only a missing body.
     setBodyId(next.featureId); setOffset(cadSectionMiddleOffset(next, plane)); setReview(null); setError(null);
   }, [bodies, bodyId, plane, initialState, stale]);
-  const source = useMemo<{ entities: readonly DxfEntity[]; error: string | null }>(() => {
+  const source = useMemo<{ entities: readonly DxfEntity[]; error: string | null; code: string | null; kernelMessage: string | null }>(() => {
+    const since = cadRefusalMark();
     try {
-      if (kind === 'section') { evaluateCadScalar(offset, cadDocument.parameters); return { entities: [], error: null }; }
+      if (kind === 'section') { evaluateCadScalar(offset, cadDocument.parameters); return { entities: [], error: null, code: null, kernelMessage: null }; }
       const feature = cadDocument.features.find(candidate => candidate.id === (kind === 'sketch' ? sketchId : curveId) && cadFeatureActive(candidate, cadDocument));
       const entities = feature?.kind === 'sketch' && kind === 'sketch' ? cadSketchToEntities(feature, cadDocument.parameters)
         : feature?.kind === 'curve' && kind === 'curve' ? resolveCadCurveGeometry(feature, cadDocument.parameters).entities : [];
-      return { entities, error: entities.length ? null : 'Choose a source with exportable geometry.' };
-    } catch (cause) { return { entities: [], error: userFacingMessage(cause, 'Cannot resolve this source.') }; }
-  }, [cadDocument, kind, sketchId, curveId, offset]);
+      // A source with nothing to write is no refusal: the download waits for a source to choose.
+      return { entities, error: entities.length ? null : 'Choose a source with exportable geometry.', code: null, kernelMessage: null };
+    } catch (cause) {
+      // A source the download would refuse is refused here as the export would refuse it, with the code of its export issue.
+      const refused = cadRefusalAt(cause, kind === 'section' ? { kind: 'export-operation', format: 'dxf-section', sourceId: bodyId }
+        : { kind: 'export-operation', format: kind === 'sketch' ? 'dxf-sketch' : 'dxf-curve', sourceId: kind === 'sketch' ? sketchId : curveId }, since);
+      return { entities: [], error: userFacingMessage(cause, 'Cannot resolve this source.'), code: cadRefusalIssue(refused, 'refusal', since)?.code ?? null, kernelMessage: cadKernelMessageOf(cause) };
+    }
+  }, [cadDocument, kind, sketchId, curveId, bodyId, offset]);
   const reviewed = !stale && review?.key === key ? review.result : null;
   const previewEntities = kind === 'section' ? reviewed?.entities ?? [] : source.entities;
   const hasSource = kind === 'section' ? bodies.some(body => body.featureId === bodyId) : source.entities.length > 0;
@@ -126,9 +133,9 @@ export function CadDxfExportDialog({ document: cadDocument, bodies, version, cur
       <div className="cad-dxf-preview">{previewEntities.length ? <CadSectionPreview entities={previewEntities} label={kind === 'section' ? 'Exact section preview' : kind === 'sketch' ? 'Sketch DXF preview' : 'Reference curve DXF preview'} />
         : <p>{busy === 'preview' ? 'Computing exact section…' : kind === 'section' ? 'Preview the section to review its exported contours.' : 'No exportable geometry.'}</p>}</div>
       <div className="cad-dxf-status" role="status">{busy === 'export' ? 'Preparing DXF download…' : busy === 'preview' ? 'Computing exact section…' : reviewed ? `${reviewed.contourCount} closed contours · ${reviewed.entities.length} analytic curves` : kind !== 'section' && previewEntities.length ? `${previewEntities.length} analytic curves${kind === 'curve' ? ' · open chain' : ''}` : ' '}</div>
-      {(stale || error || source.error) && <p role="alert" className="cad-dxf-error" data-cad-issue-code={!stale && error?.code || undefined}>
+      {(stale || error || source.error) && <p role="alert" className="cad-dxf-error" data-cad-issue-code={!stale && (error ? error.code : source.code) || undefined}>
         {stale ? 'The CAD draft changed. Close this export and reopen it to review the current geometry.' : error?.message ?? source.error}</p>}
-      {!stale && error && <CadKernelMessage text={error.kernelMessage} />}
+      {!stale && (error || source.error) && <CadKernelMessage text={error ? error.kernelMessage : source.kernelMessage} />}
     </div>
     <footer><span>Standalone 2D DXF · no CAD save required</span><div><Button type="button" className="cad-dxf-secondary" onClick={busy ? () => pending.current?.abort() : close}>{busy ? 'Cancel operation' : 'Cancel'}</Button><Button variant="primary" type="button" className="cad-dxf-primary" disabled={busy !== null || stale || !hasSource || Boolean(source.error) || kind === 'section' && !reviewed} onClick={() => { void execute('export'); }}><DownloadIcon size={13} />Download DXF</Button></div></footer>
   </dialog>;

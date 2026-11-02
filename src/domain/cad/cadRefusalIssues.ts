@@ -10,7 +10,7 @@ export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf | CadExportIssue
  * The issue of refusal `error`, the one adapter for refusals raised outside a build:
  * - a CAM step's refusal (sending a sketch to CAM, a Section for CAM), about the operation and its source, as that step recorded it, with
  *   any code the step can raise (`CAD_CAM_STEP_CODES`);
- * - an export step's refusal (a section DXF export), about the export and its source, as that step recorded it, with any code the step
+ * - an export step's refusal (a section, sketch or reference curve DXF export), about the export and its source, as that step recorded it, with any code the step
  *   can raise (`CAD_EXPORT_STEP_CODES`);
  * - the document check's refusal with a code a feature can be refused with, about the feature or input slot it was checking, or the
  *   document when it was checking none, with the facts its code carries.
@@ -33,6 +33,8 @@ export function cadRefusalIssue(error: unknown, key = 'refusal', since?: CadRefu
     return isCadCamCode('send-sketch', code) ? createCadIssue({ ...common, namespace: 'cam', code, subject: { ...subject, operation: 'send-sketch' }, details: {} }) : null;
   }
   if (subject?.kind === 'export-operation') {
+    if (subject.format === 'dxf-sketch') return isCadExportCode('dxf-sketch', code) ? createCadIssue({ ...common, namespace: 'export', code, subject: { ...subject, format: 'dxf-sketch' }, details: {} }) : null;
+    if (subject.format === 'dxf-curve') return isCadExportCode('dxf-curve', code) ? createCadIssue({ ...common, namespace: 'export', code, subject: { ...subject, format: 'dxf-curve' }, details: {} }) : null;
     return isCadExportCode('dxf-section', code) ? createCadIssue({ ...common, namespace: 'export', code, subject: { ...subject, format: 'dxf-section' }, details: {} }) : null;
   }
   if (!isCadRefusalCode(code) || code === 'rebuild-stopped') return null;
