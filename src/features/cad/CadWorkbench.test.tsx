@@ -31,6 +31,7 @@ import { useCadSketchEditing } from './useCadSketchEditing';
 import { pairedBoreMirrorPart } from '@/domain/cad/__tests__/cadSketchMirrorFixtures';
 import { cadSketchSourceAvailability, cadSketchSourceIssue } from '@/domain/cad/cadSketchSources';
 import { cadSketchRelationOffers } from '@/domain/cad/sketch-relations/cadSketchRelationOffers';
+import { CAD_GEAR_V3_PLUGIN, CAD_STAR_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
 
 let requestViewportMenu: ((request: CadViewportContextMenuRequest) => void) | undefined;
 let pickViewportFeature: ((id: string | null) => void) | undefined;
@@ -559,6 +560,44 @@ describe('CAD sketch interaction', () => {
       else expect(offsets, pick).toEqual([]);
       await act(async () => currentSession.undo()); expect(currentDocument, pick).toEqual(initial);
     }
+  });
+  it('offsets a plugin outline picked by its interior as its edges are, and says why a gear outline offsets neither way', async () => {
+    const shape = (id: string, geometry: unknown) => ({ id, kind: 'generator', idPrefix: id, name: id === 'star' ? 'Star' : 'Gear', construction: false, geometry });
+    const part = (generator: ReturnType<typeof shape>) => parseCadDocument({ ...createCadDocument('Plugin', `plugin-${generator.id}`), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch',
+      name: 'Outline', plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [generator] } }] });
+    const pick = (id: string) => act(async () => { viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }); viewport().apply({ kind: 'select-profile', profileId: id }); });
+    // The bundled star: sixteen lines, each corner sharp between two lines, which an offset joins.
+    const star = part(shape('star', createCadPluginProfile(CAD_STAR_PLUGIN)));
+    await mount(star);
+    const edges = sketchGraph().entities.map(entity => entity.id);
+    expect(edges).toHaveLength(16);
+    for (const linked of [false, true]) {
+      await pick('star'); await click('Offset loop');
+      for (const id of edges) expect(container.querySelector(`[data-cad-sketch-entity="${id}"]`)?.classList.contains('is-relation-highlighted'), id).toBe(true);
+      await input(field('Offset distance'), '2');
+      if (linked) await click('Linked');
+      await click('Apply');
+      const graph = sketchGraph(), copy = graph.entities.filter(entity => !edges.includes(entity.id));
+      expect(copy).toHaveLength(16);
+      expect(viewport().getState().selectedSketchGeometrySet).toEqual(copy.map(entity => ({ kind: 'entity', id: entity.id })));
+      const offsets = graph.relations.filter(relation => relation.kind === 'generator' && relation.geometry.kind === 'offset');
+      if (linked) expect(offsets).toEqual([expect.objectContaining({ geometry: expect.objectContaining({ kind: 'offset', distance: '2' }) })]);
+      else expect(offsets).toEqual([]);
+      if (linked && offsets[0]?.kind === 'generator' && offsets[0].geometry.kind === 'offset') expect(offsets[0].geometry.chain.map(link => link.entityId).sort()).toEqual([...edges].sort());
+      await act(async () => currentSession.undo()); expect(currentDocument).toEqual(star);
+    }
+    // The bundled gear: its tooth tips meet their flanks at sharp line and arc corners, and its 600 edges are more than a linked offset follows.
+    const gearProfile = createCadPluginProfile(CAD_GEAR_V3_PLUGIN);
+    const gear = part(shape('gear', { ...gearProfile, inputs: { ...gearProfile.inputs, teeth: 12 } }));
+    await act(async () => replaceDocument(gear)); await pick('gear');
+    expect(sketchGraph().entities).toHaveLength(600);
+    await click('Offset loop');
+    await input(field('Offset distance'), '0.5'); await click('Apply');
+    expect(container.textContent).toContain('Offset supports smooth circular joints only; sharp line/arc or arc/arc corners need an explicit join policy.');
+    expect(button('Apply').disabled).toBe(true); expect(currentDocument).toBe(gear);
+    expect(button('Linked').disabled).toBe(true);
+    expect(button('Linked').getAttribute('aria-description')).toBe('A linked offset follows at most 512 curves, and this loop has 600. Copy it independently.');
+    await click('Cancel'); expect(currentDocument).toBe(gear);
   });
   it('selects the accepted Split joint in the real owned sketch workspace after private publication', async () => {
     const initial = parseCadDocument({ ...createCadDocument(), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',

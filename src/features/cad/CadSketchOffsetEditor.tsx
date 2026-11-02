@@ -7,6 +7,7 @@ import { inspectCadScalarValue } from '@/domain/cad/cadScalarValueIntent';
 import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
 import type { CadSketchOffsetSource } from '@/domain/cad/cadSketchOffset';
 import { cadSketchGeneratorMembers } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { CAD_SKETCH_OFFSET_LINKS_MAX } from '@/domain/cad/sketch-generators/cadSketchGeneratorSchema';
 import { cadSketchProfileGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { ScalarField } from './CadFields';
@@ -31,8 +32,9 @@ export function cadSketchOffsetSource(sketch: CadSketchFeature, parameters: CadD
   }
   const generator = profileId ? cadSketchProfileGenerator(sketch, profileId) : undefined;
   if (generator) {
-    // A construction shape's cycle is construction, so it names none, as a construction profile does not.
-    if (generator.geometry.kind === 'plugin' || !sketch.graph) return null;
+    // A construction shape's cycle is construction, so it names none, as a construction profile does not. Every kind draws one loop, a
+    // plugin's outline too, so a shape the sketch leaves unbranched has exactly one.
+    if (!sketch.graph) return null;
     const edges = new Set(cadSketchGeneratorMembers(sketch.graph, generator).entityIds);
     return cycle(refs => refs.length === edges.size && refs.every(ref => edges.has(ref.entityId)));
   }
@@ -68,6 +70,9 @@ export function CadSketchOffsetEditor(props: Props) {
   const [distance, setDistance] = useState<CadScalar>(1);
   const [linked, setLinked] = useState(false);
   const linkable = owner.source.kind === 'graph-cycle';
+  // A linked offset's generator follows at most so many curves; a longer loop is copied independently.
+  const links = owner.source.kind === 'graph-cycle' ? owner.source.sourceRefs.length : 0;
+  const unlinkable = links > CAD_SKETCH_OFFSET_LINKS_MAX ? `A linked offset follows at most ${CAD_SKETCH_OFFSET_LINKS_MAX} curves, and this loop has ${links}. Copy it independently.` : null;
   const form = useRef<HTMLFormElement>(null);
   useLayoutEffect(() => { form.current?.querySelector('input')?.select(); }, []);
   const quantity = useMemo(() => { try { return evaluateCadScalar(distance, owner.document.parameters); } catch { return null; } }, [distance, owner]);
@@ -100,7 +105,7 @@ export function CadSketchOffsetEditor(props: Props) {
       </div>
       {linkable && <div className="cad-sketch-profile-actions" role="group" aria-label="Offset link">
         <Button type="button" aria-pressed={!linked} onClick={() => { setLinked(false); setError(null); }}>Independent</Button>
-        <Button type="button" aria-pressed={linked} onClick={() => { setLinked(true); setError(null); }}>Linked</Button>
+        <Button type="button" aria-pressed={linked} disabled={Boolean(unlinkable)} title={unlinkable ?? undefined} onClick={() => { setLinked(true); setError(null); }}>Linked</Button>
       </div>}
     </fieldset>
   </CadSketchCommandForm>;
