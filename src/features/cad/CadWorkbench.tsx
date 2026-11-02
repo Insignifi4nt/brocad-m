@@ -8,6 +8,7 @@ import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { isCadSketchGraphSelected, reconcileCadSketchGraphSelection, toggleCadSketchGraphSelection, type CadSketchGeometryPick } from './cadSketchGraphSelection';
 import { cadSketchFixedElementError, cadSketchVirtualSubject, isCadSketchVirtualId, isCadSketchVirtualSelection } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
 import type { CadSketchGraph, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
+import { cadSketchProfileGenerator, cadSketchProfileViews, cadSketchShapeEdits, withCadSketchProfile, withoutCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { createCadFreshSketchDrawing, createCadFreshSketchGraph, type CadFreshSketchDrawing } from '@/domain/cad/cadFreshSketchGraph';
 import { createCadPathDraftGraph } from './cadPathDraftGraph';
 import { inspectCadSketchCornerTarget } from '@/domain/cad/cadSketchCornerTreatment';
@@ -125,6 +126,11 @@ const NO_RELATION_OFFERS: readonly CadSketchRelationOffer[] = Object.freeze([]);
 const NO_SELECTION_RELATIONS: readonly CadSketchSelectionAction[] = Object.freeze([]);
 /** A relation of the selection in a right-click menu: Remove for an applied one, as the icon shown pressed removes it. */
 const relationMenuLabel = (action: CadSketchSelectionAction) => action.state === 'applied' ? `Remove ${action.label.toLowerCase()}` : action.label;
+/** The sketch with its profile view `profileId`, a legacy profile or a generator, renamed. */
+function renamedProfile(sketch: CadSketchFeature, profileId: string, name: string): CadSketchFeature {
+  const view = cadSketchProfileViews(sketch).find(entry => entry.id === profileId);
+  return view ? withCadSketchProfile(sketch, { ...view, name }) : sketch;
+}
 function afterCadEdit(completion: CadEditCompletion, accepted: () => void, signal?: AbortSignal): CadEditCompletion {
   const finish = (result: Awaited<CadEditCompletion>) => { signal?.throwIfAborted(); accepted(); return result; };
   return completion && 'then' in completion ? completion.then(finish) : finish(completion);
@@ -747,7 +753,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const hasActiveBodyFeatures = document.features.some(feature => cadFeatureActive(feature, document) && cadFeatureProducesBody(feature));
   useEffect(() => { if (!hasActiveBodyFeatures) setPickMode('auto'); }, [hasActiveBodyFeatures]);
   const selectedSketch = selected?.kind === 'sketch' ? selected : sketch;
-  const profile = sketch?.profiles.find((entry) => entry.id === profileId);
+  // A generator of a profile's shape is configured as that profile was.
+  const profile = sketch ? cadSketchProfileViews(sketch).find((entry) => entry.id === profileId) : undefined;
   const offsetSource = useMemo(() => sketch ? cadSketchOffsetSource(sketch, document.parameters, graphGeometry, profileId) : null, [sketch, document.parameters, graphGeometry, profileId]);
   const currentOffset = offsetCommand?.sketchId === sketch?.id ? offsetCommand : null;
   const currentPattern = patternCommand?.sketchId === sketch?.id ? patternCommand : null;
@@ -948,9 +955,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       catch (cause) { clear(); throw cause; }
     }, () => { setPickedTopology(null); setSelectedId(featureId); });
   } };
-  const deleteProfile = (source: CadSketchFeature, id: string) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: {
-    ...source, profiles: source.profiles.filter(profile => profile.id !== id)
-  } }, signal), () => setProfileId(current => current === id ? null : current));
+  const deleteProfile = (source: CadSketchFeature, id: string) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: withoutCadSketchProfile(source, id) }, signal),
+    () => setProfileId(current => current === id ? null : current));
   const applyCanvasEdits = (edits: readonly CadEdit[], signal?: AbortSignal) => {
     // Moving dimensions is accepted at once, so it opens no workflow for its caller to close.
     if (cadEditsOnlyPlaceDimensions(document, edits)) return props.onEditMany(edits, signal);
@@ -1003,7 +1009,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (selectedId && !document.features.some((feature) => feature.id === selectedId)) setSelectedId(null);
     if (curveId && !document.features.some(feature => feature.kind === 'curve' && feature.id === curveId)) setCurveId(null);
     if (sketchId && !document.features.some((feature) => feature.id === sketchId && feature.kind === 'sketch')) { setSketchId(null); setProfileId(null); }
-    else if (profileId && !sketch?.profiles.some((entry) => entry.id === profileId)) setProfileId(null);
+    else if (profileId && !(sketch && cadSketchProfileViews(sketch).some((entry) => entry.id === profileId))) setProfileId(null);
   }, [document.id, document.features, selectedId, sketchId, curveId, profileId, sketch]);
   const cancel = useCallback(() => {
     if (dimensionToolOwner.current) { commandSubmission.cancel(); endDimensionTool(); return; }
@@ -1320,12 +1326,12 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     }
   } else if (currentCanvasMenu?.kind === 'sketch') {
     const source = document.features.find((feature): feature is CadSketchFeature => feature.kind === 'sketch' && feature.id === currentCanvasMenu.sketchId);
-    const target = source?.profiles.find(profile => profile.id === currentCanvasMenu.request.profileId);
+    const target = source && cadSketchProfileViews(source).find(profile => profile.id === currentCanvasMenu.request.profileId);
     if (source && target) {
       canvasMenuTitle = target.name;
       canvasMenuItems.push({ label: 'Copy outline to editable sketch', disabled: Boolean(props.sketchEdit), help: props.sketchEdit ? 'Finish or cancel sketch edits before copying an outline.' : undefined, onSelect: () => beginProfileCopy(source, target.id) });
       canvasMenuItems.push({ label: 'Configure profile', onSelect: () => { editSketch(source); setProfileId(target.id); setInspectorCollapsed(false); } },
-        { label: 'Toggle construction', onSelect: () => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...source, profiles: source.profiles.map(profile => profile.id === target.id ? { ...profile, construction: !profile.construction } : profile) } }, signal)) },
+        { label: 'Toggle construction', onSelect: () => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: withCadSketchProfile(source, { ...target, construction: !target.construction }) }, signal)) },
         { kind: 'separator' }, { label: 'Delete profile', danger: true, onSelect: () => deleteProfile(source, target.id) });
     }
   }
@@ -1421,10 +1427,13 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (geometry.kind === 'circle' || geometry.kind === 'polygon' || geometry.kind === 'rectangle' && geometry.cornerRadius === 0) {
       return addSketchGraph(createCadFreshSketchGraph({ geometry, construction, createId: () => crypto.randomUUID() }), signal);
     }
+    // A rounded rectangle or a slot is a generator, configured as its profile was; a path with arcs is kept as its lines and arcs.
     const id = crypto.randomUUID();
-    const next = { id, name: `${geometry.kind[0].toUpperCase()}${geometry.kind.slice(1)} ${sketch.profiles.length + 1}`, construction, geometry };
     props.onWorkflowChange(true);
-    return afterCadEdit(props.onEdit({ kind: 'update-feature', feature: { ...sketch, profiles: [...sketch.profiles, next] } }, signal), () => { setProfileId(id); setError(null); }, signal);
+    return afterCadEdit(props.onEditMany(cadSketchShapeEdits(sketch, geometry, { id, construction }), signal), () => {
+      if (geometry.kind === 'path') selectGraph(null); else setProfileId(id);
+      setError(null);
+    }, signal);
   };
   const addPlugin = (plugin: CadPluginPackage) => {
     try {
@@ -1499,7 +1508,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   };
   const removeSelected = () => {
     if (graphSelections.length) { deleteSketchGeometry(graphSelections[0]); return; }
-    if (sketch && profile) { submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...sketch, profiles: sketch.profiles.filter((entry) => entry.id !== profile.id) } }, signal), () => setProfileId(current => current === profile.id ? null : current)); return; }
+    if (sketch && profile) { submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: withoutCadSketchProfile(sketch, profile.id) }, signal), () => setProfileId(current => current === profile.id ? null : current)); return; }
     if (selected) setDeleteFeature(selected);
   };
   const closeSketchView = () => { setOffsetCommand(null); setAreaRepair(null); setSketchId(null); setProfileId(null); setGraphPick(null); setGraphRelationCommand(null); setTool('select'); };
@@ -1577,9 +1586,10 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     setPlacementCommand({sketchId:sketch.id,selections:graphGeometry,token:crypto.randomUUID()}); setInspectorCollapsed(false);
   };
   const exactProfileEditor = profile && sketch ? <CadProfileEditor onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} key={`${profile.id}-${cancelSignal}`} profile={profile} document={document} onInspectInput={inspectInput} onPreviewProfile={setProfilePreview} onPreviewParameters={setPreviewParameters} onApply={async (next, parameters, signal) => {
-    await props.onEditMany([...Object.entries(parameters).map(([name, value]): CadEdit => ({ kind: 'set-parameter', name, value })), { kind: 'update-feature', feature: { ...sketch, profiles: sketch.profiles.map(entry => entry.id === next.id ? next : entry) } }], signal); signal?.throwIfAborted(); setEditorPending(false);
+    await props.onEditMany([...Object.entries(parameters).map(([name, value]): CadEdit => ({ kind: 'set-parameter', name, value })), { kind: 'update-feature', feature: withCadSketchProfile(sketch, next) }], signal); signal?.throwIfAborted(); setEditorPending(false);
   }} onCancel={cancel} onPendingChange={setEditorPending} /> : null;
-  const selectedProfileEditor = profile && sketch && profile.geometry.kind !== 'plugin' ? <CadSketchProfilePanel key={`${profile.id}-${cancelSignal}`} document={document} sketch={sketch} profile={profile} command={profileCommand} onCommandConsumed={token => setProfileCommand(current => current?.token === token ? null : current)} otherEditorPending={editorPending} onEditMany={props.onEditMany} onPendingChange={setEditorPending} onPreviewProfile={setProfilePreview} onPreviewParameters={setPreviewParameters} onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} interactionLocked={sketchEditorLocked} cancelSignal={cancelSignal} exactGeometryEditor={profile.geometry.kind === 'polygon' || profile.geometry.kind === 'path' ? exactProfileEditor : undefined} /> : exactProfileEditor;
+  // A generator's shape is configured by the exact editor alone: the profile panel's dimensions belong to saved profiles.
+  const selectedProfileEditor = profile && sketch && profile.geometry.kind !== 'plugin' && !cadSketchProfileGenerator(sketch, profile.id) ? <CadSketchProfilePanel key={`${profile.id}-${cancelSignal}`} document={document} sketch={sketch} profile={profile} command={profileCommand} onCommandConsumed={token => setProfileCommand(current => current?.token === token ? null : current)} otherEditorPending={editorPending} onEditMany={props.onEditMany} onPendingChange={setEditorPending} onPreviewProfile={setProfilePreview} onPreviewParameters={setPreviewParameters} onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} interactionLocked={sketchEditorLocked} cancelSignal={cancelSignal} exactGeometryEditor={profile.geometry.kind === 'polygon' || profile.geometry.kind === 'path' ? exactProfileEditor : undefined} /> : exactProfileEditor;
   const propertyRows = useMemo(() => currentProperties ? cadPropertySummary(document, currentProperties.kind === 'body' || !propertiesFeature ? { kind: 'body' } : { kind: 'feature', feature: propertiesFeature }, displayedMeshes, feature => cadPlacementLabel(feature.plane, document.features)) : [], [currentProperties, propertiesFeature, document, displayedMeshes]);
   const propertiesView = currentProperties && <div className="cad-property-form cad-properties-summary">
     {currentProperties.kind === 'body' || !propertiesFeature ? <>
@@ -1970,9 +1980,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       return;
     }
     if (tool === 'select' && sketch && profile) {
-      submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...sketch,
-        profiles: sketch.profiles.map(entry => entry.id === profile.id ? { ...entry, construction: value } : entry)
-      } }, signal));
+      submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: withCadSketchProfile(sketch, { ...profile, construction: value }) }, signal));
       return;
     }
     setConstruction(value);
@@ -2085,7 +2093,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     onPreviewDocument={publishSketchPreview} onFeedback={reportEditFeedback} interactionLocked={sketchCommandLocked} onClose={closeValueEditor} onAccepted={closeValueEditor} /> : null;
   const specificationTree = <CadFeatureTree sketchContent={sketchRelationContent} onSectionView={sketch || curve ? undefined : plane => setSectionView({ plane })} parameterContent={parameterContent} parameterMenu={parameterMenu} selectionOnly={Boolean(props.sketchEdit || currentReferencePick || currentSketchPlaneRequest || currentSketchReferencePick)} allowPrincipalPlaneSelection={Boolean(currentSketchPlaneRequest)} selectableFeatureIds={currentSketchReferencePick ? currentSketchReferencePick.eligibleSketchIds : props.sketchEdit ? [props.sketchEdit.sketchId] : currentReferencePick?.eligibleIds ?? (currentSketchPlaneRequest ? document.features.filter(feature => feature.kind === 'datum-plane' && cadFeatureActive(feature, document)).map(feature => feature.id) : undefined)} document={document} diagnostics={build?.diagnostics} selectedId={selectedId} selectedProfileId={profileId} locked={treeLocked} onRenamePendingChange={setTreeRenamePending} cancelSignal={cancelSignal} selectedReferencePlane={typeof selectedReferencePlane === 'string' ? selectedReferencePlane : null} onSelectReferencePlane={selectReferencePlane} hoveredReferencePlane={hoveredReferencePlane} onHoverReferencePlane={hoverReferencePlane} onCreateSketch={plane => { if (!interactionState.current.locked) run(() => createSketchOnPlane(plane)); }} onRename={(feature, name, renamedProfileId, signal) => {
     if (document.features.find(entry => entry.id === feature.id) !== feature) throw new Error('The part changed. Cancel and reopen the rename editor.');
-    return props.onEdit({ kind: 'update-feature', feature: renamedProfileId && feature.kind === 'sketch' ? { ...feature, profiles: feature.profiles.map(entry => entry.id === renamedProfileId ? { ...entry, name } : entry) } : { ...feature, name } }, signal);
+    return props.onEdit({ kind: 'update-feature', feature: renamedProfileId && feature.kind === 'sketch' ? renamedProfile(feature, renamedProfileId, name) : { ...feature, name } }, signal);
   }} onContextMenuOpenChange={setTreeMenuOpen} onProperties={id => openProperties(id ? { kind: 'feature', featureId: id } : { kind: 'body' })} onChangeSketchPlane={beginChangeSketchPlane} onSuppress={(feature, suppressed) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...feature, suppressed } }, signal))} onDelete={feature => { setSelectedId(feature.id); setProfileId(null); setDeleteFeature(feature); }} onUpdateProfile={(source, next) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...source, profiles: source.profiles.map(entry => entry.id === next.id ? next : entry) } }, signal))} onDeleteProfile={deleteProfile} onCopyProfile={props.sketchEdit ? undefined : beginProfileCopy} highlightedFeatureIds={parameterUsages.map(usage => usage.featureId)} onSelect={choose} onConfigure={configureFeature} onEditSketch={editSketch} onEditCurve={editCurve} onSelectProfile={(feature, id) => { editSketch(feature); setProfileId(id); setProfileCommand(null); }} />;
 
   const header = <div className="cad-header" aria-label="CAD document commands" inert={deleteFeature || pluginsOpen || externalWorkflowOpen || currentCanvasMenu || treeMenuOpen ? true : undefined}>
@@ -2179,7 +2187,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
           : sketch?.graph && !profile && graphGeometry.length > 0 && graphRelationCommand?.kind !== 'move' && graphRelationCommand?.kind !== 'fillet' && graphRelationCommand?.kind !== 'chamfer' ? <CadSketchSelectionInspector
             key={JSON.stringify([document.id, sketch.id, graphGeometry, cancelSignal])} document={document} sketch={sketch} graph={sketch.graph} selection={graphGeometry} onEditMany={props.onEditMany}
             onPrepareEdits={props.onPrepareEdits} onPendingChange={setEditorPending} onPreviewDocument={publishSketchPreview} onFeedback={reportEditFeedback} interactionLocked={sketchCommandLocked}
-            onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })} /> : profile && sketch ? selectedProfileEditor : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
+            onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })}
+            onEditGenerator={id => { selectGraph(null); selectProfile(id); setInspectorCollapsed(false); }} /> : profile && sketch ? selectedProfileEditor : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
         </div>
       </CadInspectorTitleContext.Provider></aside>}
     </div>

@@ -33,6 +33,7 @@ import { needsCadSketchPreparation, prepareCadEdits, type CadSketchEditWarning, 
 import type { CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import type { CadSketchConstraintInspection } from './cadSketchConstraintInspection';
 import { useCadSketchEditing } from './useCadSketchEditing';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 type App = Pick<ReturnType<typeof useWorkbenchAppController>, 'connectedWorkbench' | 'workbenchInteractionLocked' | 'runAgentWorkbenchOperation'>
   & Partial<Pick<ReturnType<typeof useWorkbenchAppController>, 'showStatusToast'>>;
@@ -548,7 +549,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const { inspectCadSketchHandles } = await import('@/domain/cad/cadSketchHandles');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document, sketch = document.features.find(feature => feature.id === sketchId);
-    const profile = sketch?.kind === 'sketch' ? sketch.profiles.find(profile => profile.id === profileId) : undefined;
+    const profile = sketch?.kind === 'sketch' ? cadSketchProfileViews(sketch).find(profile => profile.id === profileId) : undefined;
     if (!profile) throw new ToolError('NOT_FOUND', 'Choose an existing profile in a sketch.');
     return inspectCadSketchHandles(profile, document.parameters);
   }
@@ -609,7 +610,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const { inspectCadPluginProfile } = await import('@/domain/cad/plugins/cadPlugins');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document, sketch = document.features.find(feature => feature.id === sketchId);
-    const profile = sketch?.kind === 'sketch' ? sketch.profiles.find(profile => profile.id === profileId) : undefined;
+    const profile = sketch?.kind === 'sketch' ? cadSketchProfileViews(sketch).find(profile => profile.id === profileId) : undefined;
     if (profile?.geometry.kind !== 'plugin') throw new ToolError('NOT_FOUND', 'Choose an existing plugin profile in a sketch.');
     const inspection = inspectCadPluginProfile(profile.geometry, document.parameters);
     return { version: expectedVersion, sketchId, profileId, pluginId: profile.geometry.package.id, pluginVersion: profile.geometry.package.version,
@@ -816,7 +817,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const { cadEntitiesToDxf } = await import('@/domain/cad/cadDxfExport');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     const notes = document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document)
-      ? feature.profiles.flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin'
+      ? cadSketchProfileViews(feature).flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin'
         ? [`${profile.geometry.package.id}@${profile.geometry.package.version}: ${profile.geometry.package.notes}`] : []) : []);
     const text = cadEntitiesToDxf(section.entities, notes);
     const fileName = `${fileBase(document.name)}-section-${section.plane}.dxf`;

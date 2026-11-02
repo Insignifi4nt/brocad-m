@@ -1,0 +1,91 @@
+import type { CadDocument, CadProfile, CadSketchFeature, CadSketchProfile } from '../cadDocument';
+import { CadError } from '../cadError';
+import type { CadEdit } from '../cadOperations';
+import type { CadSketchGenerator } from '../cadSketchGraph';
+import { deleteCadSketchElements } from '../cadSketchGraphEdits';
+import { cadSketchGeneratorPrefixFor } from './cadSketchGeneratorEdits';
+import { cadSketchGeneratorKind, cadSketchGenerators } from './cadSketchGenerators';
+
+// The shapes people configure as profiles: a sketch's saved legacy profiles, then each generator of a profile's geometry, seen as the
+// profile it replaces. The profile editor, the plugin panel, the parameter bindings and CAM notes read generators through these views,
+// so a generator is configured as a profile was, and a view's change is written back to its generator's record. A generator whose shape
+// no profile had, such as a regular polygon, has no view.
+
+export type CadSketchProfileGenerator = CadSketchGenerator & { readonly geometry: CadProfile };
+const isProfileGenerator = (generator: CadSketchGenerator): generator is CadSketchProfileGenerator => generator.geometry.kind !== 'regular-polygon';
+
+const views = new WeakMap<CadSketchGenerator, CadSketchProfile>();
+/** The profile `generator` is seen as; one object per record, so an unchanged record keeps its view. */
+function generatorProfile(generator: CadSketchProfileGenerator): CadSketchProfile {
+  let view = views.get(generator);
+  if (!view) {
+    view = Object.freeze({ id: generator.id, name: generator.name ?? cadSketchGeneratorKind(generator.geometry).label(generator.geometry),
+      construction: generator.construction, geometry: generator.geometry });
+    views.set(generator, view);
+  }
+  return view;
+}
+
+const sketchViews = new WeakMap<CadSketchFeature, readonly CadSketchProfile[]>();
+/** The sketch's legacy profiles, then its generators of profile geometry as profiles, in relation order. */
+export function cadSketchProfileViews(sketch: CadSketchFeature): readonly CadSketchProfile[] {
+  const kept = sketchViews.get(sketch);
+  if (kept) return kept;
+  const generators = sketch.graph ? cadSketchGenerators(sketch.graph).filter(isProfileGenerator) : [];
+  const result = generators.length ? Object.freeze([...sketch.profiles, ...generators.map(generatorProfile)]) : sketch.profiles;
+  if (Object.isFrozen(sketch)) sketchViews.set(sketch, result);
+  return result;
+}
+
+/** The generator the profile view `profileId` of `sketch` stands for; undefined for a legacy profile or an id with no view. */
+export function cadSketchProfileGenerator(sketch: CadSketchFeature, profileId: string): CadSketchProfileGenerator | undefined {
+  const generator = sketch.graph?.relations.find(relation => relation.id === profileId);
+  return generator?.kind === 'generator' && isProfileGenerator(generator) ? generator : undefined;
+}
+
+/**
+ * The sketch with the profile view `next` written back: a legacy profile is replaced, and a generator takes its name, construction flag
+ * and geometry, keeping its id and prefix. Its members regenerate when the edit settles.
+ */
+export function withCadSketchProfile(sketch: CadSketchFeature, next: CadSketchProfile): CadSketchFeature {
+  const generator = cadSketchProfileGenerator(sketch, next.id);
+  if (!generator || !sketch.graph) return { ...sketch, profiles: sketch.profiles.map(entry => entry.id === next.id ? next : entry) };
+  const { name: _name, ...unnamed } = generator;
+  // A name left as the one shown, the kind's own when the generator has none, is not stored.
+  const name = next.name.trim() && next.name !== generatorProfile(generator).name ? next.name : generator.name;
+  const replaced: CadSketchGenerator = { ...unnamed, ...name ? { name } : {}, construction: next.construction, geometry: next.geometry };
+  return { ...sketch, graph: { ...sketch.graph, relations: sketch.graph.relations.map(relation => relation === generator ? replaced : relation) } };
+}
+
+/** The sketch without the profile view `profileId`: a legacy profile goes alone, a generator with its members and the relations on them. */
+export function withoutCadSketchProfile(sketch: CadSketchFeature, profileId: string): CadSketchFeature {
+  if (!cadSketchProfileGenerator(sketch, profileId)) return { ...sketch, profiles: sketch.profiles.filter(entry => entry.id !== profileId) };
+  return deleteCadSketchElements({ sketch, pointIds: [], entityIds: [], relationIds: [profileId], cascade: true });
+}
+
+/**
+ * The edits that add the shape `geometry` to `sketch`, as drawing or the profile tools do: a generator with the id `id`, named for its kind
+ * and the sketch's shape count, configured afterwards as its profile was. A closed path is kept as its own lines and arcs, so it is
+ * generated and detached in the same step. No edit adds a saved profile.
+ */
+export function cadSketchShapeEdits(sketch: CadSketchFeature, geometry: CadProfile, { id, construction }: { readonly id: string; readonly construction: boolean }): CadEdit[] {
+  const name = `${geometry.kind[0].toUpperCase()}${geometry.kind.slice(1)} ${cadSketchProfileViews(sketch).length + 1}`;
+  const generator: CadSketchGenerator = { id, kind: 'generator', idPrefix: cadSketchGeneratorPrefixFor(sketch, id), name, construction, geometry };
+  return [{ kind: 'set-sketch-generator', sketchId: sketch.id, generator },
+    ...geometry.kind === 'path' ? [{ kind: 'detach-sketch-generator', sketchId: sketch.id, generatorId: id } as const] : []];
+}
+
+/**
+ * Refuses an edit batch that gives a sketch a legacy profile it did not have: saved profiles load and stay editable, but new shapes are
+ * generators or sketch geometry. `edits` run in order from `document`, so a profile added and later edited in one batch is refused once.
+ */
+export function refuseNewCadSketchProfiles(document: CadDocument, edits: readonly CadEdit[]): void {
+  const known = new Map(document.features.flatMap(feature => feature.kind === 'sketch' ? [[feature.id, new Set(feature.profiles.map(profile => profile.id))] as const] : []));
+  for (const edit of edits) {
+    if ((edit.kind !== 'add-feature' && edit.kind !== 'update-feature') || edit.feature.kind !== 'sketch') continue;
+    const had = edit.kind === 'update-feature' ? known.get(edit.feature.id) : undefined;
+    const added = edit.feature.profiles.find(profile => !had?.has(profile.id));
+    if (added) throw new CadError('legacy-sketch-profile', `Sketch "${edit.feature.id}" cannot gain the profile "${added.id}". Saved profiles stay editable, but a new shape is a generator: add it with a set-sketch-generator edit, or draw it with append-sketch-entities.`);
+    known.set(edit.feature.id, new Set(edit.feature.profiles.map(profile => profile.id)));
+  }
+}

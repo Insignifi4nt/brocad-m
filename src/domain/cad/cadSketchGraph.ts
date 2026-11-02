@@ -1,6 +1,6 @@
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import { CadIdentifierSchema, CadPoint2Schema, CadScalarSchema } from './cadPrimitives';
+import { CadIdentifierSchema, CadLabelSchema, CadPoint2Schema, CadScalarSchema } from './cadPrimitives';
 import { cadImportDataFields, isCadImportData } from './cadImportData';
 import { CadError } from './cadError';
 import { evaluateCadScalar } from './cadExpression';
@@ -46,10 +46,11 @@ const annotations = {
 export const CadSketchDimensionAnnotationSchema = Type.Union([linearAnnotation, angleAnnotation, radialAnnotation, setbacksAnnotation]);
 /**
  * Geometry a generator makes from its inputs and keeps: points, edges and relations with ids `<idPrefix>_<key>`. Only the record is stored;
- * a document's parse regenerates the rest (see `expandCadSketchGenerators`).
+ * a document's parse regenerates the rest (see `expandCadSketchGenerators`). Its optional name is what people called the shape, as a
+ * profile's name was.
  */
 export const CadSketchGeneratorSchema = Type.Object({ id, kind: Type.Literal('generator'), idPrefix: Type.String({ pattern: CAD_SKETCH_GENERATOR_PREFIX_PATTERN }),
-  construction: Type.Boolean(), geometry: CadSketchGeneratorGeometrySchema }, strict);
+  name: Type.Optional(CadLabelSchema), construction: Type.Boolean(), geometry: CadSketchGeneratorGeometrySchema }, strict);
 export const CadSketchGraphSchema = Type.Object({
   points: Type.Array(Type.Object({ id, position: CadPoint2Schema }, strict)),
   entities: Type.Array(Type.Union([

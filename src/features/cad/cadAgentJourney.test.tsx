@@ -8,6 +8,9 @@ import { loadCadDocument } from '@/domain/cad/cadStorage';
 import { parseCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
 import { parseDxf } from '@/domain/dxf/parseDxf';
 import type { CadEdit } from '@/domain/cad/cadOperations';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { storedCadDocument } from '@/domain/cad/cadStoredDocument';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { CadSession } from './cadSession';
 import { useCadController, type CadController } from './useCadController';
 import { cadSiteTools } from './cadSiteTools';
@@ -15,6 +18,10 @@ import { cadSiteTools } from './cadSiteTools';
 // These journeys use actual browser cache, parameter/geometry checks and exports.
 // Native BRep work is separately exercised by the kernel suites.
 vi.mock('./kernel/cadKernelClient', () => ({ createCadKernelClient: () => ({ dispose() {} }) }));
+// A generated shape puts its geometry in the sketch graph, which an edit solves first. These journeys' graphs hold only generated geometry,
+// which is fixed, so the solve gives each back as it is.
+vi.mock('./sketch-solver/cadSketchSolverClient', () => ({ createCadSketchSolverClient: () => ({ dispose() {}, solve: async (input: { graph: unknown }) => ({ kind: 'solved', graph: input.graph,
+  diagnostics: { status: 'success', degreesOfFreedom: 0, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } }) }) }));
 let root: Root, container: HTMLDivElement;
 beforeEach(() => {
   localStorage.clear(); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -49,15 +56,20 @@ async function mount() {
     expect(new TextEncoder().encode(JSON.stringify(response)).length).toBeLessThanOrEqual(32 * 1024);
     return object(response.data);
   }
-  return { session, call, success, workbench };
+  /** Saved profiles load and stay editable, but no agent edit adds one, so a journey that edits them starts from a draft that has them. */
+  async function legacy(edits: readonly CadEdit[]) { await act(async () => { session.edit(edits); }); }
+  return { session, call, success, legacy, workbench };
 }
 describe('CAD agent discovery and authoring journeys', () => {
   it('discovers revision-scoped grips and edits one vertex through the guarded shared operation', async () => {
-    const h = await mount();
-    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [{ kind: 'add-feature', feature: {
+    const h = await mount(), seed: CadEdit[] = [{ kind: 'add-feature', feature: {
       id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
       profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'polygon', points: [[0, 0], [20, 0], [20, 10], [0, 10]] } }]
-    } }] });
+    } }];
+    const empty = h.session.getSnapshot();
+    expect(await h.call('cad_edit_document', { expectedVersion: empty.version, edits: seed })).toMatchObject({ ok: false, error: { code: 'legacy-sketch-profile', message: expect.stringContaining('set-sketch-generator') } });
+    expect(h.session.getSnapshot()).toBe(empty);
+    await h.legacy(seed);
     const before = h.session.getSnapshot(), query = { expectedVersion: before.version, sketchId: 'outline', profileId: 'plate', offset: 1, limit: 1 };
     const contract = await h.success('cad_describe_edits', { kind: 'move-sketch-handle' });
     expect(object(contract.schema).required).toEqual(expect.arrayContaining(['sketchId', 'profileId', 'handle', 'translation']));
@@ -127,13 +139,13 @@ describe('CAD agent discovery and authoring journeys', () => {
   it('adds driving dimensions, edits displayed values and moves a sketch in one guarded undo step', async () => {
     const h = await mount();
     await h.success('cad_create_document', { expectedVersion: h.session.getSnapshot().version, name: 'Driven plate' });
-    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [
+    await h.legacy([
       { kind: 'set-parameter', name: 'span', value: 40 },
       { kind: 'add-feature', feature: { id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [
         { id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 30, height: 20, cornerRadius: 0 } },
         { id: 'bore', name: 'Bore', construction: false, geometry: { kind: 'circle', x: 15, y: 10, radius: 2 } },
       ] } },
-    ] });
+    ]);
     const free = h.session.getSnapshot();
     await h.success('cad_edit_document', { expectedVersion: free.version, edits: [
       { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'plate', constraint: { id: 'plate_width', kind: 'dimension', quantity: 'width' } },
@@ -179,7 +191,7 @@ describe('CAD agent discovery and authoring journeys', () => {
   });
   it('keeps new sketch edits atomic across dimension conflicts, driven positions and agent ownership guards', async () => {
     const h = await mount();
-    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [
+    await h.legacy([
       { kind: 'set-parameter', name: 'boreX', value: 15 },
       { kind: 'add-feature', feature: { id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [
         { id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 30, height: 20, cornerRadius: 0 } },
@@ -187,7 +199,7 @@ describe('CAD agent discovery and authoring journeys', () => {
       ] } },
       { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'plate', constraint: { id: 'plate_width', kind: 'dimension', quantity: 'width' } },
       { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'bore', constraint: { id: 'bore_diameter', kind: 'dimension', quantity: 'diameter' } },
-    ] });
+    ]);
     const before = h.session.getSnapshot();
     const conflicts = [
       ['overconstrained-sketch-dimension', { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'plate', constraint: { id: 'second_width', kind: 'dimension', quantity: 'width' } }],
@@ -225,7 +237,7 @@ describe('CAD agent discovery and authoring journeys', () => {
   });
   it('preserves shared named bindings, rejects compound-driver value edits and unlinks only an explicitly replaced scalar', async () => {
     const h = await mount();
-    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [
+    await h.legacy([
       { kind: 'set-parameter', name: 'plateSize', value: 30 }, { kind: 'set-parameter', name: 'boreRadius', value: 2 },
       { kind: 'add-feature', feature: { id: 'outline', name: 'Linked plate', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [
         { id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: ' plateSize ', height: 20, cornerRadius: 0 } },
@@ -236,7 +248,7 @@ describe('CAD agent discovery and authoring journeys', () => {
       { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'plate', constraint: { id: 'plate_width', kind: 'dimension', quantity: 'width' } },
       { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'bore', constraint: { id: 'bore_diameter', kind: 'dimension', quantity: 'diameter' } },
       { kind: 'add-sketch-dimension', sketchId: 'outline', profileId: 'compound', constraint: { id: 'compound_radius', kind: 'dimension', quantity: 'radius' } },
-    ] });
+    ]);
     const original = h.session.getSnapshot();
     const edited = await h.success('cad_edit_document', { expectedVersion: original.version, edits: [
       { kind: 'set-sketch-dimension', sketchId: 'outline', profileId: 'plate', dimensionId: 'plate_width', value: 40 },
@@ -302,22 +314,24 @@ describe('CAD agent discovery and authoring journeys', () => {
       { kind: 'set-parameter', name: 'boreRadius', value: 2 },
     ] });
     const grouped = h.session.getSnapshot(), sketch = grouped.document.features[0];
-    if (sketch.kind !== 'sketch' || sketch.profiles[0].geometry.kind !== 'plugin') throw new Error('Missing generated gear');
-    const gear = sketch.profiles[0], geometry = gear.geometry;
+    const gear = sketch.kind === 'sketch' ? sketch.graph?.relations.find((relation): relation is CadSketchGenerator => relation.kind === 'generator') : undefined;
+    if (sketch.kind !== 'sketch' || !gear) throw new Error('Missing generated gear');
+    expect(sketch.profiles).toEqual([]);
+    const geometry = gear.geometry;
     if (geometry.kind !== 'plugin') throw new Error('Missing generated gear recipe');
     const moduleAlias = geometry.inputs.module, teethAlias = geometry.inputs.teeth;
     if (typeof moduleAlias !== 'string' || typeof teethAlias !== 'string') throw new Error('Gear drivers are not linked');
     const inspected = await h.success('cad_inspect_plugin', { expectedVersion: grouped.version, sketchId: sketch.id, profileId: gear.id });
     expect(inspected.derived).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'pitchDiameter', value: 54 })]));
     await expect(h.call('cad_edit_document', { expectedVersion: grouped.version, edits: [{ kind: 'set-parameter', name: teethAlias, value: 4 }] }))
-      .resolves.toMatchObject({ ok: false });
-    expect(h.session.getSnapshot()).toBe(grouped);
+      .resolves.toMatchObject({ ok: false, error: { code: 'invalid-sketch-generator', message: expect.stringContaining('Spur gear "gear": Teeth') } });
+    // The gear's sketch is solved before the edit, so its preparation republishes the snapshot; the draft itself is unchanged.
+    expect(h.session.getSnapshot()).toMatchObject({ version: grouped.version, document: grouped.document });
+    expect(h.session.getSnapshot().document).toBe(grouped.document);
     await h.success('cad_edit_document', { expectedVersion: grouped.version, edits: [
       { kind: 'set-parameter', name: moduleAlias, value: 4 },
-      { kind: 'update-feature', feature: { ...sketch, profiles: [
-        { ...gear, geometry: { ...geometry, inputs: { ...geometry.inputs, cutterTipMode: 1, cutterTipRadius: 0.5 } } },
-        { id: 'bore', name: 'Bore', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 'boreRadius' } }
-      ] } }
+      { kind: 'set-sketch-generator', sketchId: sketch.id, generator: { ...gear, geometry: { ...geometry, inputs: { ...geometry.inputs, cutterTipMode: 1, cutterTipRadius: 0.5 } } } },
+      { kind: 'set-sketch-generator', sketchId: sketch.id, generator: { id: 'bore', kind: 'generator', idPrefix: 'bore', name: 'Bore', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 'boreRadius' } } }
     ] });
     const corrected = h.session.getSnapshot();
     const resolved = await h.success('cad_inspect_plugin', { expectedVersion: corrected.version, sketchId: sketch.id, profileId: gear.id });
@@ -340,10 +354,11 @@ describe('CAD agent discovery and authoring journeys', () => {
     await h.success('cad_export_document', { expectedVersion: version });
     const read = (blob: Blob) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsText(blob); });
     expect(parseDxf(await read(blobs[0])).entities).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'circle', radius: 2 })]));
-    expect(JSON.parse(await read(blobs[1]))).toEqual(corrected.document);
-    const exported = h.session.getSnapshot().document.features[0];
-    expect(exported.kind === 'sketch' && exported.profiles[0].geometry.kind === 'plugin' && exported.profiles[0].geometry.package).toEqual(recipe);
-    expect(exported.kind === 'sketch' && exported.profiles[0].geometry.kind === 'plugin' && exported.profiles[0].geometry.inputs.module).toBe(moduleAlias);
+    // The export carries the generator records alone; a load makes their members again.
+    expect(JSON.parse(await read(blobs[1]))).toEqual(storedCadDocument(corrected.document));
+    const exported = h.session.getSnapshot().document.features[0], exportedGear = exported.kind === 'sketch' ? cadSketchProfileViews(exported)[0]?.geometry : undefined;
+    expect(exportedGear?.kind === 'plugin' && exportedGear.package).toEqual(recipe);
+    expect(exportedGear?.kind === 'plugin' && exportedGear.inputs.module).toBe(moduleAlias);
     expect(download).toHaveBeenCalledTimes(2); expect(h.session.getSnapshot()).toMatchObject({ version, dirty: false });
   });
 });

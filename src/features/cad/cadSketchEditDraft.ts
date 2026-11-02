@@ -10,6 +10,7 @@ import { resolveCadSketchRegions } from '@/domain/cad/cadSketchGeometry';
 import type { CadSketchRegionSelection } from '@/domain/cad/cadSketchRegionSelection';
 import { CadSession, CadSessionError, type CadSessionSnapshot } from './cadSession';
 import { deepFreezeCadData } from '@/domain/cad/cadDeepFreeze';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 export type CadSketchEditDraftSource = Pick<CadSessionSnapshot, 'document' | 'version'>;
 export type CadSketchDraftPreparation = (document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) => Promise<CadDocument>;
@@ -113,8 +114,9 @@ export class CadSketchEditDraft {
     const owned = candidate.features[this.sketchIndex], original = this.initialDocument.features[this.sketchIndex];
     if (owned?.kind !== 'sketch' || owned.id !== this.pin.sketchId || original.kind !== 'sketch') throw scopeError();
     if (!same(owned.source, original.source)) throw scopeError();
-    for (const profile of original.profiles) if (profile.geometry.kind === 'plugin') {
-      const retained = owned.profiles.find(value => value.id === profile.id);
+    // A plugin instance, a saved profile or a generator, keeps its pinned package.
+    for (const profile of cadSketchProfileViews(original)) if (profile.geometry.kind === 'plugin') {
+      const retained = cadSketchProfileViews(owned).find(value => value.id === profile.id);
       if (retained && (retained.geometry.kind !== 'plugin' || !same(retained.geometry.package, profile.geometry.package))) throw scopeError();
     }
     this.parameterEdits(candidate);

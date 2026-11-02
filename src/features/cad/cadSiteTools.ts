@@ -37,6 +37,7 @@ import { resolveCadCurve } from '@/domain/cad/cadCurve';
 import { CadIdentifierSchema } from '@/domain/cad/cadPrimitives';
 import { MAX_CAD_LOFT_SECTIONS, MIN_CAD_LOFT_SECTIONS } from '@/domain/cad/cadLoft';
 import { CadFeatureInputRequestSchema } from './cadFeatureInput';
+import { refuseNewCadSketchProfiles } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const id = Type.String({ minLength: 1, maxLength: 160 });
 const version = { expectedVersion: id };
@@ -269,7 +270,7 @@ export function cadSiteTools(getController: () => CadController) {
       }
       return { version: input.expectedVersion, persisted: false, ...page(inspection.parameters, input, summary) };
     }),
-    tool('cad_construct_path', 'Construct and measure a closed analytic line/arc profile from ordered local-mm start/steps. Keeps signed major/minor arcs; adds a final straight closing edge if needed. Rejects ambiguous, crossing or zero-area geometry. Insert returned geometry with cad_edit_document using cad_describe_features(kind=sketch). No edits.', pathConstructionSchema, (_cad, input) => {
+    tool('cad_construct_path', 'Construct and measure a closed analytic line/arc path from ordered local-mm start/steps. Keeps signed major/minor arcs; adds a final straight closing edge if needed. Rejects ambiguous, crossing or zero-area geometry. Insert the returned geometry as a set-sketch-generator path; detach it to keep plain lines and arcs. No edits.', pathConstructionSchema, (_cad, input) => {
       const geometry = createCadPathProfile(input.start, input.steps);
       const resolved = resolveCadProfile(geometry, {});
       if (resolved.kind !== 'path') throw new ToolError('CONSTRUCTION_FAILED', 'The constructed profile is not an analytic path.');
@@ -325,6 +326,7 @@ export function cadSiteTools(getController: () => CadController) {
     }),
     tool('cad_edit_document', 'Apply typed edits atomically to the CAD draft: parameters, sketch geometry, grips, dimensions, relations and generators, profile copies, preceding-sketch construction references, rename, reorder or cascade deletion. One undo step; no save. Call cad_describe_edits(kind) for fields, cad_describe_features for complete add/update definitions; execution stays strict. Rejects invalid geometry, references, stale versions and active workflows. No code execution.', object({ ...version, edits: Type.Array(CadEditSchema, { minItems: 1, maxItems: 128 }) }), async (cad, input, signal) => {
       let warnings: readonly CadSketchEditWarning[] = [];
+      refuseNewCadSketchProfiles(cad.session.getSnapshot().document, input.edits);
       await cad.edit(input.edits, input.expectedVersion, true, signal, found => { warnings = found; });
       // At most eight warnings, as other edit diagnostics are listed, with how many there were.
       return { ...context(cad), ...(warnings.length ? { sketchWarnings: { items: warnings.slice(0, 8), count: warnings.length, omittedCount: Math.max(0, warnings.length - 8) } } : {}) };

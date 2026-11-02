@@ -448,3 +448,25 @@ describe('shared CAD edit preparation with the real sketch solver', () => {
     expect(checkCadSketchGraph(resized, part.parameters)).toEqual([]);
   });
 });
+
+describe('sketch generators in edit preparation', () => {
+  const circle = { id: 'hole', kind: 'generator' as const, idPrefix: 'hole', construction: false, geometry: { kind: 'circle' as const, x: 'cx', y: 0, radius: 2 } };
+  const legacy = () => parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2, parameters: { cx: 0 }, features: [{
+    id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: -10, y: -10, width: 20, height: 20, cornerRadius: 0 } }] }] });
+  it('solve a sketch once when the solver gives back the graph a settle regenerated, as it does when nothing moves', async () => {
+    const document = legacy(), calls: unknown[] = [];
+    const passThrough = { solve: async (input: Parameters<typeof solver.solve>[0]) => { calls.push(input.graph); return {
+      kind: 'solved' as const, graph: input.graph, diagnostics: { status: 'success' as const, degreesOfFreedom: 0, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } }; } };
+    const sketch = document.features[0];
+    if (sketch.kind !== 'sketch') throw new Error('Expected a sketch');
+    const prepared = await prepareCadEdits(document, [{ kind: 'set-parameter', name: 'cx', value: 4 },
+      { kind: 'update-feature', feature: { ...sketch, graph: { points: [], entities: [], relations: [circle] } } }], passThrough);
+    expect(calls).toHaveLength(1);
+    const graph = prepared.document.features[0].kind === 'sketch' ? prepared.document.features[0].graph : undefined;
+    expect(graph?.points).toEqual([{ id: 'hole_k0', position: [4, 0] }]);
+    // The real solver reaches the same document.
+    expect((await prepareCadEdits(document, [{ kind: 'set-parameter', name: 'cx', value: 4 },
+      { kind: 'update-feature', feature: { ...sketch, graph: { points: [], entities: [], relations: [circle] } } }], solver)).document).toEqual(prepared.document);
+  });
+});

@@ -12,6 +12,7 @@ import { CadTreeRename } from './CadTreeRename';
 import { cadFeatureTreeRelationships } from './cadFeatureTreeModel';
 import type { CadEditCompletion } from './useCadEditSubmission';
 import './cad-feature-tree.css';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const icons: Record<CadFeature['kind'], WorkbenchIconComponent> = {
   'datum-plane': DatumPlaneIcon, sketch: SketchIcon, curve: CurveIcon, imported: ImportedBodyIcon, extrude: PadIcon, pocket: PocketIcon, revolve: RevolveIcon,
@@ -168,7 +169,7 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
     setMenu({ document, featureId, profileId, parameters, anchor });
   };
   const menuFeature = menuCurrent?.featureId ? relationships.byId.get(menuCurrent.featureId) : undefined;
-  const menuProfile = menuFeature?.kind === 'sketch' ? menuFeature.profiles.find(profile => profile.id === menuCurrent?.profileId) : undefined;
+  const menuProfile = menuFeature?.kind === 'sketch' ? cadSketchProfileViews(menuFeature).find(profile => profile.id === menuCurrent?.profileId) : undefined;
   const menuItems: CadContextMenuItem[] = [];
   if (menuCurrent?.parameters) menuItems.push(...(parameterMenu ?? []).map(item => ({ ...item, onSelect: () => {
     setTreeView(previous => previous.branches.has('parameters') ? previous : { ...previous, branches: new Set([...previous.branches, 'parameters']) });
@@ -193,7 +194,7 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
       if (feature.kind === 'datum-plane' && cadFeatureActive(feature, document) && onSectionView) menuItems.push({ label: 'Section view', help: 'Cut the model view by this plane.', onSelect: () => onSectionView({ kind: 'datum-plane', featureId: feature.id }) });
       if (onRename) menuItems.push({ label: 'Rename feature', onSelect: () => beginRename({ kind: 'feature', featureId: feature.id }) });
       const inputs = cadFeatureDependencies(feature).flatMap(id => { const source = relationships.byId.get(id); return source ? [source] : []; });
-      if (relationships.children.get(feature.id)?.length || relationships.shared.get(feature.id)?.length || feature.kind === 'sketch' && feature.profiles.length) {
+      if (relationships.children.get(feature.id)?.length || relationships.shared.get(feature.id)?.length || feature.kind === 'sketch' && cadSketchProfileViews(feature).length) {
         menuItems.push({ label: expanded.has(feature.id) ? 'Collapse details' : 'Expand details', onSelect: () => toggle(feature.id) });
       }
       if (inputs.length) menuItems.push({ kind: 'separator' }, ...inputs.map(source => ({ label: `Select input · ${source.name}`, onSelect: () => onSelect(source.id) })));
@@ -212,7 +213,7 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
     const Icon = icons[feature.kind], selected = selectedId === feature.id, position = relationships.position.get(feature.id) ?? 0;
     const nested = relationships.children.get(feature.id) ?? [], shared = relationships.shared.get(feature.id) ?? [];
     const missing = [...new Set(cadFeatureDependencies(feature))].filter(id => !relationships.byId.has(id));
-    const profiles = feature.kind === 'sketch' ? feature.profiles : [];
+    const profiles = feature.kind === 'sketch' ? cadSketchProfileViews(feature) : [];
     const profileSelected = selected && profiles.some(profile => profile.id === selectedProfileId);
     const content = sketchContent?.sketchId === feature.id ? sketchContent.content : null;
     const expandable = nested.length > 0 || shared.length > 0 || missing.length > 0 || profiles.length > 0 || content !== null;
@@ -235,7 +236,7 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
       {expandable && open && <div id={detailsId} className="cad-feature-details">
         {nested.length > 0 && <ol className="cad-feature-list cad-feature-nested" aria-label={`${feature.name} definition`}>{nested.map(renderNode)}</ol>}
         {shared.map(sharedRow)}
-        {feature.kind === 'sketch' && feature.profiles.map(profile => {
+        {feature.kind === 'sketch' && cadSketchProfileViews(feature).map(profile => {
           const ProfileIcon = profileIcons[profile.geometry.kind];
           return renameCurrent?.target.kind === 'profile' && renameCurrent.target.featureId === feature.id && renameCurrent.target.profileId === profile.id ? <div key={profile.id}>{renameEditor(feature, profile)}</div> : <Button type="button" key={profile.id} data-cad-profile-id={profile.id} className={`cad-tree-row cad-tree-profile${selected && selectedProfileId === profile.id ? ' is-selected' : ''}`} disabled={locked || selectionOnly || Boolean(renameCurrent)}
           aria-label={`${profile.name} profile`} aria-pressed={selected && selectedProfileId === profile.id} title={`${profile.construction ? 'Construction profile' : 'Closed profile'} · ${profile.name}`} onClick={() => onSelectProfile(feature, profile.id)}

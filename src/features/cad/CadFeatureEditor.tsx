@@ -38,6 +38,7 @@ import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmis
 import { cadPreviewMarks, useCadPreparedPreview, type CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
 import { CadInspectorTitle } from './CadInspectorTitle';
+import { cadSketchProfileViews, withCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 /** Each kind's name in the history and the inspector, as its definition titles its form. */
 export const featureLabels = Object.fromEntries(cadFeatureKinds().map(kind => [kind, cadFeaturePresentation(kind).form.title])) as Record<CadFeature['kind'], string>;
@@ -414,10 +415,10 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   const [error, setError] = useState<string | null>(null);
   const [parameterDrafts, setParameterDrafts] = useState<Record<string, string>>({});
   const [bindingPending, setBindingPending] = useState(false);
-  // Each revision of the part that holds the profile accepts it again, also where it kept its object.
+  // Each revision of the part that holds the profile accepts it again, also where it kept its object. A generator is held as its view.
   const baseline = useRef({ profile, document });
   if (baseline.current.profile !== profile || baseline.current.document !== document
-    && document.features.some(feature => feature.kind === 'sketch' && feature.profiles.includes(profile))) baseline.current = { profile, document };
+    && document.features.some(feature => feature.kind === 'sketch' && cadSketchProfileViews(feature).includes(profile))) baseline.current = { profile, document };
   const accepted = baseline.current;
   useEffect(() => { setDraft(profile); setChanged(false); setError(null); setParameterDrafts({}); }, [profile, accepted]);
   useLayoutEffect(() => { onPendingChange(changed || bindingPending); }, [changed, bindingPending, onPendingChange]);
@@ -431,8 +432,8 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   const pluginIssues = [...pluginInspection?.issues ?? [], ...parameterIssues];
   const previewValid = useMemo(() => { if (pluginInspection) return !pluginInspection.issues.length; try { resolveCadProfile(geometry, effectiveParameters); return true; } catch { return false; } }, [geometry, effectiveParameters, pluginInspection]);
   const previewEdits = useMemo(() => {
-    const owner = document.features.find(feature => feature.kind === 'sketch' && feature.profiles.includes(profile));
-    return owner?.kind === 'sketch' ? cadFeatureCandidateEdits({ feature: { ...owner, profiles: owner.profiles.map(entry => entry.id === profile.id ? draft : entry) }, isNew: false, parameters: parameterEdits }) : null;
+    const owner = document.features.find(feature => feature.kind === 'sketch' && cadSketchProfileViews(feature).includes(profile));
+    return owner?.kind === 'sketch' ? cadFeatureCandidateEdits({ feature: withCadSketchProfile(owner, draft), isNew: false, parameters: parameterEdits }) : null;
   }, [document, profile, draft, parameterEdits]);
   const preparedPreview = useCadPreparedPreview(document, previewEdits, onPrepareEdits, changed && !bindingPending && !pluginIssues.length && previewValid && !submission.applying);
   useLayoutEffect(() => {

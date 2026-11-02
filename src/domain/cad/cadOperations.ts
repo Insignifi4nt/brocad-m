@@ -1,6 +1,6 @@
 import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import type { CadDocument, CadFeature, CadPoint2, CadScalar } from './cadDocument';
+import type { CadDocument, CadFeature, CadPoint2, CadScalar, CadSketchFeature } from './cadDocument';
 import { CadError } from './cadError';
 import { CadFeatureSchema, cadFeatureDependencies, parseCadDocument, withCadSketchPlacements } from './cadSchema';
 import { isCadImportData } from './cadImportData';
@@ -27,7 +27,8 @@ import { CadSketchProfileCopyRequestSchema, prepareCadSketchProfileCopy, type Ca
 import { CadSketchUseEntityRequestSchema, prepareCadSketchUseEntity, cadSketchExternalReferenceLockReason, type CadSketchUseEntityRequest } from './cadSketchExternalReferences';
 import { prepareCadSketchPatternSnapshot, reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
 import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
-import { cadSketchGeneratorLockReason } from './sketch-generators/cadSketchGenerators';
+import { cadSketchGeneratorLockReason, cadSketchGeneratorName } from './sketch-generators/cadSketchGenerators';
+import { cadSketchProfileGenerator, cadSketchProfileViews, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
 import { detachCadSketchGenerator, setCadSketchGenerator, settleCadDocumentGenerators } from './sketch-generators/cadSketchGeneratorEdits';
 
 export type CadEdit =
@@ -315,6 +316,8 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'add-sketch-dimension': case 'set-sketch-dimension': case 'remove-sketch-dimension': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch for the dimension.');
+        const generated = cadSketchProfileGenerator(feature, edit.profileId);
+        if (generated) throw new CadError('generator-sketch-dimension', `${cadSketchGeneratorName(generated)} is sized by its inputs, not by profile dimensions. Set its inputs, or bind them to parameters, with a set-sketch-generator edit.`);
         if (!feature.profiles.some(profile => profile.id === edit.profileId)) throw new CadError('missing-profile', 'The selected sketch contour no longer exists.');
         features[index] = { ...feature, profiles: feature.profiles.map(profile => {
           if (profile.id !== edit.profileId) return profile;
@@ -336,9 +339,11 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'move-sketch-handle': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to edit.');
-        if (!feature.profiles.some(profile => profile.id === edit.profileId)) throw new CadError('missing-profile', 'The selected sketch contour no longer exists.');
+        const profile = cadSketchProfileViews(feature).find(profile => profile.id === edit.profileId);
+        if (!profile) throw new CadError('missing-profile', 'The selected sketch contour no longer exists.');
         const translation = [evaluateCadScalar(edit.translation[0], parameters), evaluateCadScalar(edit.translation[1], parameters)] satisfies readonly [number, number];
-        features[index] = { ...feature, profiles: feature.profiles.map(profile => profile.id === edit.profileId ? moveCadSketchHandle({ profile, handle: edit.handle, translation, parameters }) : profile) };
+        // A generator's shape moves as its profile did; its record takes the new geometry and its members regenerate.
+        features[index] = withCadSketchProfile(feature, moveCadSketchHandle({ profile, handle: edit.handle, translation, parameters }));
         break;
       }
       case 'offset-sketch-loop': {
@@ -448,16 +453,20 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'set-sketch-generator': case 'detach-sketch-generator': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to edit.');
-        features[index] = edit.kind === 'set-sketch-generator' ? setCadSketchGenerator(feature, edit.generator) : detachCadSketchGenerator(feature, edit.generatorId);
+        // Settled at once, so later edits of the batch see the members, and a generator detached in the batch that made it keeps them.
+        const [settled] = settleCadDocumentGenerators([feature], [edit.kind === 'set-sketch-generator' ? setCadSketchGenerator(feature, edit.generator) : feature], parameters);
+        features[index] = edit.kind === 'set-sketch-generator' ? settled : detachCadSketchGenerator(settled as CadSketchFeature, edit.generatorId);
         break;
       }
       case 'translate-sketch-profiles': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch for translation.');
-        const selected = new Set(edit.profileIds);
-        if (edit.profileIds.some(id => !feature.profiles.some(profile => profile.id === id))) throw new CadError('missing-profile', 'A selected sketch contour no longer exists.');
+        const views = cadSketchProfileViews(feature);
+        if (edit.profileIds.some(id => !views.some(profile => profile.id === id))) throw new CadError('missing-profile', 'A selected sketch contour no longer exists.');
         const translation = [evaluateCadScalar(edit.translation[0], parameters), evaluateCadScalar(edit.translation[1], parameters)] satisfies readonly [number, number];
-        features[index] = { ...feature, profiles: feature.profiles.map(profile => selected.has(profile.id) ? translateCadSketchProfile({ profile, translation, parameters }) : profile) };
+        let moved: CadSketchFeature = feature;
+        for (const profile of views) if (edit.profileIds.includes(profile.id)) moved = withCadSketchProfile(moved, translateCadSketchProfile({ profile, translation, parameters }));
+        features[index] = moved;
         break;
       }
       default: { const exhaustive: never = edit; throw exhaustive; }

@@ -7,6 +7,23 @@ import {
 
 const EMPTY_GRAPH: CadSketchGraph = Object.freeze({ points: Object.freeze([]), entities: Object.freeze([]), relations: Object.freeze([]) });
 
+/** Every identity of the sketch: its points, edges, relations and legacy profiles. */
+const sketchIds = (sketch: CadSketchFeature, graph = sketch.graph ?? EMPTY_GRAPH) =>
+  [...graph.points, ...graph.entities, ...graph.relations].map(item => item.id).concat(sketch.profiles.map(profile => profile.id));
+
+/**
+ * A prefix for a new generator of `sketch`, made from `base`: its letters, digits and hyphens, other characters becoming hyphens, with a
+ * numbered suffix while its namespace is taken. The same sketch and base give the same prefix.
+ */
+export function cadSketchGeneratorPrefixFor(sketch: CadSketchFeature, base: string): string {
+  const cleaned = base.replace(/[^A-Za-z0-9-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 40) || 'g';
+  const taken = new Set(sketchIds(sketch).map(cadSketchIdNamespace));
+  for (const generator of cadSketchGenerators(sketch.graph ?? EMPTY_GRAPH)) taken.add(generator.idPrefix);
+  let prefix = cleaned;
+  for (let suffix = 2; taken.has(prefix); suffix++) prefix = `${cleaned}-${suffix}`;
+  return prefix;
+}
+
 /**
  * The sketch with the generator `generator` created, or with its inputs replaced when one with its id exists. A new generator's prefix
  * must name a namespace nothing in the sketch uses; an existing one keeps its prefix. Its members are made when the edit settles (see
@@ -22,8 +39,7 @@ export function setCadSketchGenerator(sketch: CadSketchFeature, generator: CadSk
     if (previous.idPrefix !== generator.idPrefix)
       throw new CadError('invalid-sketch-generator', `${name} keeps its id prefix "${previous.idPrefix}". Detach it and create a new generator to use another prefix.`);
   } else {
-    const ids = [...graph.points, ...graph.entities, ...graph.relations].map(item => item.id).concat(sketch.profiles.map(profile => profile.id));
-    const taken = ids.find(id => cadSketchIdNamespace(id) === generator.idPrefix);
+    const taken = sketchIds(sketch, graph).find(id => cadSketchIdNamespace(id) === generator.idPrefix);
     if (taken !== undefined) throw new CadError('invalid-sketch-generator', `${name} cannot use the id prefix "${generator.idPrefix}": sketch identity "${taken}" is already in that namespace.`);
   }
   const relations = previous ? graph.relations.map(relation => relation.id === generator.id ? generator : relation) : [...graph.relations, generator];

@@ -114,13 +114,14 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
       assertCadSketchExternalReferences({ sketch: { ...refreshed, graph: result.graph }, parameters: target.parameters, previous });
       if (!cadSketchSolutionMatchesInput(input, result.graph)) throw exact?.error() ?? new CadError('invalid-sketch-solution', 'The sketch solution changed source records or fixed geometry.');
       // Generated geometry follows the solved inputs it reads, and is solved again so the relations on it hold.
-      let graph = settleCadSketchGenerators(result.graph, refreshed.graph, target.parameters);
-      for (let pass = 0; isRegeneratedCadSketchGraph(graph); pass++) {
+      // A graph settled back as it was given was solved already, even one an earlier settle regenerated.
+      let source = result.graph, graph = settleCadSketchGenerators(source, refreshed.graph, target.parameters);
+      for (let pass = 0; graph !== source && isRegeneratedCadSketchGraph(graph); pass++) {
         if (pass === 2) throw new CadError('invalid-sketch-generator', 'The inputs of a generator keep moving with the geometry it generates. Fix the inputs it reads, or detach it.');
         const again = await solver.solve({ graph, parameters: target.parameters }, signal);
         signal?.throwIfAborted();
         if (again.kind !== 'solved') throw new CadSketchPreparationError({ sketchId: feature.id, sketchName: feature.name, graph, rejection: again });
-        graph = settleCadSketchGenerators(again.graph, graph, target.parameters);
+        source = again.graph; graph = settleCadSketchGenerators(source, graph, target.parameters);
       }
       const solved = { ...refreshed, graph };
       features.push(solved);

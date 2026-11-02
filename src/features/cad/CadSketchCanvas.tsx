@@ -59,6 +59,7 @@ import { CadSketchSplitPreview, prepareCadSketchSplitPreview, type CadSketchSpli
 import { CadSketchTrimPreview, prepareCadSketchTrimPreview, type CadSketchTrimPreview as TrimPreview,
   CadSketchExtendPreview, prepareCadSketchExtendPreview, prepareCadSketchExtendEndPreview, type CadSketchExtendPreview as ExtendPreview } from './CadSketchBoundaryPreview';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const NO_PROFILES: readonly CadSketchProfile[] = Object.freeze([]);
 const snapDraftStart = prepareCadSketchGeometrySnaps();
@@ -456,7 +457,7 @@ export function CadSketchCanvas({ sketch: sourceSketch, parameters, documentVers
   const visualGraph = useMemo(() => sketch === sourceSketch && parameters === graphSourceParameters ? sourceGraph
     : sketch.kind === 'sketch' && sketch.graph ? prepareCadSketchGraphInteraction(sketch.graph, parameters) : null, [sketch, sourceSketch, parameters, graphSourceParameters, sourceGraph]);
   const graphGeometry = useMemo(() => visualGraph && sketch.kind === 'sketch' ? { ...visualGraph.geometry, constructionIds: new Set(sketch.graph?.entities.filter(entity => entity.construction).map(entity => entity.id)) } : null, [visualGraph, sketch]);
-  const inspectedGear = inspection?.gear ? profiles.find(profile => profile.id === inspection.gear?.profileId) : null;
+  const inspectedGear = inspection?.gear ? (sketch.kind === 'sketch' ? cadSketchProfileViews(sketch) : profiles).find(profile => profile.id === inspection.gear?.profileId) : null;
   const savedCurve = useMemo(() => {
     if (sketch.kind !== 'curve' || !sketch.segments.length) return null;
     try { return resolveCadCurveGeometry(sketch, parameters); } catch { return null; }
