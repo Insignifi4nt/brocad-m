@@ -1,6 +1,8 @@
 import { CadError } from '@/domain/cad/cadError';
 import { MAX_CAD_KERNEL_MESSAGE, cadBoundedText } from '@/domain/cad/cadIssueCodes';
 
+/** The solver's module could not be loaded, as when the app was updated and the old module is gone, or the network dropped. */
+export const CAD_SKETCH_SOLVER_NOT_LOADED = 'The sketch solver could not be loaded; the app may have been updated, or the network dropped. Reload the page.';
 /** The browser refused to create the solver's worker, for example under a content security policy. */
 export const CAD_SKETCH_SOLVER_NOT_STARTED = 'The browser could not start the sketch solver. Reload the page; if this repeats, use another browser or turn off extensions that block this site\'s scripts.';
 /** The worker refused the request as it was handed over. */

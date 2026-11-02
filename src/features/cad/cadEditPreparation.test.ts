@@ -16,7 +16,8 @@ import { extendPart, lineExtend } from '@/domain/cad/__tests__/cadSketchExtendFi
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
 import { circleRow, circleRowPart, rowSketch } from '@/domain/cad/__tests__/cadSketchLinearPatternFixtures';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
-import { CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { CAD_SKETCH_SOLVER_NOT_LOADED, CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { length: 20 }, features: [{
@@ -227,6 +228,12 @@ describe('shared CAD edit preparation with the real sketch solver', () => {
     expect(canceled).not.toBeInstanceOf(CadSketchPreparationError); expect(canceled).toMatchObject({ name: 'AbortError' });
     const other = await outcome(failing(() => new Error('The sketch solve queue is full.')));
     expect(other).not.toBeInstanceOf(CadSketchPreparationError); expect(other).toMatchObject({ message: 'The sketch solve queue is full.' });
+    // A solver whose module cannot be loaded refuses the sketch the same way, with the browser's words.
+    const unloaded = await prepareCadEdits(source(), edits, createCadSketchSolverLoader(async () => { throw new TypeError('Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js'); }).solver())
+      .then(() => null, (error: unknown) => error) as CadSketchPreparationError;
+    expect(unloaded).toBeInstanceOf(CadSketchPreparationError);
+    expect(unloaded.feedback).toEqual({ sketchId: 'sketch', reason: 'failed', message: `Sketch: ${CAD_SKETCH_SOLVER_NOT_LOADED}`, subjects: [], subjectCount: 0,
+      omittedSubjectCount: 0, cause: 'solver-unavailable', kernelMessage: 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js' });
   });
 
   it('rejects a solver-projected cut and a native conflicting split batch without accepting partial topology', async () => {

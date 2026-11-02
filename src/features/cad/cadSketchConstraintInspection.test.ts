@@ -13,7 +13,9 @@ import { Value } from '@sinclair/typebox/value';
 import { CadToolEditDefinitions } from './cadToolSchemas';
 import { applyCadEdits } from '@/domain/cad/cadOperations';
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
-import { CAD_SKETCH_SOLVER_UNREADABLE, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { CAD_SKETCH_SOLVER_NOT_LOADED, CAD_SKETCH_SOLVER_UNREADABLE, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
+import type { CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import { cadSketchAnalysisIssues, cadSketchIssues } from './cadSketchIssues';
 
 const solver = createCadSketchTestSolver();
@@ -318,8 +320,19 @@ describe('accepted sketch constraint inspection', () => {
     expect(new TextEncoder().encode(JSON.stringify(summary.kernelMessage)).byteLength).toBeLessThanOrEqual(1024);
     const header = cadSketchIssues({ sketchId: 'sketch', graph: failed.graph!, version: 'v1', analysis: cadSketchAnalysisIssues(failed.analysis) });
     expect(header.refusal).toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_UNREADABLE, details: { cause: 'solver-unavailable', kernelMessage: words } });
-    // Any other failure stays an unavailable analysis without that cause, and no refusal.
-    const other = await inspectCadSketchConstraints(source(), 'sketch', async () => { throw new Error('Failed to fetch dynamically imported module'); });
+    // A solver whose module cannot be loaded, after an update or with the network down, is the same failure, and the next inspection loads it again.
+    const load = vi.fn<() => Promise<CadSketchSolverClient>>(async () => { throw new TypeError('Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js'); }), loader = createCadSketchSolverLoader(load);
+    const unloaded = await inspectCadSketchConstraints(source(), 'sketch', loader.load);
+    expect(unloaded.analysis).toMatchObject({ kind: 'unavailable', message: CAD_SKETCH_SOLVER_NOT_LOADED, cause: 'solver-unavailable', kernelMessage: 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js' });
+    expect(summarizeCadSketchConstraintAnalysis(unloaded.analysis)).toMatchObject({ cause: 'solver-unavailable', kernelMessage: 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js' });
+    expect(cadSketchIssues({ sketchId: 'sketch', graph: unloaded.graph!, version: 'v1', analysis: cadSketchAnalysisIssues(unloaded.analysis) }).refusal)
+      .toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_NOT_LOADED, details: { cause: 'solver-unavailable', kernelMessage: 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js' } });
+    load.mockResolvedValueOnce({ ...solver, dispose: () => undefined });
+    expect((await inspectCadSketchConstraints(source(), 'sketch', loader.load)).analysis).not.toHaveProperty('cause');
+    expect(load).toHaveBeenCalledTimes(2);
+    // Any other failure, such as a full queue, stays an unavailable analysis without that cause, and no refusal.
+    const other = await inspectCadSketchConstraints(source(), 'sketch', async () => ({ solve: async () => { throw new Error('The sketch solve queue is full.'); } }));
+    expect(other.analysis).toMatchObject({ kind: 'unavailable', message: 'The sketch solve queue is full.' });
     expect(other.analysis).not.toHaveProperty('cause');
     expect(summarizeCadSketchConstraintAnalysis(other.analysis)).not.toHaveProperty('cause');
     expect(cadSketchAnalysisIssues(other.analysis)).toBeNull();

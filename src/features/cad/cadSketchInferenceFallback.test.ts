@@ -12,6 +12,7 @@ import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { appendCadSketchGraphWithInferences, cadSketchInferenceNote } from './cadSketchInferenceFallback';
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
 import { CAD_SKETCH_SOLVER_STOPPED, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
 
 let solves = 0;
 const solver = createCadSketchTestSolver({ onSolve: () => { solves++; } });
@@ -107,6 +108,17 @@ describe('inferred line relations at commit', () => {
     const reported = await Promise.resolve(result).then(() => null, (error: unknown) => error);
     expect(reported).toBeInstanceOf(CadSketchPreparationError);
     expect((reported as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable' });
+    expect(attempts).toHaveLength(1); expect(onDropped).not.toHaveBeenCalled();
+  });
+
+  it('keeps every inference when the solver could not be loaded, though the next request would load it', async () => {
+    const document = levelPart(), { graph } = drawing(document, repeated), attempts: CadSketchGraph[] = [], onDropped = vi.fn();
+    const loader = createCadSketchSolverLoader(vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js')).mockResolvedValue({ ...solver, dispose: () => undefined }));
+    const result = appendCadSketchGraphWithInferences({ graph, inferredIds: ['repeat', 'plumb'], current: () => true, onDropped, submit: async next => {
+      attempts.push(next); return prepareCadEdits(document, [{ kind: 'append-sketch-entities', sketchId: 'sketch', geometry: next }], loader.solver());
+    } });
+    const reported = await Promise.resolve(result).then(() => null, (error: unknown) => error);
+    expect((reported as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable', kernelMessage: 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js' });
     expect(attempts).toHaveLength(1); expect(onDropped).not.toHaveBeenCalled();
   });
 

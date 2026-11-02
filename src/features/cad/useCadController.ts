@@ -31,7 +31,7 @@ import { CadSketchRegionReadTargetSchema, type CadSketchRegionReadTarget, type C
 import { Value } from '@sinclair/typebox/value';
 import { isCadImportData } from '@/domain/cad/cadImportData';
 import { needsCadSketchPreparation, prepareCadEdits, type CadSketchEditWarning, type CadSketchWarningsRecord } from './cadEditPreparation';
-import type { CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
+import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
 import type { CadSketchConstraintInspection } from './cadSketchConstraintInspection';
 import { useCadSketchEditing } from './useCadSketchEditing';
 
@@ -89,7 +89,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   const setViewportControls = useCallback((controls: CadWorkbenchViewportControls | null) => { viewport.current = controls; }, []);
   const busy = useRef(false);
   const preparing = useRef<AbortController | null>(null);
-  const sketchSolver = useRef<Promise<CadSketchSolverClient> | null>(null);
+  // A solver module that cannot be loaded refuses the sketch being solved, and the next request loads it again.
+  const [sketchSolvers] = useState(() => createCadSketchSolverLoader(() => import('./sketch-solver/cadSketchSolverClient').then(module => module.createCadSketchSolverClient())));
   const constraintInspections = useRef(new WeakMap<CadDocument, Map<string, CadSketchConstraintInspection>>());
   const current = useRef({ app, open }); current.current = { app, open };
   const kernel = useRef<Promise<Kernel> | null>(null);
@@ -130,22 +131,15 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     kernel.current ??= import('./kernel/cadKernelClient').then(module => module.createCadKernelClient());
     return kernel.current;
   }
-  function getSketchSolver() {
-    if (sketchSolver.current) return sketchSolver.current;
-    const pending = import('./sketch-solver/cadSketchSolverClient').then(module => module.createCadSketchSolverClient());
-    sketchSolver.current = pending;
-    void pending.catch(() => { if (sketchSolver.current === pending) sketchSolver.current = null; });
-    return pending;
-  }
   /** Prepares a previewed batch: every preview goes through here, and none looks for solve warnings. */
   async function prepareDocument(document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) {
     return needsCadSketchPreparation(document, edits)
-      ? (await prepareCadEdits(document, edits, await getSketchSolver(), signal)).document : applyCadEdits(document, edits);
+      ? (await prepareCadEdits(document, edits, sketchSolvers.solver(), signal)).document : applyCadEdits(document, edits);
   }
   /** As `prepareDocument`, with warnings about its solves, for an edit that is committed rather than previewed. */
   async function prepareCommit(document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) {
     return needsCadSketchPreparation(document, edits)
-      ? prepareCadEdits(document, edits, await getSketchSolver(), signal, { warnings: true }) : { document: applyCadEdits(document, edits), sketchWarnings: [] };
+      ? prepareCadEdits(document, edits, sketchSolvers.solver(), signal, { warnings: true }) : { document: applyCadEdits(document, edits), sketchWarnings: [] };
   }
   /**
    * Shows each warning of an accepted edit's solves as a status toast that names its sketch, and keeps them with the version that edit made, so
@@ -159,7 +153,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     let inspection = constraintInspections.current.get(source)?.get(sketchId);
     if (!inspection) {
       const { inspectCadSketchConstraints } = await import('./cadSketchConstraintInspection'); signal?.throwIfAborted();
-      inspection = await inspectCadSketchConstraints(source, sketchId, getSketchSolver, signal);
+      inspection = await inspectCadSketchConstraints(source, sketchId, sketchSolvers.load, signal);
       signal?.throwIfAborted();
     }
     return inspection;
@@ -191,7 +185,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   }, [app.connectedWorkbench?.adapter, session]);
   useEffect(() => () => {
     preparing.current?.abort();
-    void sketchSolver.current?.then(client => client.dispose(), () => undefined);
+    sketchSolvers.dispose();
     libraryAbort.current?.abort(); session.setWorkflowOpen(false, 'library');
     importAbort.current?.abort();
     buildAbort.current?.abort();
@@ -285,10 +279,10 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       const owner = new AbortController(); preparing.current = owner;
       const combined = signal ? AbortSignal.any([signal, owner.signal]) : owner.signal;
       session.setWorkflowOpen(true, 'preparation');
-      const solver = getSketchSolver();
+      const solver = sketchSolvers.solver();
       let warnings: readonly CadSketchEditWarning[] = [];
       return session.editPrepared(expectedVersion ?? source.version, async (document, signal) => {
-        const prepared = await prepareCadEdits(document, captured, await solver, signal, { warnings: true });
+        const prepared = await prepareCadEdits(document, captured, solver, signal, { warnings: true });
         warnings = prepared.sketchWarnings; return prepared.document;
       }, combined, () => {
         if (!current.current.open || current.current.app.connectedWorkbench !== workbench || current.current.app.workbenchInteractionLocked)

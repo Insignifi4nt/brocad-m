@@ -14,6 +14,7 @@ import { CadSession } from './cadSession';
 import { useCadController, type CadController } from './useCadController';
 import { cadSiteTools } from './cadSiteTools';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { CAD_SKETCH_SOLVER_NOT_LOADED } from './sketch-solver/cadSketchSolverFailure';
 import { cadSketchIssues } from './cadSketchIssues';
 import { cadAgentIssue, cadAgentIssueDigest } from './cadAgentIssues';
 import { CAD_STAR_PLUGIN, CAD_GEAR_V2_PLUGIN, createCadPluginProfile, fingerprintCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
@@ -174,6 +175,53 @@ describe('sketch solve warnings', () => {
       diagnostics: { status: 'failed', degreesOfFreedom: null, conflictingIds: ['length'], redundantIds: [], partiallyRedundantIds: [], issues: [] } }));
     expect(await tool.execute({ expectedVersion: h.session.getSnapshot().version, edits: length(' span ') })).toMatchObject({ ok: false });
     expect(toast).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a sketch edit or inspection as the solver failing when its module cannot be loaded, for the workbench and the agent alike, and loads it on the next request', async () => {
+    const toast = vi.fn(), h = await harness(false, false, toast); await act(async () => h.session.replace(inspectedSketchDocument()));
+    const words = 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js';
+    const unloaded = () => { throw new TypeError(words); };
+    sketchSolver.solve.mockImplementation(async (input: CadSketchSolveInput) => inspectedSolve(input));
+    const before = h.session.getSnapshot(), tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
+    // The workbench's edit names the sketch it was solving and the browser's words, and changes nothing.
+    createSketchClient.mockImplementationOnce(unloaded);
+    let refused: unknown;
+    await act(async () => { refused = await Promise.resolve(h.cad().edit(length(20))).then(() => null, (error: unknown) => error); });
+    expect(refused).toBeInstanceOf(CadSketchPreparationError);
+    expect((refused as CadSketchPreparationError).feedback).toMatchObject({ sketchId: 'sketch', reason: 'failed', message: `Line: ${CAD_SKETCH_SOLVER_NOT_LOADED}`,
+      cause: 'solver-unavailable', kernelMessage: words });
+    expect(h.session.getSnapshot()).toMatchObject({ document: before.document, version: before.version, workflowOpen: false });
+    // So does a preview of that edit.
+    createSketchClient.mockImplementationOnce(unloaded);
+    let previewed: unknown;
+    await act(async () => { previewed = await h.cad().preparePreviewEdits(length(20), new AbortController().signal).then(() => null, (error: unknown) => error); });
+    expect((previewed as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable', kernelMessage: words });
+    // The agent's edit and inspection give the same failure.
+    createSketchClient.mockImplementationOnce(unloaded);
+    expect(await tool('cad_edit_document').execute({ expectedVersion: before.version, edits: length(20) })).toMatchObject({ ok: false, error: { code: 'sketch-failed',
+      message: `Line: ${CAD_SKETCH_SOLVER_NOT_LOADED}`, details: { feedback: { reason: 'failed', cause: 'solver-unavailable' },
+        issue: { code: 'sketch-failed', details: { cause: 'solver-unavailable', kernelMessage: words } } } } });
+    createSketchClient.mockImplementationOnce(unloaded);
+    expect(await tool('cad_inspect_sketch_constraints').execute({ expectedVersion: before.version, sketchId: 'sketch' })).toMatchObject({ ok: true,
+      data: { analysis: { kind: 'unavailable', message: CAD_SKETCH_SOLVER_NOT_LOADED, cause: 'solver-unavailable', kernelMessage: words } } });
+    // So does a commit while the sketch is edited in place under a feature that uses it.
+    const [line] = inspectedSketchDocument().features;
+    if (line?.kind !== 'sketch' || !line.graph) throw new Error('Missing sketch');
+    await act(async () => h.session.replace(parseCadDocument({ ...inspectedSketchDocument(), features: [{ ...line, graph: { ...line.graph!, points: [...line.graph!.points, { id: 'c', position: [10, 10] }],
+      entities: [...line.graph!.entities, { id: 'rise', kind: 'line', construction: false, startPointId: 'b', endPointId: 'c' }, { id: 'fall', kind: 'line', construction: false, startPointId: 'c', endPointId: 'a' }] } },
+      { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null }] })));
+    act(() => h.cad().sketchEditing.begin('sketch'));
+    expect(h.cad().sketchEditing.sketchId).toBe('sketch');
+    createSketchClient.mockImplementationOnce(unloaded);
+    let committed: unknown;
+    await act(async () => { committed = await Promise.resolve(h.cad().sketchEditing.edit(length(20))).then(() => null, (error: unknown) => error); });
+    expect((committed as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable', kernelMessage: words });
+    act(() => h.cad().sketchEditing.cancel());
+    expect(sketchSolver.solve).not.toHaveBeenCalled();
+    // The next request loads the solver again and solves with it.
+    await act(async () => { await h.cad().edit(length(20)); });
+    expect(createSketchClient).toHaveBeenCalledTimes(6); expect(sketchSolver.solve).toHaveBeenCalledOnce();
+    expect(h.session.getSnapshot().version).not.toBe(before.version);
   });
 
   it('looks for solve warnings only once an edit is committed, never while one is previewed', async () => {
