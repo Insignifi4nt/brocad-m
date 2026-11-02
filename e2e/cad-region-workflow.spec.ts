@@ -3,7 +3,7 @@ import { expect, test } from './fixtures/native-sketch-solver';
 import type { CadDocument, CadFeature, CadSketchFeature, CadSketchProfile } from '../src/domain/cad/cadDocument';
 import type { CadSketchCellReference } from '../src/domain/cad/cadSketchRegionSelection';
 import type { CadSketchRegionProposal } from '../src/domain/cad/cadSketchRegionInspection';
-import { prepareCadTools, callCadTool as call, rawCadToolCall as raw, cadContext as context } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, rawCadToolCall as raw, cadContext as context, shapeGenerator } from './cad-tool-helpers';
 
 const original = '\uFEFF0\r\nSECTION\r\n2\r\nENTITIES\r\n0\r\nCIRCLE\r\n8\r\n0\r\n10\r\n0\r\n20\r\n0\r\n40\r\n10\r\n0\r\nCIRCLE\r\n8\r\n0\r\n10\r\n0\r\n20\r\n0\r\n40\r\n6\r\n0\r\nENDSEC\r\n0\r\nEOF\r\n';
 const circle = (id: string, radius: number, x: number | string = 0): CadSketchProfile => ({ id, name: id, construction: false, geometry: { kind: 'circle', x, y: 0, radius } });
@@ -67,11 +67,13 @@ test('agent repairs two correlated selected sources atomically through discovere
     .toMatchObject({ ok: false, error: { code: 'stale-sketch-region' } });
   expect(await context(page)).toMatchObject({ version: before.version, canUndo: false, canRedo: false });
   expect(await readChunks(page, 'cad_read_document', { expectedVersion: before.version }, 4096)).toBe(beforeText);
-  const proposedSecond: CadSketchFeature = { ...second, profiles: second.profiles.filter(profile => profile.id !== 'island').concat([circle('fresh', 1)]) };
+  // The new hole is a circle generator, since an edit can no longer add a saved profile; its region is named by its member's stable id.
+  const proposedSecond: CadSketchFeature = { ...second, profiles: second.profiles.filter(profile => profile.id !== 'island'),
+    graph: { points: [], entities: [], relations: [shapeGenerator(circle('fresh', 1))] } };
   const firstProposal: CadSketchRegionProposal = { parameterValues: { location: 50 } };
   const secondProposal: CadSketchRegionProposal = { sketch: proposedSecond, parameterValues: { location: 50 } };
   const expectedFirst: CadSketchCellReference = { boundaryProfileId: 'outer', voidProfileIds: ['island'], ancestorProfileIds: [] };
-  const expectedSecond: CadSketchCellReference = { boundaryProfileId: 'outer', voidProfileIds: ['fresh'], ancestorProfileIds: [] };
+  const expectedSecond: CadSketchCellReference = { boundaryProfileId: 'outer', voidProfileIds: ['fresh_k0'], ancestorProfileIds: [] };
   for (const [sketchId, proposal, expected, area] of [[first.id, firstProposal, expectedFirst, 96 * Math.PI], [second.id, secondProposal, expectedSecond, 99 * Math.PI]] as const) {
     expect(await call(page, 'cad_inspect_sketch_regions', { expectedVersion: before.version, sketchId, proposal, limit: 50 }))
       .toMatchObject({ version: before.version, proposed: true, total: 4, nextOffset: null, items: expect.arrayContaining([{ boundaryProfileId: 'outer', name: 'outer', kind: 'circle', depth: 0, defaultMaterial: true,

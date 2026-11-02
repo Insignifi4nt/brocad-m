@@ -3,7 +3,7 @@ import { expect, test } from './fixtures/native-sketch-solver';
 import { readFile } from 'node:fs/promises';
 import type { CadTopologyDescriptor } from '../src/domain/cad/cadTopology';
 import type { CadFeature, CadSketchFeature } from '../src/domain/cad/cadDocument';
-import { prepareCadTools as prepare, rawCadToolCall as rawCall, callCadTool as call, cadContext as context, captureCadPreview, openFeatureEditor } from './cad-tool-helpers';
+import { prepareCadTools as prepare, rawCadToolCall as rawCall, callCadTool as call, cadContext as context, captureCadPreview, generatedSketch, importCadDraft, openFeatureEditor } from './cad-tool-helpers';
 
 async function expectSavedCadReopened(page: Page, documentId: string) {
   await expect(page).toHaveURL(url => url.pathname.endsWith(`/cad/${encodeURIComponent(documentId)}`));
@@ -56,11 +56,11 @@ async function expectRenderedSolidCapture(page: Page, capture: object) {
 }
 const edits = [
   { kind: 'set-parameter', name: 'width', value: 60 },
-  { kind: 'add-feature', feature: { id: 'outline', name: 'Manufacturing outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+  { kind: 'add-feature', feature: generatedSketch({ id: 'outline', name: 'Manufacturing outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
     profiles: [
       { id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 'width', height: 40, cornerRadius: 3 } },
       { id: 'bore', name: 'Bore', construction: false, geometry: { kind: 'circle', x: 'width / 2', y: 20, radius: 5 } }
-    ] } },
+    ] }) },
   { kind: 'add-feature', feature: { id: 'pad', name: 'Pad', kind: 'extrude', suppressed: false, sketchId: 'outline', distance: 10, symmetric: false, operation: 'new', targetId: null } }
 ];
 
@@ -71,8 +71,8 @@ async function createBox(page: Page) {
   const created = await context(page);
   await call(page, 'cad_edit_document', { expectedVersion: created.version, edits: [
     { kind: 'set-parameter', name: 'width', value: 20 }, { kind: 'set-parameter', name: 'height', value: 5 },
-    { kind: 'add-feature', feature: { id: 'outline', name: 'Footprint', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
-      profiles: [{ id: 'base', name: 'Base', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 'width', height: 10, cornerRadius: 0 } }] } },
+    { kind: 'add-feature', feature: generatedSketch({ id: 'outline', name: 'Footprint', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'base', name: 'Base', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 'width', height: 10, cornerRadius: 0 } }] }) },
     { kind: 'add-feature', feature: { id: 'pad', name: 'Pad', kind: 'extrude', suppressed: false, sketchId: 'outline', distance: 'height', symmetric: false, operation: 'new', targetId: null } }
   ] });
   const draft = await context(page);
@@ -84,10 +84,10 @@ async function createBox(page: Page) {
 test('human Through-all Pocket follows target changes and exports an exact agent CAM section', async ({ page }) => {
   const { draft } = await createBox(page);
   expect(await call(page, 'cad_describe_features', { kind: 'pocket' })).toMatchObject({ kind: 'pocket', description: expect.stringContaining('through-all') });
-  await call(page, 'cad_edit_document', { expectedVersion: draft.version, edits: [{ kind: 'add-feature', feature: {
+  await call(page, 'cad_edit_document', { expectedVersion: draft.version, edits: [{ kind: 'add-feature', feature: generatedSketch({
     id: 'bore', name: 'Bore profile', kind: 'sketch', suppressed: false, plane: 'XY', offset: 'height / 2',
     profiles: [{ id: 'circle', name: 'Bore', construction: false, geometry: { kind: 'circle', x: 10, y: 5, radius: 2 } }],
-  } }] });
+  }) }] });
   const before = await context(page);
   await call(page, 'cad_build', { expectedVersion: before.version });
   await call(page, 'cad_set_viewport', { expectedVersion: before.version, command: { kind: 'select-feature', featureId: 'bore' } });
@@ -135,15 +135,10 @@ test('human Through-all Pocket follows target changes and exports an exact agent
 
 test('compact polygon properties retain multiple vertex edits and commit one shared history step', async ({ page }) => {
   await prepare(page);
-  const initial = await context(page);
-  await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Editable polygon' });
-  const blank = await context(page);
-  await call(page, 'cad_edit_document', { expectedVersion: blank.version, edits: [
-    { kind: 'set-parameter', name: 'width', value: 20 },
-    { kind: 'add-feature', feature: { id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
-      profiles: [{ id: 'boundary', name: 'Boundary', construction: false, geometry: { kind: 'polygon', points: [[0, 0], [20, 0], [20, 10], [0, 10]] } }] } },
-  ] });
-  const draft = await context(page);
+  // The polygon vertex fields edit a saved legacy profile, which only a saved draft can hold now.
+  const draft = await importCadDraft(page, [{ id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: [{ id: 'boundary', name: 'Boundary', construction: false, geometry: { kind: 'polygon', points: [[0, 0], [20, 0], [20, 10], [0, 10]] } }] }],
+  { name: 'Editable polygon', parameters: { width: 20 } });
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: draft.version }))
     .toMatchObject({ ok: true, data: { documentVersion: draft.version } });
   await call(page, 'cad_set_viewport', { expectedVersion: draft.version, command: { kind: 'edit-sketch', sketchId: 'outline' } });
@@ -224,7 +219,7 @@ test('ordered loft sections rebuild parametrically and carry an exact bored sect
   expect(await call(page, 'cad_describe_features', { kind: 'loft' })).toMatchObject({ schema: {
     required: expect.arrayContaining(['sketchIds', 'ruled', 'operation', 'targetId'])
   } });
-  const sectionSketch = (id: string, name: string, offset: number | string, radius: number): CadSketchFeature => ({
+  const sectionSketch = (id: string, name: string, offset: number | string, radius: number): CadSketchFeature => generatedSketch({
     id, name, kind: 'sketch', plane: 'XY', offset, suppressed: false,
     profiles: [{ id: `${id}_circle`, name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius } }]
   });
@@ -295,7 +290,7 @@ test('datum Loft preflight and human section editing preserve placement through 
   await prepare(page);
   await call(page, 'cad_create_document', { expectedVersion: (await context(page)).version, name: 'Tilted transition' });
   const placement = { kind: 'datum-plane' as const, featureId: 'mount' };
-  const section = (id: string, offset: number | string, radius: number): CadSketchFeature => ({
+  const section = (id: string, offset: number | string, radius: number): CadSketchFeature => generatedSketch({
     kind: 'sketch', id, name: id === 'lower' ? 'Lower section' : 'Upper section', suppressed: false, plane: placement, offset,
     profiles: [{ id: `${id}_circle`, name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius } }],
   });
@@ -364,9 +359,9 @@ test('Sweep preflight repairs placement before human creation and exact agent CA
   await prepare(page); const initial = await context(page);
   await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Swept bend' });
   const blank = await context(page);
-  const sectionSketch: CadSketchFeature = { kind: 'sketch', id: 'section', name: 'Circular section', suppressed: false,
+  const sectionSketch: CadSketchFeature = generatedSketch({ kind: 'sketch', id: 'section', name: 'Circular section', suppressed: false,
     plane: 'XY', offset: 0, profiles: [{ id: 'circle', name: 'Circle', construction: false,
-      geometry: { kind: 'circle', x: 0, y: 0, radius: 'section_radius' } }] };
+      geometry: { kind: 'circle', x: 0, y: 0, radius: 'section_radius' } }] });
   await call(page, 'cad_edit_document', { expectedVersion: blank.version, edits: [
     { kind: 'set-parameter', name: 'section_radius', value: 1 },
     { kind: 'add-feature', feature: sectionSketch },
@@ -439,9 +434,9 @@ test('datum Sweep retains authored placement through human creation, parameter r
     { kind: 'set-parameter', name: 'tilt', value: 30 }, { kind: 'set-parameter', name: 'radius', value: 1 },
     { kind: 'add-feature', feature: datum('section_plane', 'YZ') },
     { kind: 'add-feature', feature: datum('rail_plane', 'XY') },
-    { kind: 'add-feature', feature: { kind: 'sketch', id: 'section', name: 'Section', suppressed: false,
+    { kind: 'add-feature', feature: generatedSketch({ kind: 'sketch', id: 'section', name: 'Section', suppressed: false,
       plane: { kind: 'datum-plane', featureId: 'section_plane' }, offset: 0,
-      profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 'radius' } }] } },
+      profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 'radius' } }] }) },
     { kind: 'add-feature', feature: { kind: 'curve', id: 'rail', name: 'Bend rail', suppressed: false,
       plane: { kind: 'datum-plane', featureId: 'rail_plane' }, offset: 0,
       segments: [{ kind: 'line', start: [0, 0], end: [20, 0] },
@@ -511,7 +506,7 @@ test('human and agent share a parametric circular bolt-hole pattern through exac
   expect(await call(page, 'cad_describe_features', { kind: 'circular-pattern' })).toMatchObject({
     schema: { required: expect.arrayContaining(['sourceId', 'count', 'axis', 'center', 'angle']) }
   });
-  const sketch = (id: string, name: string, x: number, radius: number): CadSketchFeature => ({
+  const sketch = (id: string, name: string, x: number, radius: number): CadSketchFeature => generatedSketch({
     id, name, kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
     profiles: [{ id: `${id}_circle`, name: 'Circle', construction: false, geometry: { kind: 'circle', x, y: 0, radius } }]
   });
@@ -927,8 +922,8 @@ test('agent path construction remains read-only before exact solid, DXF and save
   await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Exact D profile' });
   const blank = await context(page);
   await call(page, 'cad_edit_document', { expectedVersion: blank.version, edits: [
-    { kind: 'add-feature', feature: { id: 'd_outline', name: 'D outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
-      profiles: [{ id: 'd_contour', name: 'D contour', construction: false, geometry: constructed.geometry }] } },
+    { kind: 'add-feature', feature: generatedSketch({ id: 'd_outline', name: 'D outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'd_contour', name: 'D contour', construction: false, geometry: constructed.geometry }] }) },
     { kind: 'add-feature', feature: { id: 'd_pad', name: 'D pad', kind: 'extrude', suppressed: false,
       sketchId: 'd_outline', distance: 5, symmetric: false, operation: 'new', targetId: null } }
   ] });
@@ -953,7 +948,7 @@ test('agent path construction remains read-only before exact solid, DXF and save
   await call(page, 'cad_open_document', { expectedVersion: reloaded.version, documentId: draft.documentId });
   const reopened = await context(page);
   expect(await call(page, 'cad_get_feature', { expectedVersion: reopened.version, featureId: 'd_outline' }))
-    .toMatchObject({ feature: { profiles: [{ geometry: constructed.geometry }] } });
+    .toMatchObject({ feature: { profiles: [], graph: { relations: [{ id: 'd_contour', kind: 'generator', geometry: constructed.geometry }] } } });
   expect(await call(page, 'cad_build', { expectedVersion: reopened.version }))
     .toMatchObject({ diagnostics: [], bodies: [{ volumeMm3: expect.closeTo(250 * Math.PI, 7) }] });
 });
@@ -1021,11 +1016,11 @@ test('world-space sketch sections render without WASM and follow the selected fe
   await prepare(page); const initial = await context(page);
   await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Visible loft sections' });
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'add-feature', feature: { id: 'lower', name: 'Lower section', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
+    { kind: 'add-feature', feature: generatedSketch({ id: 'lower', name: 'Lower section', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
       profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 12 } },
-        { id: 'construction', name: 'Construction guide', construction: true, geometry: { kind: 'circle', x: 0, y: 0, radius: 16 } }] } },
-    { kind: 'add-feature', feature: { id: 'upper', name: 'Upper section', kind: 'sketch', plane: 'XY', offset: 20, suppressed: false,
-      profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 8 } }] } },
+        { id: 'construction', name: 'Construction guide', construction: true, geometry: { kind: 'circle', x: 0, y: 0, radius: 16 } }] }) },
+    { kind: 'add-feature', feature: generatedSketch({ id: 'upper', name: 'Upper section', kind: 'sketch', plane: 'XY', offset: 20, suppressed: false,
+      profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 8 } }] }) },
   ] });
   const sections = await context(page);
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: sections.version }))
@@ -1148,9 +1143,9 @@ test('agent datum placement stays exact through reference capture, parametric so
   expect(visiblePixels, 'A plane-only draft needs a visible datum glyph').toBeGreaterThan(150);
   const placement = { kind: 'datum-plane', featureId: 'mount' };
   await call(page, 'cad_edit_document', { expectedVersion: plane.version, edits: [
-    { kind: 'add-feature', feature: { id: 'profile', name: 'Mounting profile', kind: 'sketch', suppressed: false, plane: placement, offset: 2,
+    { kind: 'add-feature', feature: generatedSketch({ id: 'profile', name: 'Mounting profile', kind: 'sketch', suppressed: false, plane: placement, offset: 2,
       profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: -10, y: -5, width: 20, height: 10, cornerRadius: 0 } },
-        { id: 'hole', name: 'Hole', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 2 } }] } },
+        { id: 'hole', name: 'Hole', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 2 } }] }) },
     { kind: 'add-feature', feature: { id: 'rail', name: 'Datum guide', kind: 'curve', suppressed: false, plane: placement, offset: 2,
       segments: [{ kind: 'line', start: [0, 0], end: [20, 0] }] } },
   ] });
@@ -1204,8 +1199,8 @@ test('the first solid fits after reference-only viewing while later rebuilds pre
   await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Tall pin' });
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
     { kind: 'set-parameter', name: 'height', value: 300 },
-    { kind: 'add-feature', feature: { id: 'section', name: 'Pin section', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
-      profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 2 } }] } }
+    { kind: 'add-feature', feature: generatedSketch({ id: 'section', name: 'Pin section', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
+      profiles: [{ id: 'circle', name: 'Circle', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 2 } }] }) }
   ] });
   const outlined = await context(page);
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: outlined.version }))
@@ -1346,8 +1341,8 @@ test('small far-origin solids retain rendered faces, edges and physical topology
   await prepare(page); const initial = await context(page);
   await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Far precision block' });
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'add-feature', feature: { id: 'section', name: 'Square', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
-      profiles: [{ id: 'square', name: 'Square', construction: false, geometry: { kind: 'rectangle', x: -1, y: -1, width: 2, height: 2, cornerRadius: 0 } }] } },
+    { kind: 'add-feature', feature: generatedSketch({ id: 'section', name: 'Square', kind: 'sketch', plane: 'XY', offset: 0, suppressed: false,
+      profiles: [{ id: 'square', name: 'Square', construction: false, geometry: { kind: 'rectangle', x: -1, y: -1, width: 2, height: 2, cornerRadius: 0 } }] }) },
     { kind: 'add-feature', feature: { id: 'pad', name: 'Block', kind: 'extrude', suppressed: false, sketchId: 'section', distance: 2, symmetric: false, operation: 'new', targetId: null } },
     { kind: 'add-feature', feature: { id: 'far', name: 'Far block', kind: 'transform', suppressed: false, sourceId: 'pad', translation: [100000000, 100000000, 100000000], rotation: [0, 0, 0] } },
   ] });

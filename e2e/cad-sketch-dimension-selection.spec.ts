@@ -1,6 +1,6 @@
 import { expect, test } from './fixtures/native-sketch-solver';
 import type { Locator, Page } from '@playwright/test';
-import { prepareCadTools, callCadTool as call, cadContext as context, historyRow } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, cadContext as context, historyRow, importCadDraft } from './cad-tool-helpers';
 
 test('selects a dimension with a click, edits it on double-click and removes selected dimensions with Delete in one undo step', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
@@ -53,7 +53,8 @@ test('keeps the selection colour on a hovered or focused dimension label or chip
     graph: { points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [40, 0] }, { id: 'c', position: [40, 30] }],
       entities: [{ id: 'base', kind: 'line', startPointId: 'a', endPointId: 'b', construction: false }, { id: 'side', kind: 'line', startPointId: 'b', endPointId: 'c', construction: false }],
       relations: [{ id: 'length', kind: 'distance', pointIds: ['a', 'b'], value: 40 }, { id: 'measured', kind: 'reference-dimension', measurement: { kind: 'line-length', entityId: 'side' } }] } };
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [{ kind: 'add-feature', feature: sketch }] });
+  // The profile's width chip is a legacy profile dimension, which only a saved draft can hold now.
+  await importCadDraft(page, [sketch]);
   await (await historyRow(page, 'Bracket')).dblclick();
   await expect(page.getByRole('button', { name: 'Finish sketch', exact: true })).toBeVisible();
   const label = (id: string) => page.locator(`[data-cad-sketch-dimension="${id}"] [role="button"]`);

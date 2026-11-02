@@ -133,13 +133,13 @@ After creating a document, `cad_edit_document` accepts this example `edits` arra
   { "kind": "set-parameter", "name": "thickness", "value": 10 },
   { "kind": "add-feature", "feature": {
     "id": "outline", "name": "Plate sketch", "kind": "sketch", "suppressed": false,
-    "plane": "XY", "offset": 0,
-    "profiles": [
-      { "id": "plate", "name": "Plate", "construction": false,
+    "plane": "XY", "offset": 0, "profiles": [],
+    "graph": { "points": [], "entities": [], "relations": [
+      { "id": "plate", "kind": "generator", "idPrefix": "plate", "name": "Plate", "construction": false,
         "geometry": { "kind": "rectangle", "x": 0, "y": 0, "width": "width", "height": 40, "cornerRadius": 3 } },
-      { "id": "hole", "name": "Bore", "construction": false,
+      { "id": "hole", "kind": "generator", "idPrefix": "hole", "name": "Bore", "construction": false,
         "geometry": { "kind": "circle", "x": "width / 2", "y": 20, "radius": 5 } }
-    ]
+    ] }
   } },
   { "kind": "add-feature", "feature": {
     "id": "pad", "name": "Pad", "kind": "extrude", "suppressed": false,
@@ -162,13 +162,32 @@ When the user picks an origin axis or the origin point in the design area, `cad_
 
 `cad_get_viewport` reports `section` as `{ "plane": "XZ", "flip": false, "caps": true }` or `null`, and, while it is drawn, `view.section` with `caps`, the clip plane's `normal` and `constant`: the view keeps points where normal · point + constant ≥ 0. The section is view state kept in the browser, never part of the document or its exports, and it turns off when its datum plane is deleted or suppressed. Picks and hover reach only the kept side; the caps are never picked. `cad_capture_preview` captures the view with its section.
 
-Create a sketch through `cad_edit_document` with a complete `add-feature` definition, including its explicit `plane`, `offset` and `profiles`. Selection is not an implicit input to that edit. Use `edit-sketch` afterward to enter drawing mode. Rendered `view.referencePlanes` lists only the installed principal XY/XZ/YZ glyphs; in the 3D view they stay installed alongside solids. Pointer hover over a plane only highlights it and does not change these lists for agents, except that a hidden datum shows while a person points at its tree row. Actual datum glyphs retain their real IDs in `referenceFeatureIds`; principal planes never become feature IDs. Plane-only capture needs the current installed reference version and membership, without loading the solid engine.
+Create a sketch through `cad_edit_document` with a complete `add-feature` definition, including its explicit `plane`, `offset` and an empty `profiles` array; its shapes go in `graph`, as above. Selection is not an implicit input to that edit. Use `edit-sketch` afterward to enter drawing mode. Rendered `view.referencePlanes` lists only the installed principal XY/XZ/YZ glyphs; in the 3D view they stay installed alongside solids. Pointer hover over a plane only highlights it and does not change these lists for agents, except that a hidden datum shows while a person points at its tree row. Actual datum glyphs retain their real IDs in `referenceFeatureIds`; principal planes never become feature IDs. Plane-only capture needs the current installed reference version and membership, without loading the solid engine.
 
 ### Sketch dimensions and direct movement
 
 Use `cad_describe_edits` without `kind` to list draft edit operations, or with a specific `kind` to read its strict fields before calling `cad_edit_document`. Registration keeps a compact edit envelope; it never relaxes execution validation. Feature bodies and plugin packages use `cad_describe_features` and `cad_describe_plugin_api` for their complete definitions.
 
-Numeric drawing coordinates and sizes remain free until explicitly dimensioned. Named or arithmetic expressions already drive their quantities. A profile's optional `constraints` array records dimension intent, while its geometry scalar stores the single driving value. `cad_describe_features` with `kind: "sketch"` returns the complete schema; `cad_get_feature` returns the current profile and constraint IDs. Constraints support these quantities:
+Numeric drawing coordinates and sizes remain free until explicitly dimensioned. Named or arithmetic expressions already drive their quantities.
+
+A shape is a generator: a `graph.relations` record with `kind: "generator"`, a fresh `id`, an `idPrefix` (a letter or digit, then up to 47 letters, digits or hyphens), optional `name`, `construction` and `geometry`. Geometry is a rectangle, circle, slot, polygon, path or plugin shape, or a `regular-polygon` with `x`, `y`, `radius`, `sides` and a `directionId` line. Its inputs size and place it; each is a number or a parameter expression. The sketch stores only the record. Its points, lines, arcs and relations regenerate on every load and edit, with stable IDs `<idPrefix>_<key>`. Members are owned: they anchor relations and dimensions on free geometry, but cannot be moved, resized or deleted alone. `set-sketch-generator` takes `sketchId` and the complete record; a record with an existing `id` replaces it, regenerating its members and remapping relations on them in one undo step. `detach-sketch-generator` takes `sketchId` and `generatorId`, removes the record and keeps its members as ordinary sketch geometry. An edit that gives a sketch a new saved profile fails with `legacy-sketch-profile`.
+
+For the plate example above, send this `edits` array to `cad_edit_document` with the current `expectedVersion`:
+
+```json
+[
+  { "kind": "set-parameter", "name": "width", "value": 72 },
+  { "kind": "set-sketch-generator", "sketchId": "outline", "generator": {
+    "id": "hole", "kind": "generator", "idPrefix": "hole", "name": "Bore", "construction": false,
+    "geometry": { "kind": "circle", "x": "width / 2", "y": 20, "radius": 6 } } },
+  { "kind": "translate-sketch-profiles", "sketchId": "outline",
+    "profileIds": ["hole"], "translation": [0, -2] }
+]
+```
+
+The plate retains `geometry.width: "width"` and becomes 72 mm wide, and the hole's linked X coordinate resolves to 36. Every other use of that shared parameter follows the change. The bore's radius input becomes 6, a 12 mm diameter.
+
+Saved legacy profiles keep an optional `constraints` array of dimension intent, while their geometry scalar stores the single driving value. `cad_describe_features` with `kind: "sketch"` returns the complete schema; `cad_get_feature` returns the current profile and constraint IDs. Constraints support these quantities:
 
 | Profile | Driving quantities |
 | --- | --- |
@@ -176,36 +195,19 @@ Numeric drawing coordinates and sizes remain free until explicitly dimensioned. 
 | Circle | `radius` or `diameter`, sharing one size |
 | Slot | `length`, `width`, `angle` |
 
-Constraint IDs must be unique within their profile. Each quantity allows one driving dimension; adding both radius and diameter to one circle fails. Path, polygon and plugin profiles do not accept these primitive dimension constraints. Plugins retain their own correlated input rules.
+Constraint IDs must be unique within their profile. Each quantity allows one driving dimension; adding both radius and diameter to one circle fails. Path, polygon and plugin profiles do not accept these primitive dimension constraints. Plugins retain their own correlated input rules. `add-sketch-dimension` takes `sketchId`, `profileId` and a `constraint` such as `{ "id": "plate_width", "kind": "dimension", "quantity": "width" }`; `set-sketch-dimension` takes `sketchId`, `profileId`, `dimensionId` and `value`. On a generator both fail with `generator-sketch-dimension`, whose message names the input that sets that size: set that input, or bind it to a parameter or expression, instead.
 
-For the plate example above, send this `edits` array to `cad_edit_document` with the current `expectedVersion`:
-
-```json
-[
-  { "kind": "add-sketch-dimension", "sketchId": "outline", "profileId": "plate",
-    "constraint": { "id": "plate_width", "kind": "dimension", "quantity": "width" } },
-  { "kind": "add-sketch-dimension", "sketchId": "outline", "profileId": "hole",
-    "constraint": { "id": "bore_diameter", "kind": "dimension", "quantity": "diameter" } },
-  { "kind": "set-sketch-dimension", "sketchId": "outline", "profileId": "plate",
-    "dimensionId": "plate_width", "value": 72 },
-  { "kind": "set-sketch-dimension", "sketchId": "outline", "profileId": "hole",
-    "dimensionId": "bore_diameter", "value": 12 },
-  { "kind": "translate-sketch-profiles", "sketchId": "outline",
-    "profileIds": ["hole"], "translation": [0, -2] }
-]
-```
-
-Adding dimension intent preserves the current size. Setting a dimension uses its displayed quantity in millimetres or angle degrees: the diameter value `12` stores radius `6`. If the size binds to one named parameter, the edit updates that parameter and preserves the exact binding. Above, `width` becomes 72, the plate retains `geometry.width: "width"`, and the hole's linked X coordinate resolves to 36. Every other use of that shared parameter follows the change. A supplied arithmetic value is evaluated before assigning the parameter; it does not replace the binding formula.
+Adding dimension intent preserves the current size. Setting a dimension uses its displayed quantity in millimetres or angle degrees: a diameter value `12` stores radius `6`. If the size binds to one named parameter, the edit updates that parameter and preserves the exact binding, so every other use of that parameter follows the change. A supplied arithmetic value is evaluated before assigning the parameter; it does not replace the binding formula.
 
 A compound driver such as `"width / 2"` rejects `set-sketch-dimension` with `driven-sketch-dimension`. Edit its referenced parameters, or deliberately replace its relation through a complete `update-feature`. A numeric, unlinked size can still receive a numeric value or a new parameter expression.
 
-The move uses the sketch's local XY axes, preserves size constraints and changes the hole's Y coordinate from 20 to 18; its expression-driven X coordinate stays linked. Direct movement supports 1–256 distinct rectangle, circle, slot, polygon or path profile IDs. A nonzero move on an expression-driven position axis fails, and one ineligible contour rejects the whole batch. Plugin placement uses its own configuration. Translation components may be parameter expressions, resolved at the edit's current document values.
+The move uses the sketch's local XY axes, preserves sizes and changes the hole's Y coordinate from 20 to 18; its expression-driven X coordinate stays linked. Direct movement supports 1–256 distinct rectangle, circle, slot, polygon or path profile IDs. A nonzero move on an expression-driven position axis fails, and one ineligible contour rejects the whole batch. Plugin placement uses its own configuration. Translation components may be parameter expressions, resolved at the edit's current document values.
 
 `remove-sketch-dimension` takes `sketchId`, `profileId` and `dimensionId`. It removes explicit intent and retains the geometry scalar, including any driving expression. Setting a named dimension to a number before removing it updates its parameter and keeps the link.
 
 For direct point editing, call `cad_inspect_sketch_handles` with the current version, `sketchId` and `profileId`. Follow its handle pages at that same version. Each grip reports its local millimetre `point`, label and whether it is `draggable`. Pass the returned `handle` unchanged to a `move-sketch-handle` edit with those owner IDs and a local XY `translation`, for example `[5, -2]`. Numeric free components move; dimensioned sizes and expression-driven components remain unchanged. Generated plugin contours stay controlled by their inputs.
 
-Entity-based sketches additionally carry a `graph`: stable `points`, `entities` and `relations`. Discover the complete graph contract with `cad_describe_features(kind="sketch")`; read actual IDs with `cad_get_feature` or chunked `cad_read_document`. Points own XY coordinates; line endpoints and arc center/start/end reference point IDs. Circles reference their center and own a radius. Open entities are valid saved sketch data. Simple closed contours connected by shared point IDs or explicit coincidence produce default material; intersecting areas require the explicit graph-cell recipe above. Intersection nodes are transient and never add saved sketch points or coincidence constraints. Keep legacy profiles and graph entities as separate sources; never duplicate one shape in both.
+Entity-based sketches additionally carry a `graph`: stable `points`, `entities` and `relations`. Discover the complete graph contract with `cad_describe_features(kind="sketch")`; read actual IDs with `cad_get_feature` or chunked `cad_read_document`. These reads return the stored form: generator records without their regenerated members. To list member IDs, page `cad_inspect_sketch_constraints` with `section: "points"` or `"entities"`. Points own XY coordinates; line endpoints and arc center/start/end reference point IDs. Circles reference their center and own a radius. Open entities are valid saved sketch data. Simple closed contours connected by shared point IDs or explicit coincidence produce default material; intersecting areas require the explicit graph-cell recipe above. Intersection nodes are transient and never add saved sketch points or coincidence constraints. Keep legacy profiles and graph entities as separate sources; never duplicate one shape in both.
 
 Use `append-sketch-entities` with `sketchId` and a `geometry` object containing `points`, `entities` and `relations`. Every appended ID must be new within that sketch, including legacy profile IDs. New entities and relations may reference existing point IDs or points in the same append. An absent graph starts empty. Coordinates, expression text and identity remain explicit; the operation never joins nearby points or replaces existing items. An explicit empty append can initialize an empty graph.
 
@@ -336,7 +338,7 @@ Rectangle corner/side grips keep the opposite corner/side fixed, preserve the co
 
 Handle indices refer to this exact accepted revision. Reinspect after any edit, undo, reorder or replacement; do not save them as persistent constraint references. All edits in a batch use the geometry produced by preceding edits, so perform topology changes separately and inspect again. The shared edit boundary rejects missing/incompatible grips, invalid contours, stale versions and pending workflows. One successful batch is one undo step and remains unsaved until Save.
 
-To explicitly unlink a size, read its complete current feature with `cad_get_feature`, copy every field and replace only the intended geometry scalar with the resolved numeric value. Keep its constraint in that copied feature. Submit the complete `update-feature` followed by `remove-sketch-dimension` for that constraint in one atomic batch with the same current version. After the example above, replacing only the plate's `geometry.width` with numeric `72` and removing `plate_width` frees that width at 72 mm. The `width` parameter and other profiles' references remain intact. Relation replacement likewise requires an explicit complete-feature edit; value editing never silently discards a driver.
+To explicitly unlink a generator's size, submit `set-sketch-generator` with that input replaced by its resolved number: after the example above, the plate's `geometry.width: 72` frees that width at 72 mm while the `width` parameter and the hole's reference remain intact. To unlink a saved legacy profile's size, read its complete current feature with `cad_get_feature`, copy every field and replace only the intended geometry scalar with the resolved numeric value. Keep its constraint in that copied feature. Submit the complete `update-feature` followed by `remove-sketch-dimension` for that constraint in one atomic batch with the same current version. Relation replacement likewise requires an explicit complete-feature edit; value editing never silently discards a driver.
 
 These edits use the same checked draft operations as the UI. Stale versions, active editors, missing IDs, conflicting dimensions and invalid geometry reject the entire batch without partial changes or an undo entry. Accepted batches create one undo step and never save automatically. Measure the resulting sketch, then rebuild its dependent solids before exporting.
 
@@ -352,7 +354,7 @@ New sketch profiles omit `role`: nesting automatically creates material, voids a
 
 For a connected line/arc outline, call `cad_construct_path` with a numeric `start` point and 1–128 ordered `steps` in local sketch millimetres. Each step is `{ "kind": "line", "end": [x, y] }` or `{ "kind": "arc", "end": [x, y], "through": [x, y] }`. An arc starts at the preceding endpoint and passes through its third point; this determines clockwise/counterclockwise direction and the short or long circular sweep. When needed, the constructor adds one final straight edge to the start. It rejects crossings, degenerate geometry and arcs that cannot retain the selected points at saved-path precision. It does not open, edit or save a document, and numeric construction does not bind parameter expressions.
 
-For example, `{ "start": [0, -10], "steps": [{ "kind": "arc", "end": [0, 10], "through": [10, 0] }] }` returns a radius-10 semicircle closed by its diameter, with area `50π` mm² and perimeter `10π + 20` mm. Use the returned `geometry` inside a sketch profile, then insert it with `cad_edit_document` and the current `expectedVersion`. The edit still checks the complete sketch, including relationships with existing contours. Construction alone does not reserve a document version or bypass an active UI workflow. The tool's 128-step request bound keeps its geometry response small; saved paths support up to 2,048 edges including closure.
+For example, `{ "start": [0, -10], "steps": [{ "kind": "arc", "end": [0, 10], "through": [10, 0] }] }` returns a radius-10 semicircle closed by its diameter, with area `50π` mm² and perimeter `10π + 20` mm. Insert the returned `geometry` as the geometry of a path generator with `set-sketch-generator`, then add `detach-sketch-generator` for it in the same `cad_edit_document` batch to keep its plain lines, arcs and joints, as human drawing does. The edit still checks the complete sketch, including relationships with existing contours. Construction alone does not reserve a document version or bypass an active UI workflow. The tool's 128-step request bound keeps its geometry response small; saved paths support up to 2,048 edges including closure.
 
 For DXF, call `cad_import_dxf` with `source: { "format": "dxf", "fileName": "profile.dxf", "text": "<complete DXF text>" }` and the current version. Recognized declared units are used automatically. For unitless files add `units: "mm"`, `"inch"`, `"cm"` or `"m"`; an explicit value conflicting with the file declaration is rejected. The result is a fresh CAD document containing an XY sketch, including exact original text as source provenance. Imported paths contain analytic line/arc segments and participate in pads, revolves, parameters, measurement and DXF export. Closed geometry is required: import does not bridge gaps, drop unsupported entities or approximate splines. Nonzero geometry elevation and thickness are rejected. CAD uses exact parsing without file-size or expanded-geometry policy ceilings; the CAM import policies below remain separate. Parsing runs in a cancellable local worker.
 
@@ -410,13 +412,13 @@ Use `cad_list_plugins` for identities, versions and `packageHash`. `cad_read_plu
 
 `cad_install_plugin` accepts a complete API 1 or 2 `package` and the current CAD `expectedVersion`. It validates defaults, relation graphs and geometry, then installs immutably into active browser-cache or folder storage. A conflicting ID/version fails without replacing its original. Finish visible editors first. Cancellation, draft version and workbench identity are rechecked at the write boundary.
 
-Discover the complete Sketch schema with `cad_describe_features` before adding `{ "kind": "plugin", "package": <complete package>, "inputs": <exact editable input map> }` as a profile geometry. Inputs may be named document expressions. API 2 package rules compute read-only derived values, conditional editing, choices, dependent ranges and constraints. Never insert derived names into the editable `inputs` map. Conditions do not erase inactive values; recipes explicitly compute effective values.
+Discover the complete Sketch schema with `cad_describe_features` before adding `{ "kind": "plugin", "package": <complete package>, "inputs": <exact editable input map> }` as a generator's geometry. Inputs may be named document expressions. API 2 package rules compute read-only derived values, conditional editing, choices, dependent ranges and constraints. Never insert derived names into the editable `inputs` map. Conditions do not erase inactive values; recipes explicitly compute effective values.
 
 Call `cad_inspect_plugin` with `expectedVersion`, `sketchId` and `profileId` to read the same resolved values, enabled states and dependent bounds used by the configuration editor. It returns bounded input/derived rows and issues for the current draft, with `persisted: false`. It does not save, change inputs or certify manufacturing. Stale versions, cancellation, absent profiles and active workflows fail. Use `cad_edit_document` to make an atomic typed change; dependent relations are checked for both profile edits and named parameter edits.
 
 Bundled Spur gear v3 adds `cutterTipMode` (`0` Automatic, `1` Custom) and `cutterTipRadius` in millimetres. Read the current `effectiveCutterTipRadius`, `minimumShift` and input bounds through `cad_inspect_plugin`; module, pressure angle and thinning affect the valid tool-radius range. Automatic shift follows the selected tool radius. Custom mode applies the radius to the generating rack envelope, rather than adding a circular gear-corner fillet. Curve tolerance still bounds real chord geometry used by solids and DXF. Existing v1/v2 instances remain pinned; replacing the complete package is an explicit model edit and can change the generated geometry. Never change an embedded package's version or implementation string alone.
 
-For a new plugin instance, use an `add-plugin-profile` edit with `sketchId`, a fresh `profileId`, `name`, the complete pinned `package`, and a fresh `groupId`. The operation adds the profile and its named driving dimensions in one undo step. Add an empty Sketch first in the same batch when necessary. Each instance receives a separate named parameter group and scoped parameter names; similarly named existing dimensions are never reused. Choices, placement values and initially inactive automatic inputs remain profile configuration. Read the returned context and profile to discover the generated names. Existing profiles and saved expressions are preserved until an explicit edit changes them.
+For a new plugin instance, use an `add-plugin-profile` edit with `sketchId`, a fresh `profileId`, `name`, the complete pinned `package`, and a fresh `groupId`. The operation adds a plugin generator with that id and its named driving parameters in one undo step. Add an empty Sketch first in the same batch when necessary. Each instance receives a separate named parameter group and scoped parameter names; similarly named existing dimensions are never reused. Choices, placement values and initially inactive automatic inputs remain profile configuration. Read the returned context and profile to discover the generated names. Existing profiles and saved expressions are preserved until an explicit edit changes them.
 
 ### Example: a module 3 gear from the library
 

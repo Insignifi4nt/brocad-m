@@ -1,12 +1,13 @@
 import { expect, test } from './fixtures/native-sketch-solver';
 import type { CadSketchFeature } from '../src/domain/cad/cadDocument';
-import { prepareCadTools, callCadTool as call, cadContext as context, historyRow } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, cadContext as context, historyRow, importCadDraft } from './cad-tool-helpers';
 
 test('places a copied major-arc detail by its anchor and angle with private recovery, exact history and saved agent parity',async({page})=>{
  await prepareCadTools(page);await call(page,'cad_open_workspace');
  const startAngle=Math.atan2(6,-8)*180/Math.PI,sweep=180+2*Math.atan2(6,8)*180/Math.PI;
  const source:CadSketchFeature={id:'source',kind:'sketch',name:'Source detail',suppressed:false,plane:'XY',offset:0,profiles:[{id:'d-profile',name:'D outline',construction:false,geometry:{kind:'path',segments:[{kind:'arc',center:[0,0],radius:10,startAngle,sweep},{kind:'line',start:[8,6],end:[-8,6]}]}}]};
- await call(page,'cad_edit_document',{expectedVersion:(await context(page)).version,edits:[{kind:'add-feature',feature:source},{kind:'copy-sketch-profile',sourceSketchId:'source',profileId:'d-profile',newSketchId:'detail',name:'Placed detail',idPrefix:'copy'},{kind:'add-feature',feature:{id:'pad',kind:'extrude',name:'Detail thickness',suppressed:false,sketchId:'detail',distance:' 5e0 ',symmetric:false,operation:'new',targetId:null}}]});
+ // The source is a saved legacy path profile, which only a saved draft can hold now.
+ await importCadDraft(page,[source]);await call(page,'cad_edit_document',{expectedVersion:(await context(page)).version,edits:[{kind:'copy-sketch-profile',sourceSketchId:'source',profileId:'d-profile',newSketchId:'detail',name:'Placed detail',idPrefix:'copy'},{kind:'add-feature',feature:{id:'pad',kind:'extrude',name:'Detail thickness',suppressed:false,sketchId:'detail',distance:' 5e0 ',symmetric:false,operation:'new',targetId:null}}]});
  let current=await context(page);const base=current;const read=(id:string)=>call(page,'cad_get_feature',{expectedVersion:current.version,featureId:id}).then(r=>r.feature),original=await read('detail');
  const edit=async()=>{await (await historyRow(page, 'Placed detail')).dblclick();await expect(page.getByRole('button',{name:'Cancel sketch edits',exact:true})).toBeVisible();};
  const open=async()=>{for(const [i,e]of original.graph.entities.entries())await page.locator(`[data-cad-sketch-entity="${e.id}"]`).press(i?'Shift+Enter':'Enter');await page.getByRole('button',{name:'Move selection',exact:true}).click();await page.getByRole('button',{name:'Place and rotate…',exact:true}).click();await expect(page.getByRole('form',{name:'Place and rotate',exact:true})).toBeVisible();};

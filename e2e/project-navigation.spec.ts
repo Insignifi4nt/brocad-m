@@ -1,14 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
-import { prepareCadTools, callCadTool as call, cadContext as context } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, cadContext as context, generatedSketch } from './cad-tool-helpers';
 
 test('saved CAD survives dashboard reopen, browser history, direct reload and STEP export', async ({ page }) => {
   await prepareCadTools(page);
   const initial = await context(page);
   await call(page, 'cad_create_document', { expectedVersion: initial.version, name: 'Saved routing part' });
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'add-feature', feature: { id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
-      profiles: [{ id: 'rectangle', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } }] } },
+    { kind: 'add-feature', feature: generatedSketch({ id: 'outline', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'rectangle', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } }] }) },
     { kind: 'add-feature', feature: { id: 'pad', name: 'Thickness', kind: 'extrude', suppressed: false, sketchId: 'outline', distance: 5, symmetric: false, operation: 'new', targetId: null } }
   ] });
   const saved = await call(page, 'cad_save_document', { expectedVersion: (await context(page)).version });

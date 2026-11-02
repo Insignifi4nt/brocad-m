@@ -1,15 +1,15 @@
 import { expect, test } from './fixtures/native-sketch-solver';
-import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, importCadDraft } from './cad-tool-helpers';
 
 test('edits a free sketch vertex directly, cancels cleanly and preserves the contour through undo and save', async ({ page }) => {
   await prepareCadTools(page);
   await call(page, 'cad_open_workspace');
-  await call(page, 'cad_create_document', { expectedVersion: (await context(page)).version, name: 'Editable plate' });
   const points = [[0, 0], [20, 0], [20, 10], [0, 10]];
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [{ kind: 'add-feature', feature: {
+  // Profile grips edit saved legacy profiles, which only a saved draft can hold now.
+  await importCadDraft(page, [{
     kind: 'sketch', id: 'outline', name: 'Outline', suppressed: false, plane: 'XY', offset: 0,
     profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'polygon', points } }]
-  } }] });
+  }], { name: 'Editable plate' });
   const initial = await context(page);
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: initial.version }))
     .toMatchObject({ ok: true, data: { view: { available: true, referenceVersion: initial.version } } });
@@ -59,18 +59,18 @@ test('edits a free sketch vertex directly, cancels cleanly and preserves the con
 test('edits slot sizes and an analytic arc joint without translating their profiles', async ({ page }) => {
   await prepareCadTools(page);
   await call(page, 'cad_open_workspace');
-  await call(page, 'cad_create_document', { expectedVersion: (await context(page)).version, name: 'Editable curves' });
   const arc = { kind: 'path', segments: [
     { kind: 'arc', center: [0, 0], radius: 10, startAngle: 0, sweep: 180 },
     { kind: 'line', start: [-10, 0], end: [10, 0] }
   ] };
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [{ kind: 'add-feature', feature: {
+  // Slot size grips edit saved legacy profiles, which only a saved draft can hold now.
+  await importCadDraft(page, [{
     kind: 'sketch', id: 'curves', name: 'Curves', suppressed: false, plane: 'XY', offset: 0,
     profiles: [
       { id: 'slot', name: 'Slot', construction: false, geometry: { kind: 'slot', x: 40, y: 0, length: 20, width: 10, angle: 0 } },
       { id: 'arc', name: 'Arc', construction: false, geometry: arc }
     ]
-  } }] });
+  }], { name: 'Editable curves' });
   const initial = await context(page);
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: initial.version }))
     .toMatchObject({ ok: true, data: { view: { available: true, referenceVersion: initial.version } } });

@@ -1,6 +1,6 @@
 import { expect, test } from './fixtures/native-sketch-solver';
 import type { CadSketchFeature } from '../src/domain/cad/cadDocument';
-import { prepareCadTools, callCadTool as call, cadContext as context, historyRow } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, cadContext as context, historyRow, importCadDraft } from './cad-tool-helpers';
 
 test('copies a generated outline into an independent editable sketch, rounds one corner and reopens its solid', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
@@ -11,8 +11,8 @@ test('copies a generated outline into an independent editable sketch, rounds one
       generator: { kind: 'polygon-recipe', repeat: 1, points: [[0, 0], ['width', 0], ['width', 20], [0, 20]] }
     } } }
   ] };
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'set-parameter', name: 'profileWidth', value: 40 }, { kind: 'set-parameter', name: 'lift', value: 2 }, { kind: 'add-feature', feature: source }] });
+  // The canvas profile menu copies a saved legacy profile, which only a saved draft can hold now.
+  await importCadDraft(page, [source], { parameters: { profileWidth: 40, lift: 2 } });
   await page.getByRole('button', { name: 'Expand Generated plate', exact: true }).click();
   let current = await context(page); const base = current;
   const read = (id: string) => call(page, 'cad_get_feature', { expectedVersion: current.version, featureId: id }).then(reply => reply.feature);

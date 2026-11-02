@@ -478,6 +478,13 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       const graph = keepCadSketchLineSides(previous.graph, feature.graph);
       return graph === feature.graph ? feature : { ...feature, graph };
     });
+    // A sketch the edit rewrote regenerates its generators at once, so a later edit of the batch sees their members and may change the
+    // same generator again, as moving a shape after setting its inputs does.
+    const changed = features.filter(feature => before.get(feature.id) !== feature);
+    if (changed.length) {
+      const settled = new Map(settleCadDocumentGenerators([...before.values()], changed, parameters).map(feature => [feature.id, feature]));
+      features = features.map(feature => settled.get(feature.id) ?? feature);
+    }
   }
   // Generated geometry follows the edited inputs and parameters in the same step, so one undo restores both.
   features = settleCadDocumentGenerators(document.features, features, parameters);

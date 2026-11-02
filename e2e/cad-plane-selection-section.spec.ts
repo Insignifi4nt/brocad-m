@@ -3,7 +3,7 @@ import type { Page, TestInfo } from '@playwright/test';
 import initOpenCascade from 'replicad-opencascadejs';
 import { exportSTEP, makeBox, setOC } from 'replicad';
 import { expect, test } from './fixtures/native-sketch-solver';
-import { prepareCadTools, callCadTool as call, cadContext as context } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, cadContext as context, generatedSketch } from './cad-tool-helpers';
 
 // Three 10 mm tall blocks below the XY plane, z -30 to -20, all at negative X so the origin planes and axes are clear of them in the
 // Top, Front and Right views. Front stands at y < 0 and Back at y > 0; Bar crosses y = 0, so a cut by the XZ plane opens it.
@@ -99,7 +99,7 @@ async function openViewControls(page: Page) {
 
 test('picks each origin plane, axis and the origin point in 3D, and starts a sketch on a picked plane', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: document.version })).bodies).toHaveLength(3);
   await expect.poll(async () => (await viewport(page)).view).toMatchObject({ mode: 'solid', available: true, referenceVersion: document.version });
@@ -135,7 +135,7 @@ test('picks each origin plane, axis and the origin point in 3D, and starts a ske
 
 test('cuts a section view by a picked plane, caps it, flips it, picks through the cut and turns off with Escape', async ({ page }, info) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: document.version })).bodies).toHaveLength(3);
   await expect.poll(async () => (await viewport(page)).view).toMatchObject({ mode: 'solid', available: true, referenceVersion: document.version });
@@ -241,7 +241,7 @@ test('selects a loop on a double-click, a tangent chain with Alt and the tangent
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
   // Bar rounded 3 mm at its corners: its top is a loop of four lines and four arcs, all tangent, and its sides one smooth run of eight faces.
   const rounded = [...block('front', -40, -30, 10, 20), ...block('back', -40, 10, 10, 20), ...block('bar', -25, -5, 10, 10, 3)];
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: rounded.map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: rounded.map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: document.version })).bodies).toHaveLength(3);
   await expect.poll(async () => (await viewport(page)).view).toMatchObject({ mode: 'solid', available: true, referenceVersion: document.version });
@@ -265,7 +265,7 @@ test('never picks an edge the section removes from just beside the cut, and pick
   // span, so the origin planes and their labels keep their sizes.
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
   const sliver = block('sliver', -12, -10, 4, 9.9);
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [...features, ...sliver].map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [...features, ...sliver].map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: document.version })).bodies).toHaveLength(4);
   await expect.poll(async () => (await viewport(page)).view).toMatchObject({ mode: 'solid', available: true, referenceVersion: document.version });
@@ -291,7 +291,7 @@ test('never picks an edge the section removes from just beside the cut, and pick
 
 test('caps a cut round body with a bore while the camera stands inside the kept material, and while the near plane cuts it', async ({ page }, info) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   expect((await call(page, 'cad_build', { expectedVersion: (await context(page)).version })).bodies).toHaveLength(3);
   // Fitted to the blocks, the Front view's camera stands 200 mm before them, at y = -200, looking along +Y, its near plane 0.01 mm ahead.
   // The view does not fit again on a rebuild, so it stays there while the round tunnel below grows around it.
@@ -317,7 +317,7 @@ test('caps a cut round body with a bore while the camera stands inside the kept 
   };
 
   // The camera at y = -200 stands inside the tunnel, which reaches back to y = -400.
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [...tunnel(-400), ...bore].map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [...tunnel(-400), ...bore].map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const inside = await capped('caps-camera-inside');
   // The tunnel ends 0.005 mm before the camera, inside the near distance, so the near plane cuts it and its end face is not drawn.
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [{ kind: 'update-feature', feature: tunnel(-199.995)[1] }] });
@@ -344,7 +344,7 @@ test('caps an imported body whose solids lie one inside another or overlap, and 
     { id, name: id, kind: 'extrude', suppressed: false, sketchId: `${id}-sketch`, distance: height, symmetric: false, operation: cut ? 'cut' : 'new', targetId: cut ? 'bar' : null }];
   const solids = [...features, ...box('outer', -40, -8, 10, 16, -30, 10), ...box('inner', -37, -2, 4, 4, -27, 4), ...box('overlap', -32, -4, 5.5, 8, -29, 8),
     ...box('pocket', -22, -2, 4, 4, -27, 4, true)];
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: solids.map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: solids.map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const source = await context(page);
   const built = await call(page, 'cad_build', { expectedVersion: source.version });
   expect(built.diagnostics).toEqual([]); expect(built.bodies).toHaveLength(6);

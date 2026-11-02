@@ -48,6 +48,10 @@ describe('generators seen as the profiles they replace', () => {
     expect(sketchOf(moved).graph?.points.find(point => point.id === 'plate_v1')?.position).toEqual([25, -2]);
     const translated = applyCadEdits(document, [{ kind: 'translate-sketch-profiles', sketchId: 'sketch', profileIds: ['plate'], translation: [1, 1] }]);
     expect(sketchOf(translated).graph?.relations[0]).toMatchObject({ geometry: { points: [[1, 1], [21, 1], [21, 11], [1, 11]] } });
+    // A batch may set a generator's inputs and then move it: each edit regenerates the members the next one reads.
+    const resized = applyCadEdits(document, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...plate, geometry: { kind: 'polygon', points: [[0, 0], [30, 0], [30, 10], [0, 10]] } } },
+      { kind: 'translate-sketch-profiles', sketchId: 'sketch', profileIds: ['plate'], translation: [1, 1] }]);
+    expect(sketchOf(resized).graph?.points.find(point => point.id === 'plate_v1')?.position).toEqual([31, 1]);
     // A position that follows a parameter cannot be dragged, as with a profile.
     expect(refusal(() => applyCadEdits(document, [{ kind: 'translate-sketch-profiles', sketchId: 'sketch', profileIds: ['bore'], translation: [1, 0] }])))
       .toMatchObject({ code: 'driven-sketch-position' });
