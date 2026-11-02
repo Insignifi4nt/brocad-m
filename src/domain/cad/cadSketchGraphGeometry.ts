@@ -86,6 +86,8 @@ function generatedUnits(graph: CadSketchGraph, prepared: readonly Prepared[], to
 
 /** Simple declared-joint cycles only. No endpoint healing, coordinate merging or implicit graph edits. */
 export function compileCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>): CadSketchGraphGeometry {
+  // Every member is checked here, trusted at acceptance or not: these checks measure geometry against tolerances, which kind code
+  // cannot show it meets by construction (see `acceptCadSketchGraphWithMembers`).
   const issues = checkCadSketchGraph(graph, parameters);
   if (issues.length) throw new CadError('invalid-sketch-graph-geometry', `${issues[0].source.id}: ${issues[0].message}`);
   const points = new Map(graph.points.map(point => [point.id, { x: evaluateCadScalar(point.position[0], parameters), y: evaluateCadScalar(point.position[1], parameters) }]));

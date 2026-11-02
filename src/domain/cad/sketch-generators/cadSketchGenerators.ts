@@ -2,7 +2,7 @@ import { Value } from '@sinclair/typebox/value';
 import { CadError } from '../cadError';
 import { evaluateCadScalar } from '../cadExpression';
 import {
-  acceptCadSketchGraph, detachCadSketchGraph, isAcceptedCadSketchGraph, trustCadSketchGeneratedItems,
+  acceptCadSketchGraph, acceptCadSketchGraphWithMembers, detachCadSketchGraph, isAcceptedCadSketchGraph, trustCadSketchGeneratedItems,
   type CadSketchGenerator, type CadSketchGeneratorGeometry, type CadSketchGraph, type CadSketchGraphEntity, type CadSketchGraphIssue,
   type CadSketchGraphPoint, type CadSketchGraphRelation
 } from '../cadSketchGraph';
@@ -300,10 +300,9 @@ function carriesExactly(carried: Split['carried'] extends ReadonlyMap<string, in
   return true;
 }
 function accepted(stored: Split, generations: readonly Generation[], graph: CadSketchGraph, parameters: Parameters, relations = stored.relations): CadSketchGraph {
-  const result = acceptCadSketchGraph({ ...graph,
-    points: [...stored.points, ...generations.flatMap(item => item.members.points)],
-    entities: [...stored.entities, ...generations.flatMap(item => item.members.entities)],
-    relations: [...relations, ...generations.flatMap(item => item.members.relations)] });
+  // The members are the lists generation made, which acceptance trusts without checking each again.
+  const result = acceptCadSketchGraphWithMembers({ ...graph, points: stored.points, entities: stored.entities, relations },
+    generations.map(({ generator, members }) => ({ idPrefix: generator.idPrefix, ...members })));
   markSettled(result, generations, parameters);
   return result;
 }

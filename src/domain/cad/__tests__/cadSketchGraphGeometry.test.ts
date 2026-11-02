@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraph, type CadSketchGraphEntity } from '../cadSketchGraph';
+import { setCadDevelopmentChecks } from '../cadDevelopmentChecks';
+import { expandCadSketchGenerators } from '../sketch-generators/cadSketchGenerators';
 import { resolveCadSketchPointIdentities } from '../cadSketchGraphJoints';
 import { CadError } from '../cadError';
 import { compileCadSketchGraph } from '../cadSketchGraphGeometry';
@@ -167,7 +169,7 @@ describe('identity-connected sketch graph geometry', () => {
     ], relations: [] }), {});
     expect(duplicate.cycles).toEqual([]); expect(duplicate.arrangementEntityIds).toEqual(['one', 'two']);
   });
-  it('walks cycles, open chains and branches as plain lookups by joint find them, in every source order and direction', () => {
+  it('walks cycles, open chains and branches as plain lookups by joint find them, in every source order and direction, with generated members trusted or checked', () => {
     // The reference: each pass's edges in id order, each joint's edges as a list, components by search, cycles walked from the first edge.
     const reference = (graph: CadSketchGraph) => {
       const joint = resolveCadSketchPointIdentities(graph), cycles: { construction: boolean; sourceRefs: { entityId: string; reversed: boolean }[] }[] = [];
@@ -205,9 +207,10 @@ describe('identity-connected sketch graph geometry', () => {
       }
       return { cycles, open: open.sort(), branched: branched.sort() };
     };
-    let seed = 7, compared = 0, refused = 0;
+    const walk = () => {
+    let seed = 7, compared = 0, refused = 0, generated = 0, walkedGenerated = 0;
     const random = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
-    const found = { cycles: 0, open: 0, branched: 0 };
+    const found = { cycles: 0, open: 0, branched: 0 }, outcomes: string[] = [];
     for (let trial = 0; trial < 600; trial++) {
       const count = 3 + Math.floor(random() * 10), grid = 2 + Math.floor(random() * 5);
       const points = Array.from({ length: count }, (_, at) => ({ id: `p${String(at).padStart(2, '0')}`, position: [Math.floor(random() * grid) * 10, Math.floor(random() * grid) * 10] }));
@@ -225,20 +228,40 @@ describe('identity-connected sketch graph geometry', () => {
       const relations: Record<string, unknown>[] = [];
       for (let at = 0; at < count; at++) for (let other = at + 1; other < count; other++)
         if (points[at].position.every((value, axis) => value === points[other].position[axis]) && random() < 0.6) relations.push({ id: `k${at}_${other}`, kind: 'coincident', pointIds: [points[at].id, points[other].id] });
+      // A generated rectangle on the grid in some trials, drawn from a stream of its own so the other trials stay as they were, sometimes
+      // sharing its first corner with a point.
+      let mark = trial * 7919 + 1;
+      const pick = () => { mark = (mark * 1103515245 + 12345) & 0x7fffffff; return mark / 0x7fffffff; };
+      if (pick() < 0.35) {
+        const x = Math.floor(pick() * grid) * 10, y = Math.floor(pick() * grid) * 10, round = pick() < 0.5;
+        relations.push({ id: 'gen', kind: 'generator', idPrefix: 'gen', construction: pick() < 0.2,
+          geometry: { kind: 'rectangle', x, y, width: 10 + Math.floor(pick() * 2) * 10, height: 10, cornerRadius: round ? 2 : 0 } });
+        const corner = points.findIndex(point => point.position[0] === x && point.position[1] === y);
+        if (!round && corner >= 0 && pick() < 0.7) relations.push({ id: 'tie', kind: 'coincident', pointIds: ['gen_p0', points[corner].id] });
+        generated += 1;
+      }
       let graph: CadSketchGraph, compiled: ReturnType<typeof compileCadSketchGraph>;
-      try { graph = parseCadSketchGraph({ points, entities, relations }); } catch { continue; }
+      try { graph = expandCadSketchGenerators({ points, entities, relations }, {}); } catch (error) { outcomes.push(`parse ${(error as CadError).code}`); continue; }
       try { compiled = compileCadSketchGraph(graph, {}); } catch (error) {
         // Only an edge too short to join, or geometry the check refuses, stops the walk: a cycle it starts always closes.
         expect(error).toBeInstanceOf(CadError); expect((error as CadError).code).toMatch(/^(sketch-graph-precision|invalid-sketch-graph-geometry)$/);
-        refused += 1; continue;
+        outcomes.push(`compile ${(error as CadError).code}`); refused += 1; continue;
       }
       const expected = reference(graph), arrangement = new Set(compiled.arrangementEntityIds);
       expect({ cycles: compiled.cycles.map(cycle => ({ construction: cycle.construction, sourceRefs: cycle.sourceRefs })), open: compiled.openEntityIds, branched: compiled.branchedEntityIds })
         .toEqual({ ...expected, cycles: expected.cycles.filter(cycle => cycle.sourceRefs.every(ref => !arrangement.has(ref.entityId)))
           .sort((a, b) => a.sourceRefs[0].entityId < b.sourceRefs[0].entityId ? -1 : 1) });
+      outcomes.push(`walk ${JSON.stringify([compiled.cycles.map(cycle => cycle.sourceRefs), compiled.openEntityIds, compiled.branchedEntityIds, compiled.arrangementEntityIds])}`);
+      if (graph.relations.some(relation => relation.kind === 'generator')) walkedGenerated += 1;
       compared += 1; found.cycles += compiled.cycles.length; found.open += compiled.openEntityIds.length; found.branched += compiled.branchedEntityIds.length;
     }
-    expect(compared).toBeGreaterThan(300); expect(refused).toBeGreaterThan(20);
+    expect(compared).toBeGreaterThan(300); expect(refused).toBeGreaterThan(20); expect(generated).toBeGreaterThan(150); expect(walkedGenerated).toBeGreaterThan(100);
     expect(found.cycles).toBeGreaterThan(50); expect(found.open).toBeGreaterThan(100); expect(found.branched).toBeGreaterThan(100);
+    return outcomes;
+    };
+    // In production a generator's members are trusted, and under development checks every item is checked: each trial is refused,
+    // compiled and walked alike either way.
+    const outcomes = [false, true].map(checks => { setCadDevelopmentChecks(checks); try { return walk(); } finally { setCadDevelopmentChecks(true); } });
+    expect(outcomes[0]).toEqual(outcomes[1]);
   });
 });
