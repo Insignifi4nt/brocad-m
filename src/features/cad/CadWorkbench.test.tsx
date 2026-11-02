@@ -1785,17 +1785,17 @@ describe('CAD sketch interaction', () => {
     await act(async () => currentSession.undo()); expect(currentDocument).toEqual(tied);
   });
 
-  it('keeps each command on a generated edge or corner working, or off with its owner as the reason', async () => {
+  it('keeps each command on a generated edge, circle or corner working, or off with its owner as the reason', async () => {
     const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
       geometry: { kind: 'rectangle', x: 20, y: 20, width: 50, height: 40, cornerRadius: 0 } } as const;
+    const hole = { id: 'hole', kind: 'generator', idPrefix: 'hole', name: 'Hole', construction: false, geometry: { kind: 'circle', x: 40, y: 40, radius: 3 } } as const;
     const initial = parseCadDocument({ ...createCadDocument('Plate', 'generated-members'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
-      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate] } }] });
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate, hole] } }] });
     await mount(initial);
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
     const owned = 'Rectangle "plate" generates this geometry. Edit the generator\'s inputs, or detach it, before editing generated geometry.';
     const select = (selection: CadSketchGraphSelection) => act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection }));
     const construction = () => { const found = container.querySelector<HTMLInputElement>('.cad-sketch-options input'); if (!found) throw new Error('Construction control missing.'); return found; };
-    const bottom = sketchGraph().entities.find(entity => entity.id === 'plate_e0'); if (bottom?.kind !== 'line') throw new Error('Bottom side missing.');
     // An edge: moving it or switching it to construction is its shape's, and both say so.
     await select({ kind: 'entity', id: 'plate_e0' });
     expect(button('Move selection').disabled).toBe(true); expect(button('Move selection').getAttribute('aria-description')).toBe(owned);
@@ -1806,7 +1806,8 @@ describe('CAD sketch interaction', () => {
     expect(sketchGraph().relations[0]).toEqual(plate);
     await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
     await select({ kind: 'entity', id: 'plate_e0' }); await click('Detach');
-    expect(sketchGraph().relations.some(relation => relation.kind === 'generator')).toBe(false); expect(sketchGraph().entities).toHaveLength(4);
+    expect(sketchGraph().relations.some(relation => relation.id === 'plate')).toBe(false); expect(sketchGraph().relations[0]).toEqual(hole);
+    expect(sketchGraph().entities.filter(entity => entity.id.startsWith('plate_'))).toHaveLength(4);
     await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
     // Mirror copy copies the edge about another side as plain geometry.
     await select({ kind: 'entity', id: 'plate_e0' }); await click('Mirror copy');
@@ -1816,8 +1817,13 @@ describe('CAD sketch interaction', () => {
     await act(async () => { axis.focus(); axis.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); });
     await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === 'Use as mirror line')?.click());
     await click('Apply');
-    expect(sketchGraph().entities).toHaveLength(5); expect(sketchGraph().relations[0]).toEqual(plate);
+    expect(sketchGraph().entities).toHaveLength(6); expect(sketchGraph().relations.slice(0, 2)).toEqual([plate, hole]);
     await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // A circle: patterning it is its shape's, and says so.
+    const circle = sketchGraph().entities.find(entity => entity.kind === 'circle'); if (!circle) throw new Error('Hole edge missing.');
+    await select({ kind: 'entity', id: circle.id });
+    expect(button('Pattern').disabled).toBe(true);
+    expect(button('Pattern').getAttribute('aria-description')).toBe('Circle "hole" generates this geometry. Edit the generator\'s inputs, or detach it, before editing generated geometry.');
     // A corner: the corner tools are its shape's, and say so.
     await select({ kind: 'point', id: 'plate_p0' });
     expect(button('Sketch corner tools').disabled).toBe(true); expect(button('Sketch corner tools').getAttribute('aria-description')).toBe(owned);
