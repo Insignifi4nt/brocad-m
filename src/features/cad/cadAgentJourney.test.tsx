@@ -174,15 +174,16 @@ describe('CAD agent discovery and authoring journeys', () => {
     const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
       geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
     const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
-    // Two hundred points tied to the sixth corner, by IDs long enough that the whole set overflows one refusal's details.
-    const ids = Array.from({ length: 200 }, (_, at) => `tie-${at}-${'x'.repeat(70)}`);
+    // Two hundred points tied to the sixth corner. The first hundred IDs are as long as an ID may be, so 62 fill a page's 6 KiB of IDs;
+    // the short rest stop at 64 IDs a page.
+    const ids = Array.from({ length: 200 }, (_, at) => at < 100 ? `tie-${at}-`.padEnd(96, 'x') : `tie-${at}`);
     await h.success('cad_edit_document', { expectedVersion: empty.version, edits: [{ kind: 'set-parameter', name: 'n', value: 6 }, { kind: 'set-parameter', name: 'spare', value: 0 },
       { kind: 'add-feature', feature: { id: 'plate', name: 'Plate', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [],
         graph: { points: ids.map((_, at) => ({ id: `u${at}`, position: corner })), entities: [],
           relations: [polygon, ...ids.map((id, at) => ({ id, kind: 'coincident', pointIds: [`u${at}`, 'poly_v5'] }))] } } }] });
-    const seeded = h.session.getSnapshot(), fewer = { kind: 'set-parameter', name: 'n', value: 5 }, sent: string[] = [];
-    for (let pages = 1; ; pages++) {
-      expect(pages).toBeLessThanOrEqual(4);
+    const seeded = h.session.getSnapshot(), fewer = { kind: 'set-parameter', name: 'n', value: 5 }, sent: string[] = [], pages: number[] = [];
+    for (;;) {
+      expect(pages.length).toBeLessThan(4);
       const response = object(await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [{ ...fewer, ...sent.length ? { removedRelationIds: sent } : {} }] }));
       expect(new TextEncoder().encode(JSON.stringify(response)).length).toBeLessThanOrEqual(32 * 1024);
       // The message names the generator and says how to confirm, whole, however long the IDs it would list.
@@ -191,12 +192,14 @@ describe('CAD agent discovery and authoring journeys', () => {
       expect(object(response.error).messageTruncated).toBeUndefined();
       expect(h.session.getSnapshot().document).toBe(seeded.document);
       const details = object(object(response.error).details), page = details.relationIds as string[];
-      expect(page.length).toBeGreaterThan(0);
+      pages.push(page.length);
+      // While it fits, the message is the edit's own, which says to send them all.
+      if (!sent.length) expect(object(response.error).message).toContain('Send all 200 IDs as removedRelationIds');
       expect(details.omittedRelationCount).toBe(200 - sent.length - page.length);
       sent.push(...page);
       if (details.omittedRelationCount === 0) break;
     }
-    expect(sent).toEqual(ids);
+    expect(pages).toEqual([62, 64, 64, 10]); expect(sent).toEqual(ids);
     // A confirmation pinned to a version the draft has left is refused, and changes nothing; at the current version it applies.
     await h.success('cad_edit_document', { expectedVersion: seeded.version, edits: [{ kind: 'set-parameter', name: 'spare', value: 1 }] });
     const moved = h.session.getSnapshot();
@@ -229,7 +232,8 @@ describe('CAD agent discovery and authoring journeys', () => {
     // The page names the ID whole, places it in as many sketches as fit after it, and counts the rest.
     const details = object(object(response.error).details), rows = details.relations as { sketchId: string; relationId: string }[];
     expect(details).toMatchObject({ version: seeded.version, relationIds: [tie], relationCount: 1, confirmedCount: 0, omittedRelationCount: 0 });
-    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeGreaterThan(0); expect(rows.length).toBeLessThan(100);
+    expect(new TextEncoder().encode(JSON.stringify([details.relationIds, rows])).length).toBeLessThanOrEqual(12 * 1024);
     expect(rows).toEqual(sketchIds.slice(0, rows.length).map(sketchId => ({ sketchId, relationId: tie })));
     expect(details.omittedRelationRowCount).toBe(100 - rows.length);
     // Sent at the version it was refused at, the one ID removes the tie from every sketch in one step.
