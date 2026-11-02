@@ -8,7 +8,7 @@ import { resolveCadProfile } from '@/domain/cad/cadSketchGeometry';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { CadSession } from './cadSession';
 import { CadProfileEditor } from './CadFeatureEditor';
-import { cadSketchProfileEdits, cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { cadSketchProfileEdits, cadSketchProfileViews, withCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CAD_STAR_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
 
@@ -29,22 +29,23 @@ function currentSketch(): CadSketchFeature {
   return feature;
 }
 function currentPath(): Extract<CadProfile, { kind: 'path' }> {
-  const path = currentSketch().profiles[0]?.geometry;
+  const path = cadSketchProfileViews(currentSketch())[0]?.geometry;
   if (!path || path.kind !== 'path') throw new Error('Analytic path missing');
   return path;
 }
 async function mount(geometry?: Extract<CadProfile, { kind: 'path' }>) {
   const { sketch } = importCadDxfSketch({ fileName: 'Profile.dxf', text: dxf, sketchId: 'sketch' });
-  const document: CadDocument = parseCadDocument({ ...createCadDocument('Imported contour'), parameters: { width: 40, lift: 5 },
-    features: [geometry ? { ...sketch, profiles: sketch.profiles.map(profile => ({ ...profile, geometry })) } : sketch] });
+  const document: CadDocument = parseCadDocument({ ...createCadDocument('Imported contour'), schemaVersion: 2, parameters: { width: 40, lift: 5 },
+    features: [geometry ? withCadSketchProfile(sketch, { ...cadSketchProfileViews(sketch)[0], geometry }) : sketch] });
   session = new CadSession(document);
   function Harness() {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
     const [epoch, setEpoch] = useState(0);
     const feature = snapshot.document.features[0];
-    if (feature?.kind !== 'sketch' || !feature.profiles[0]) throw new Error('Profile missing');
-    return <CadProfileEditor key={epoch} profile={feature.profiles[0]} document={snapshot.document}
-      onApply={profile => { session.edit([{ kind: 'update-feature', feature: { ...feature, profiles: feature.profiles.map(entry => entry.id === profile.id ? profile : entry) } }], snapshot.version); }}
+    const profile = feature?.kind === 'sketch' ? cadSketchProfileViews(feature)[0] : undefined;
+    if (feature?.kind !== 'sketch' || !profile) throw new Error('Profile missing');
+    return <CadProfileEditor key={epoch} profile={profile} document={snapshot.document}
+      onApply={(next, parameters, _signal, removed) => { session.edit(cadSketchProfileEdits(feature, next, parameters, removed), snapshot.version); }}
       onCancel={() => setEpoch(previous => previous + 1)} onPendingChange={session.setWorkflowOpen} />;
   }
   await act(async () => root.render(<Harness />));
@@ -125,7 +126,8 @@ describe('imported analytic profile editing', () => {
       { kind: 'line', start: [0, 5], end: [40, 5] }, { kind: 'arc', center: [20, 5], radius: 20, startAngle: 0, sweep: -180 }
     ] });
     expect(measureCadSketch(updated.document, 'sketch').materialAreaMm2).toBeCloseTo(200 * Math.PI);
-    expect(currentSketch().source).toEqual(source); expect(currentSketch().source?.text).toBe(dxf); expect(currentSketch().profiles[0].role).toBeUndefined();
+    expect(currentSketch().source).toEqual(source); expect(currentSketch().source?.text).toBe(dxf); expect(currentSketch().profiles).toEqual([]);
+    expect(currentSketch().graph?.relations.find(relation => relation.id === 'contour_1')).not.toHaveProperty('role');
     await act(async () => session.undo()); expect(session.getSnapshot().document).toEqual(before.document);
   });
   it('rejects discontinuity without repairing a joint, changing history or losing its draft', async () => {

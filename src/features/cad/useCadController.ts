@@ -477,7 +477,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       if (!original || original.format !== 'dxf' || original.fileName !== source.fileName || original.text !== source.text || original.units !== source.units) {
         throw new ToolError('INVALID_IMPORT_RESULT', 'DXF import did not preserve the supplied original.');
       }
-      const document = parseCadDocument({ ...createCadDocument(result.sketch.name), features: [result.sketch] });
+      const document = parseCadDocument({ ...createCadDocument(result.sketch.name), schemaVersion: 2, features: [result.sketch] });
       session.replace(document); setBuild(null); setBuildVersion(null); setBuildState('idle'); changeOpen(true); setImportFile(null);
       return { imported: true, documentId: document.id, version: session.getSnapshot().version, sketchId: result.sketch.id,
         unitDeclaration: importUnitReceipt(result.unitDeclaration), scaleToMillimeters: result.scaleToMillimeters, sourceEntityCount: result.sourceEntityCount, contourCount: result.contourCount };

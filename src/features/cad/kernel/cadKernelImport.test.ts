@@ -179,7 +179,7 @@ describe('original-source native solid import', () => {
       '0', 'LINE', '10', '10', '20', '10', '11', '0', '21', '10',
       '0', 'LINE', '10', '0', '20', '10', '11', '0', '21', '0', '0', 'ENDSEC', '0', 'EOF', ''].join('\n');
     const imported = importCadDxfSketch({ fileName: 'd-shaped.dxf', text, units: 'mm', sketchId: 'dxf-sketch' });
-    const doc = parseCadDocument({ ...document(step), features: [imported.sketch,
+    const doc = parseCadDocument({ ...document(step), schemaVersion: 2, features: [imported.sketch,
       { ...base('dxf-pad'), kind: 'extrude', sketchId: 'dxf-sketch', distance: 5, operation: 'new', targetId: null, symmetric: false }] });
     const model = buildCadKernelModel(doc);
     try {

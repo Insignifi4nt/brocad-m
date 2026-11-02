@@ -7,6 +7,7 @@ import { importCadDxfSketch } from '@/domain/cad/cadDxfImport';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { CadProfileEditor } from './CadFeatureEditor';
 import { CadSession } from './cadSession';
+import { cadSketchProfileEdits, cadSketchProfileViews, withCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const dxf = ['0', 'SECTION', '2', 'ENTITIES', '0', 'LWPOLYLINE', '90', '4', '70', '1',
   '10', '0', '20', '0', '10', '20', '20', '0', '10', '20', '20', '10', '10', '0', '20', '10', '0', 'ENDSEC', '0', 'EOF', ''].join('\r\n');
@@ -22,18 +23,20 @@ function currentSketch(): CadSketchFeature {
   if (feature?.kind !== 'sketch') throw new Error('Sketch missing'); return feature;
 }
 function currentPolygon(): Extract<CadProfile, { kind: 'polygon' }> {
-  const geometry = currentSketch().profiles[0]?.geometry;
+  const geometry = cadSketchProfileViews(currentSketch())[0]?.geometry;
   if (geometry?.kind !== 'polygon') throw new Error('Polygon missing'); return geometry;
 }
 async function mount(points = rectangle) {
   const imported = importCadDxfSketch({ fileName: 'Outline.dxf', text: dxf, units: 'mm', sketchId: 'outline' }).sketch;
-  session = new CadSession(parseCadDocument({ ...createCadDocument('Outline'), parameters: { width: 20, height: 10 }, features: [{ ...imported,
-    profiles: [{ id: 'polygon', name: 'Outline', construction: false, geometry: { kind: 'polygon', points } }] }] }));
+  // The imported contour generator, given a polygon's geometry.
+  const outline = withCadSketchProfile(imported, { ...cadSketchProfileViews(imported)[0], name: 'Outline', geometry: { kind: 'polygon', points } });
+  session = new CadSession(parseCadDocument({ ...createCadDocument('Outline'), schemaVersion: 2, parameters: { width: 20, height: 10 }, features: [outline] }));
   function Harness() {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot); const [epoch, setEpoch] = useState(0);
-    const sketch = snapshot.document.features[0]; if (sketch?.kind !== 'sketch' || !sketch.profiles[0]) throw new Error('Profile missing');
-    return <CadProfileEditor key={epoch} profile={sketch.profiles[0]} document={snapshot.document}
-      onApply={profile => session.edit([{ kind: 'update-feature', feature: { ...sketch, profiles: [profile] } }], snapshot.version)}
+    const sketch = snapshot.document.features[0], profile = sketch?.kind === 'sketch' ? cadSketchProfileViews(sketch)[0] : undefined;
+    if (sketch?.kind !== 'sketch' || !profile) throw new Error('Profile missing');
+    return <CadProfileEditor key={epoch} profile={profile} document={snapshot.document}
+      onApply={(next, parameters, _signal, removed) => session.edit(cadSketchProfileEdits(sketch, next, parameters, removed), snapshot.version)}
       onCancel={() => setEpoch(previous => previous + 1)} onPendingChange={session.setWorkflowOpen} />;
   }
   await act(async () => root.render(<Harness />));

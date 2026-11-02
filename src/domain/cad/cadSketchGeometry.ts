@@ -317,6 +317,15 @@ export function checkCadSketchGeneratorShape(shape: ResolvedCadProfile, name: st
   if (kept) checkedShapes.set(shape, kept);
 }
 
+/**
+ * Refuses shapes that overlap or touch one another, after the checks `checkCadSketchGeneratorShape` makes of each, with the reasons
+ * separate profiles gave. A drawing imported as one generator per contour checks its contours so, since generated curves may cross.
+ */
+export function checkCadSketchShapesApart(shapes: readonly { readonly name: string; readonly geometry: CadProfile }[]): void {
+  contoursOf({ id: 'shapes', name: 'Shapes', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: shapes.map((shape, index) => ({ id: `shape_${index}`, name: shape.name, construction: false, geometry: shape.geometry })) }, {});
+}
+
 /** Infer regions from exact analytic contours, independent of authored orientation or CAM. */
 export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: Readonly<Record<string, number>>): readonly CadResolvedSketchContour[] {
   return contoursOf(sketch, parameters);

@@ -718,8 +718,14 @@ test('DXF exchange preserves exact rounded contours and reconstructs a standalon
   const draft = await context(page);
   expect(draft.documentId).not.toBe(original.documentId);
   const definitions = await call(page, 'cad_read_features', { expectedVersion: draft.version });
-  expect(definitions).toMatchObject({ items: [{ kind: 'sketch', plane: 'XY', source,
-    profiles: expect.arrayContaining([{ id: expect.any(String), name: expect.any(String), construction: false, geometry: { kind: 'path', segments: expect.any(Array) } }]) }] });
+  // Each contour is a generator, stored alone: the rounded plate a closed path that keeps its four corner arcs, the bore a circle.
+  expect(definitions).toMatchObject({ items: [{ kind: 'sketch', plane: 'XY', source, profiles: [], graph: { points: [], entities: [],
+    relations: expect.arrayContaining([{ id: expect.any(String), kind: 'generator', idPrefix: expect.any(String), name: expect.any(String), construction: false,
+      geometry: { kind: 'path', segments: expect.any(Array) } }]) } }] });
+  const [sketch] = definitions.items as CadSketchFeature[];
+  const paths = sketch.graph?.relations.flatMap(relation => relation.kind === 'generator' && relation.geometry.kind === 'path' ? [relation.geometry.segments] : []) ?? [];
+  expect(paths).toHaveLength(1);
+  expect(paths[0].flatMap(segment => segment.kind === 'arc' ? [segment.radius] : [])).toEqual(Array(4).fill(expect.closeTo(3, 9)));
   await call(page, 'cad_set_viewport', { expectedVersion: draft.version, command: { kind: 'edit-sketch', sketchId: imported.sketchId } });
   await expect(page.getByLabel('Sketch drawing canvas')).toBeVisible();
   await call(page, 'cad_set_viewport', { expectedVersion: draft.version, command: { kind: 'finish-sketch' } });
@@ -740,7 +746,7 @@ test('DXF exchange preserves exact rounded contours and reconstructs a standalon
   expect(await call(page, 'cad_build', { expectedVersion: opened.version })).toMatchObject({ diagnostics: [], bodies: [{ volumeMm3: expect.closeTo(expectedVolume, 5) }] });
 });
 
-test('an imported path is selected by its interior and edited atomically through segment fields', async ({ page }) => {
+test('an imported path is selected by a pointer click on its edge and edited atomically through segment fields', async ({ page }) => {
   const { draft } = await createBox(page);
   await call(page, 'cad_save_document', { expectedVersion: draft.version });
   const download = page.waitForEvent('download');
@@ -756,17 +762,19 @@ test('an imported path is selected by its interior and edited atomically through
   const result = await call(page, 'cad_get_feature', { expectedVersion: current.version, featureId: imported.sketchId });
   expect(result).toMatchObject({ feature: { kind: 'sketch', source } });
   const feature = result.feature as CadSketchFeature;
-  const profile = feature.profiles[0];
-  if (profile.geometry.kind !== 'path') throw new Error('Expected an exact imported path');
-  const segments = profile.geometry.segments;
+  // The imported contour is a path generator, stored alone, and no saved profile.
+  expect(feature.profiles).toEqual([]);
+  const contour = feature.graph?.relations[0];
+  if (contour?.kind !== 'generator' || contour.geometry.kind !== 'path') throw new Error('Expected an exact imported path generator');
+  const segments = contour.geometry.segments;
   const segmentIndex = segments.findIndex(segment => segment.kind === 'line' && segment.end[0] === 20 && segment.end[1] === 0);
   if (segmentIndex < 0) throw new Error('Expected the lower right vertex');
   await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'edit-sketch', sketchId: imported.sketchId } });
   await openViewControls(page);
   await page.getByRole('button', { name: 'Fit sketch', exact: true }).click();
-  // A genuine pointer click inside the shape must select it even though the
-  // drawing uses transparent fills. The public centre is in world millimetres;
-  // the visible SVG renders relative to that centre before applying its Y flip.
+  // The imported contour is sketch geometry, which is picked by its edges: a genuine pointer click on its upper edge selects that edge,
+  // and the selection opens the shape that owns it. The public centre is in world millimetres; the visible SVG renders relative to that
+  // centre before applying its Y flip.
   const viewport = await call(page, 'cad_get_viewport', { expectedVersion: current.version });
   const view = viewport.view;
   if (!view || typeof view !== 'object' || !('mode' in view) || view.mode !== 'sketch' || !('centerMm' in view)
@@ -778,12 +786,12 @@ test('an imported path is selected by its interior and edited atomically through
     const canvas = element as SVGSVGElement;
     const transform = canvas.getScreenCTM();
     if (!transform) throw new Error('Missing visible sketch transformation');
-    const interior = canvas.createSVGPoint(); interior.x = 10 - center[0]; interior.y = center[1] - 5;
-    const pixels = interior.matrixTransform(transform);
+    const edge = canvas.createSVGPoint(); edge.x = 10 - center[0]; edge.y = center[1] - 10;
+    const pixels = edge.matrixTransform(transform);
     return { x: pixels.x, y: pixels.y };
   }, centerMm);
   await page.mouse.click(point.x, point.y);
-  await page.getByRole('complementary', { name: 'Feature properties' }).getByText('Exact geometry', { exact: true }).click();
+  await page.getByRole('form', { name: 'Sketch selection' }).getByRole('button', { name: 'Edit shape', exact: true }).click();
   await expect(page.getByLabel('Path segment', { exact: true })).toBeVisible();
   await page.getByLabel('Path segment', { exact: true }).fill(String(segmentIndex + 1));
   await page.getByRole('textbox', { name: 'End X mm', exact: true }).fill('tipX');
@@ -1240,7 +1248,8 @@ test('far-origin imported Sketch renders inside free pixels and keeps its view a
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: accepted.version }))
     .toMatchObject({ ok: true, data: { view: { mode: 'sketch', available: true } } });
   const canvas = page.getByLabel('Sketch drawing canvas');
-  const circle = canvas.locator('.cad-profile circle');
+  // The contour's circle is the member `c0` of its generator `contour-1`; its halo copy lies in a group of its own.
+  const circle = canvas.locator('[data-cad-sketch-entity="contour-1_c0"] > circle');
   const assertFittedCircle = async () => {
     const visible = await circle.boundingBox(), viewport = await canvas.boundingBox();
     if (!visible || !viewport) throw new Error('Missing rendered far-origin circle');
@@ -1263,7 +1272,8 @@ test('far-origin imported Sketch renders inside free pixels and keeps its view a
       const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
       const context = canvas.getContext('2d'); if (!context) throw new Error('Missing Sketch pixels'); context.drawImage(image, 0, 0);
       const data = context.getImageData(0, 0, canvas.width, canvas.height).data; let count = 0;
-      for (let index = 0; index < data.length; index += 4) if (data[index] > 100 && data[index + 1] > 140 && data[index + 2] > 140 && data[index + 3] > 0) count++;
+      // The fully defined contour is stroked in the defined-geometry green, #5ed88a.
+      for (let index = 0; index < data.length; index += 4) if (data[index + 1] > 160 && data[index + 1] - data[index] > 60 && data[index + 2] > 90 && data[index + 3] > 0) count++;
       return count;
     }, capture.previewUrl);
     expect(pixels, 'Actual rasterized far-origin circle outline must be present').toBeGreaterThan(400);
@@ -1293,18 +1303,19 @@ test('far-origin imported Sketch renders inside free pixels and keeps its view a
   const feature = await call(page, 'cad_get_feature', { expectedVersion: accepted.version, featureId: imported.sketchId });
   const sketch = feature.feature as CadSketchFeature;
   expect(sketch).toMatchObject({ kind: 'sketch', source: { text } });
-  // Reposition the exact imported profile by a parameter-independent plane-local transform
-  // in its public analytic definition. The existing canvas keeps the user's frame.
-  const profile = sketch.profiles[0];
-  if (profile.geometry.kind !== 'circle') throw new Error('Expected an exact imported circle');
-  expect(profile.geometry).toEqual({ kind: 'circle', x: 100000000, y: 100000000, radius: 12 });
-  await call(page, 'cad_edit_document', { expectedVersion: accepted.version, edits: [{ kind: 'update-feature', feature: { ...sketch,
-    profiles: [{ ...profile, geometry: { ...profile.geometry, x: 100000100 } }] } }] });
+  // Reposition the exact imported contour, a circle generator stored alone, by a parameter-independent plane-local transform
+  // of its inputs. The existing canvas keeps the user's frame.
+  expect(sketch.profiles).toEqual([]);
+  const contour = sketch.graph?.relations[0];
+  if (contour?.kind !== 'generator' || contour.geometry.kind !== 'circle') throw new Error('Expected an exact imported circle generator');
+  expect(contour.geometry).toEqual({ kind: 'circle', x: 100000000, y: 100000000, radius: 12 });
+  await call(page, 'cad_edit_document', { expectedVersion: accepted.version, edits: [{ kind: 'set-sketch-generator', sketchId: imported.sketchId,
+    generator: { ...contour, geometry: { ...contour.geometry, x: 100000100 } } }] });
   const changed = await context(page);
   expect(await call(page, 'cad_get_viewport', { expectedVersion: changed.version }))
     .toMatchObject({ view: { mode: 'sketch', ...initialFrame } });
   expect(await call(page, 'cad_get_feature', { expectedVersion: changed.version, featureId: imported.sketchId }))
-    .toMatchObject({ feature: { source: { text }, profiles: [{ geometry: { kind: 'circle', x: 100000100, y: 100000000, radius: 12 } }] } });
+    .toMatchObject({ feature: { source: { text }, profiles: [], graph: { relations: [{ id: contour.id, geometry: { kind: 'circle', x: 100000100, y: 100000000, radius: 12 } }] } } });
   expect(await fitLayout(), 'Exact translation of Fit requires unchanged viewport and floating-control bounds').toEqual(initialLayout);
   await call(page, 'cad_set_viewport', { expectedVersion: changed.version, command: { kind: 'fit' } });
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: changed.version }))

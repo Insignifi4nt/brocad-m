@@ -6,7 +6,7 @@ import { importCadDxfSketch } from '@/domain/cad/cadDxfImport';
 import type { EditorPreviewCapture } from '@/features/webmcp/previewCapture';
 import { CadSketchCanvas } from './CadSketchCanvas';
 import type { CadRenderedViewControls } from './cadViewportControls';
-import { createCadDocument } from '@/domain/cad/cadSchema';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { applyCadEdits } from '@/domain/cad/cadOperations';
 import type { CadSketchGraphSelection } from './cadSketchGraphSelection';
 
@@ -119,7 +119,9 @@ describe('saved Sketch initial fit', () => {
   });
   const original = ['0', 'SECTION', '2', 'ENTITIES', '0', 'LWPOLYLINE', '90', '4', '70', '1',
     '10', '100000000', '20', '100000000', '10', '100000100', '20', '100000000', '10', '100000100', '20', '100000010', '10', '100000000', '20', '100000010', '0', 'ENDSEC', '0', 'EOF', ''].join('\r\n');
-  const imported = () => importCadDxfSketch({ fileName: 'Far.dxf', text: original, units: 'mm', sketchId: 'far' }).sketch;
+  // The imported sketch as a document holds it, with its contour generator's lines.
+  const imported = () => parseCadDocument({ ...createCadDocument('Far'), schemaVersion: 2,
+    features: [importCadDxfSketch({ fileName: 'Far.dxf', text: original, units: 'mm', sketchId: 'far' }).sketch] }).features[0] as CadSketchFeature;
   it.each([[1000, 500], [300, 700]])('fits imported far-origin contours using the measured %s×%s aspect before first capture', async (w, h) => {
     width = w; height = h; const feature = imported(); await mount(feature);
     const state = currentControls().getState(); expect(state).toMatchObject({ mode: 'sketch', centerMm: [100000050, 100000005], available: true });

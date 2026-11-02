@@ -16,17 +16,19 @@ import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTe
 const runtime = createCadSketchTestSolver();
 
 describe('document-level independent profile copy preparation', () => {
-  it.each([{ part: profileCopySlotPart, request: slotProfileCopyRequest, dof: 10 }, { part: profileCopyDxfPart, request: dxfProfileCopyRequest, dof: 5 }])('prepares the exact known $part.name candidate from schema 1 without changing its source', async ({ part, request, dof }) => {
+  // An imported DXF holds contour generators, which need schema 2.
+  it.each([{ part: profileCopySlotPart, request: slotProfileCopyRequest, dof: 10, schema: 1 }, { part: profileCopyDxfPart, request: dxfProfileCopyRequest, dof: 5, schema: 2 }])('prepares the exact known $part.name candidate from schema $schema without changing its source', async ({ part, request, dof, schema }) => {
     const document = part(), source = document.features[0]; if (source.kind !== 'sketch') throw new Error('Profile source missing.');
     const edit = { kind: 'copy-sketch-profile', ...request } as const;
-    expect(Value.Check(CadEditSchema, edit)).toBe(true); expect(document.schemaVersion).toBe(1);
+    expect(Value.Check(CadEditSchema, edit)).toBe(true); expect(document.schemaVersion).toBe(schema);
     expect(needsCadSketchPreparation(document, [edit])).toBe(true);
     const before = JSON.stringify(document), copy = prepareCadSketchProfileCopy({ sketch: source, parameters: document.parameters, ...request });
     const expected = parseCadDocument({ ...document, schemaVersion: 2, features: [...document.features, copy.sketch] });
     const prepared = await prepareCadEdits(document, [edit], runtime);
     expect(prepared.document).toEqual(expected); expect(prepared.document.features[0]).toEqual(source);
     expect(prepared.document.parameterGroups).toEqual(document.parameterGroups); expect(prepared.document.parameterMetadata).toEqual(document.parameterMetadata);
-    expect(prepared.sketchDiagnostics[0]).toEqual({ sketchId: 'copy', diagnostics: { status: 'success', degreesOfFreedom: dof,
+    // A DXF source is a graph sketch too, of fixed generated contours, so it is reported beside the copy.
+    expect(prepared.sketchDiagnostics.find(entry => entry.sketchId === 'copy')).toEqual({ sketchId: 'copy', diagnostics: { status: 'success', degreesOfFreedom: dof,
       conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } });
     expect(resolveCadSketchPlacement(copy.sketch, document.parameters, prepareCadDocumentFrames(expected))).toEqual(
       resolveCadSketchPlacement(source, document.parameters, prepareCadDocumentFrames(expected)));

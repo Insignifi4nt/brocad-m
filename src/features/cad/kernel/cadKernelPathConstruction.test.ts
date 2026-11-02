@@ -9,6 +9,7 @@ import { createCadDocument, createCadSketchProfile, parseCadDocument } from '../
 import { measureCadSketch } from '../../../domain/cad/cadMeasurements';
 import { cadEntitiesToCam, cadSketchToDxf } from '../../../domain/cad/cadCam';
 import { importCadDxfSketch } from '../../../domain/cad/cadDxfImport';
+import { cadSketchProfileViews } from '../../../domain/cad/sketch-generators/cadSketchProfileViews';
 import { buildCadKernelModel } from './cadKernelModel';
 import { closeCadPathDraft, createCadPathDraft, updateCadPathDraft } from '../cadPathDrawing';
 
@@ -77,7 +78,7 @@ describe('constructed analytic paths in the exact native kernel', () => {
     const imported = importCadDxfSketch({ fileName: 'major-segment.dxf', text, sketchId: 'outline' });
     expect(imported.contourCount).toBe(1); expect(imported.sourceEntityCount).toBe(2);
     const first = original.features[0]; if (first.kind !== 'sketch') throw new Error('Expected sketch');
-    const importedProfile = imported.sketch.profiles[0]; verifyProfile(importedProfile.geometry, area);
+    const importedProfile = cadSketchProfileViews(imported.sketch)[0]; verifyProfile(importedProfile.geometry, area);
     expect(imported.sketch.source?.text).toBe(text);
   });
   it('selects the picked minor region rather than the complementary major arc', () => {

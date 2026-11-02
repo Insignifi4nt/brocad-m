@@ -1108,7 +1108,11 @@ describe('CAD controller asynchronous guards', () => {
     expect(h.session.getSnapshot()).toBe(before);
     await act(async () => { expect(await tool.execute({ expectedVersion: before.version, source: { units: 'inch', text: dxfText, fileName: 'circle.dxf', format: 'dxf' } })).toMatchObject({ ok: true, data: { imported: true, contourCount: 1, scaleToMillimeters: 25.4 } }); });
     const sketch = h.session.getSnapshot().document.features[0];
-    expect(sketch).toMatchObject({ kind: 'sketch', profiles: [{ geometry: { kind: 'circle', radius: 50.8 } }], source: { text: dxfText, units: 'inch' } });
+    // The circle is a contour generator: the document holds it with the circle it generates, and no saved profile.
+    expect(h.session.getSnapshot().document.schemaVersion).toBe(2);
+    expect(sketch).toMatchObject({ kind: 'sketch', profiles: [], source: { text: dxfText, units: 'inch' }, graph: {
+      relations: expect.arrayContaining([expect.objectContaining({ id: 'contour_1', kind: 'generator', geometry: { kind: 'circle', x: 0, y: 0, radius: 50.8 } })]),
+      entities: [expect.objectContaining({ kind: 'circle', radius: 50.8 })] } });
     expect(h.workbench().manifest.projects).toHaveLength(0);
   });
   it('rejects cancelled and substituted DXF source results without replacing the draft', async () => {
