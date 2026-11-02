@@ -3,6 +3,7 @@ import { isCadSketchSolverEnvelope, parseCadSketchSolveInput, parseCadSketchSolv
 import type { CadSketchSolveResult } from './cadSketchSolverTypes';
 import { CAD_SKETCH_SOLVER_ERROR, CAD_SKETCH_SOLVER_NOT_SENT, CAD_SKETCH_SOLVER_NOT_STARTED, CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CAD_SKETCH_SOLVER_UNREADABLE,
   CadSketchSolverFailure, cadSketchNativeFailure } from './cadSketchSolverFailure';
+import { solveFixedCadSketch } from './cadSketchFixedSolve';
 
 export interface CadSketchSolverTransport {
   postMessage(message: CadSketchSolverRequest): void;
@@ -74,6 +75,9 @@ export function createCadSketchSolverClient(makeWorker: () => CadSketchSolverTra
       if (queue.length >= 4) return Promise.reject(new Error('The sketch solve queue is full.'));
       let captured: ReturnType<typeof parseCadSketchSolveInput>;
       try { captured = parseCadSketchSolveInput(input); } catch (error) { return Promise.reject(error); }
+      // A sketch with nothing free to move is its own solution, and never starts the worker.
+      const fixed = solveFixedCadSketch(captured);
+      if (fixed) return Promise.resolve(fixed);
       return new Promise((resolve, reject) => {
         const cancel = () => {
           // Keep the warm worker: the caller settles now and the late reply is discarded.

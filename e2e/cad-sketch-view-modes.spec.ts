@@ -1,6 +1,6 @@
 import type { Page, TestInfo } from '@playwright/test';
 import { expect, test } from './fixtures/native-sketch-solver';
-import { prepareCadTools, callCadTool as call, cadContext as context } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, cadContext as context, generatedSketch } from './cad-tool-helpers';
 
 const rectangle = (id: string, x: number, y: number, width: number, height: number, construction = false) =>
   ({ id, name: id, construction, geometry: { kind: 'rectangle', x, y, width, height, cornerRadius: 0 } });
@@ -71,7 +71,7 @@ async function modelCamera(page: Page, version: string) {
 
 test('shows the part dimmed behind a sketch on its top face, hides or shows it plainly, cuts away what faces the viewer and restores the model view', async ({ page }, info) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   const built = await call(page, 'cad_build', { expectedVersion: document.version });
   expect((built.bodies as { volumeMm3: number }[]).map(body => Math.round(body.volumeMm3)).sort((a, b) => a - b)).toEqual([4_000, 24_000]);
@@ -96,7 +96,8 @@ test('shows the part dimmed behind a sketch on its top face, hides or shows it p
   const normal = await brightness(page, document.version, info, 'normal');
   // Over the plain part each sketch stroke lies on a dark under-stroke, in the theme background colour, that takes no pointer.
   const halos = page.locator('svg.cad-sketch-canvas .cad-sketch-halo');
-  await expect(halos).toHaveCount(2);
+  // The frame and hole are generators, drawn as their members: the frame's four lines and the hole's circle each have one.
+  await expect(halos).toHaveCount(5);
   for (const halo of await halos.all()) {
     await expect(halo).toHaveCSS('stroke', 'rgb(18, 26, 32)');
     await expect(halo).toHaveCSS('pointer-events', 'none');
@@ -171,7 +172,7 @@ const sketchSpan = async (page: Page, version: string) => ((await call(page, 'ca
 
 test('moves focus from the 3D view into the sketch it opens, so the sketch keys work, and back when the sketch closes', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.filter(feature => feature.kind === 'sketch').map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.filter(feature => feature.kind === 'sketch').map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   const model = page.locator('.cad-viewport:not(.is-sketch-background) canvas');
   await expect(model).toBeVisible();
@@ -196,7 +197,7 @@ test('moves focus from the 3D view into the sketch it opens, so the sketch keys 
 
 test('keeps the model camera exactly where the sketch found it when the first solid builds and then grows while the sketch is open', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.filter(feature => feature.kind === 'sketch').map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: features.filter(feature => feature.kind === 'sketch').map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const outlines = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: outlines.version })).bodies).toHaveLength(0);
   await expect.poll(async () => (await call(page, 'cad_get_viewport', { expectedVersion: outlines.version })).view).toMatchObject({ mode: 'solid', available: true, referenceVersion: outlines.version });
@@ -207,7 +208,7 @@ test('keeps the model camera exactly where the sketch found it when the first so
   await expect(page.getByLabel('Sketch drawing canvas')).toBeVisible();
   const drawn = await settled(page);
   // The first solids build behind the open sketch, which draws them.
-  await call(page, 'cad_edit_document', { expectedVersion: outlines.version, edits: features.filter(feature => feature.kind === 'extrude').map(feature => ({ kind: 'add-feature', feature })) });
+  await call(page, 'cad_edit_document', { expectedVersion: outlines.version, edits: features.filter(feature => feature.kind === 'extrude').map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const padded = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: padded.version })).bodies).toHaveLength(2);
   await expect.poll(() => framesDrawn(page)).toBeGreaterThan(drawn);
@@ -231,7 +232,7 @@ test('outlines the piece an Extend preview adds over a plainly shown face, keepi
     entities: [{ id: 'edge', kind: 'line', startPointId: 'a', endPointId: 'b', construction: false },
       { id: 'fence', kind: 'line', startPointId: 'f1', endPointId: 'f2', construction: false }], relations: [] } };
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version,
-    edits: [...features.slice(0, 2), lines].map(feature => ({ kind: 'add-feature', feature })) });
+    edits: [...features.slice(0, 2), lines].map(feature => ({ kind: 'add-feature', feature: generatedSketch(feature) })) });
   const document = await context(page);
   expect((await call(page, 'cad_build', { expectedVersion: document.version })).bodies).toHaveLength(1);
   await call(page, 'cad_set_viewport', { expectedVersion: document.version, command: { kind: 'edit-sketch', sketchId: 'lines' } });

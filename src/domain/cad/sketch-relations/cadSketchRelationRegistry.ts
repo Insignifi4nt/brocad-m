@@ -3,7 +3,7 @@ import { isAcceptedCadSketchGraph, type CadSketchGraph, type CadSketchGraphRelat
 import { cadSketchCanonicalForm, cadSketchCanonicalRelations } from './cadSketchCanonicalForms';
 import { isCadSketchPointSlot, resolveCadSketchOperands } from './cadSketchOperandSignatures';
 import type { CadSketchOperandNames, CadSketchOperandSignature, CadSketchRelationDefinition, CadSketchRelationDefinitions, CadSketchRelationIntent, CadSketchRelationKind } from './cadSketchRelationTypes';
-import { chamferCorner, externalReference, filletCorner, linearPattern } from './kinds/composites';
+import { chamferCorner, externalReference, filletCorner, generator, linearPattern } from './kinds/composites';
 import { axisDistance, distance, fixedAxis, lineAngle, pointLineDistance, radialSize, referenceDimension } from './kinds/dimensions';
 import { equalLength, equalRadius } from './kinds/equality';
 import { fixedPoint } from './kinds/fix';
@@ -21,7 +21,7 @@ export const CAD_SKETCH_RELATION_DEFINITIONS: CadSketchRelationDefinitions = Obj
   'equal-length': equalLength, 'equal-radius': equalRadius,
   'line-angle': lineAngle, 'radial-size': radialSize, 'fixed-point': fixedPoint, 'fixed-axis': fixedAxis,
   distance, 'point-line-distance': pointLineDistance, 'axis-distance': axisDistance,
-  'fillet-corner': filletCorner, 'chamfer-corner': chamferCorner
+  'fillet-corner': filletCorner, 'chamfer-corner': chamferCorner, generator
 } satisfies CadSketchRelationDefinitions);
 export const CAD_SKETCH_RELATION_KINDS = Object.freeze(Object.keys(CAD_SKETCH_RELATION_DEFINITIONS) as CadSketchRelationKind[]);
 /** The kinds agent tools may name, in schema order. */

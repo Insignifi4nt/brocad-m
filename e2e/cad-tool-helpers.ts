@@ -111,3 +111,28 @@ export function relationRow(page: Page, name: string | RegExp): Locator {
   const pattern = typeof name === 'string' ? new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) : name;
   return page.getByRole('list', { name: 'Sketch relations', exact: true }).getByRole('button', { name: pattern });
 }
+
+interface LegacyProfile<G = unknown> { readonly id: string; readonly name: string; readonly construction: boolean; readonly geometry: G }
+/**
+ * The generator an agent adds a shape with, now that a batch cannot give a sketch a saved profile: the profile's id, name, construction
+ * flag and geometry, with an id prefix made from its id. Profile dimensions do not carry over; a generator is sized by its inputs.
+ */
+export function shapeGenerator<G>(profile: LegacyProfile<G>, idPrefix = profile.id.replace(/[^A-Za-z0-9-]/g, '-')) {
+  return { id: profile.id, kind: 'generator' as const, idPrefix, name: profile.name, construction: profile.construction, geometry: profile.geometry };
+}
+/** `feature` as an agent adds it now: a sketch's saved profiles become generators after its own relations; any other feature as it is. */
+export function generatedSketch<T>(feature: T): T {
+  const sketch = feature as T & { kind?: string; profiles?: readonly LegacyProfile[]; graph?: { points: readonly unknown[]; entities: readonly unknown[]; relations: readonly unknown[] } };
+  if (sketch.kind !== 'sketch' || !sketch.profiles?.length) return feature;
+  const graph = sketch.graph ?? { points: [], entities: [], relations: [] };
+  return { ...sketch, profiles: [], graph: { ...graph, relations: [...graph.relations, ...sketch.profiles.map(profile => shapeGenerator(profile))] } };
+}
+/**
+ * Opens `features` as a fresh unsaved draft named `name`, through the CAD JSON import a saved document opens with. Journeys that cover
+ * saved legacy profiles start from one, since an edit batch can no longer add them.
+ */
+export async function importCadDraft(page: Page, features: readonly unknown[], { name = 'Seeded draft', parameters = {} }: { readonly name?: string; readonly parameters?: Readonly<Record<string, number>> } = {}) {
+  await callCadTool(page, 'cad_import_document', { expectedVersion: (await cadContext(page)).version,
+    document: { format: 'wireedm-cad', schemaVersion: 2, id: 'seeded_draft', name, units: 'mm', parameters, features } });
+  return cadContext(page);
+}

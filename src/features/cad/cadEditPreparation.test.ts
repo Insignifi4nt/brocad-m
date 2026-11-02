@@ -18,6 +18,10 @@ import { circleRow, circleRowPart, rowSketch } from '@/domain/cad/__tests__/cadS
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { CAD_SKETCH_SOLVER_NOT_LOADED, CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoader';
+import { createCadSketchSolverClient } from './sketch-solver/cadSketchSolverClient';
+import { cadSketchSolverWireResult, parseCadSketchSolveInput, parseCadSketchSolverReply } from './sketch-solver/cadSketchSolverProtocol';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { applyCadEdits } from '@/domain/cad/cadOperations';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { length: 20 }, features: [{
@@ -476,5 +480,126 @@ describe('shared CAD edit preparation with the real sketch solver', () => {
     const resized = rowSketch((await prepareCadEdits(patterned, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { ...size, value: 4 } }], solver)).document).graph;
     for (const entity of resized.entities) expect(entity.kind === 'circle' && entity.radius).toBeCloseTo(4, 9);
     expect(checkCadSketchGraph(resized, part.parameters)).toEqual([]);
+  });
+});
+
+describe('sketch generators in edit preparation', () => {
+  const circle = { id: 'hole', kind: 'generator' as const, idPrefix: 'hole', construction: false, geometry: { kind: 'circle' as const, x: 'cx', y: 0, radius: 2 } };
+  const legacy = () => parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2, parameters: { cx: 0 }, features: [{
+    id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: -10, y: -10, width: 20, height: 20, cornerRadius: 0 } }] }] });
+  it('solve a sketch once when the solver gives back the graph a settle regenerated, as it does when nothing moves', async () => {
+    const document = legacy(), calls: unknown[] = [];
+    const passThrough = { solve: async (input: Parameters<typeof solver.solve>[0]) => { calls.push(input.graph); return {
+      kind: 'solved' as const, graph: input.graph, diagnostics: { status: 'success' as const, degreesOfFreedom: 0, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } }; } };
+    const sketch = document.features[0];
+    if (sketch.kind !== 'sketch') throw new Error('Expected a sketch');
+    const prepared = await prepareCadEdits(document, [{ kind: 'set-parameter', name: 'cx', value: 4 },
+      { kind: 'update-feature', feature: { ...sketch, graph: { points: [], entities: [], relations: [circle] } } }], passThrough);
+    expect(calls).toHaveLength(1);
+    const graph = prepared.document.features[0].kind === 'sketch' ? prepared.document.features[0].graph : undefined;
+    expect(graph?.points).toEqual([{ id: 'hole_k0', position: [4, 0] }]);
+    // The real solver reaches the same document.
+    expect((await prepareCadEdits(document, [{ kind: 'set-parameter', name: 'cx', value: 4 },
+      { kind: 'update-feature', feature: { ...sketch, graph: { points: [], entities: [], relations: [circle] } } }], solver)).document).toEqual(prepared.document);
+  });
+
+  it('prepare sketches of generated geometry alone without starting the solver worker, and keep them as they are through other edits', async () => {
+    const client = createCadSketchSolverClient(() => { throw new Error('The solver worker started.'); });
+    const blank = parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2 });
+    const section = (id: string, offset: number | string, radius: number | string) => ({ id, kind: 'sketch' as const, name: id, suppressed: false, offset, profiles: [],
+      plane: { kind: 'datum-plane' as const, featureId: 'mount' }, graph: { points: [], entities: [], relations: [{ ...circle, id: `${id}-bore`, idPrefix: id, geometry: { kind: 'circle' as const, x: 0, y: 0, radius } },
+        { id: `${id}-plate`, kind: 'generator' as const, idPrefix: `${id}-plate`, construction: false, geometry: { kind: 'rectangle' as const, x: -20, y: -10, width: 'width', height: 20, cornerRadius: 3 } }] } });
+    const built = (await prepareCadEdits(blank, [{ kind: 'set-parameter', name: 'width', value: 40 }, { kind: 'set-parameter', name: 'hole', value: 4 },
+      { kind: 'add-feature', feature: { kind: 'datum-plane', id: 'mount', name: 'Mount', suppressed: false, definition: { kind: 'world', basePlane: 'XY', origin: [0, 0, 5], rotation: [30, 0, 0] } } },
+      { kind: 'add-feature', feature: section('lower', 2, 'hole') }, { kind: 'add-feature', feature: section('upper', 'width / 2', 3) }], client)).document;
+    // Inputs that change regenerate the members, still without a solve.
+    const resized = (await prepareCadEdits(built, [{ kind: 'set-parameter', name: 'width', value: 50 }, { kind: 'set-parameter', name: 'hole', value: 5 }], client)).document;
+    const lower = resized.features.find(feature => feature.id === 'lower');
+    expect(lower?.kind === 'sketch' && lower.graph?.entities.find(entity => entity.id === 'lower_c0')).toMatchObject({ radius: 5 });
+    // An edit elsewhere keeps each accepted graph, the same objects, so nothing shown from it changes.
+    const renamed = (await prepareCadEdits(resized, [{ kind: 'rename-document', name: 'Renamed' }], client)).document;
+    for (const id of ['lower', 'upper']) expect(renamed.features.find(feature => feature.id === id)).toBe(resized.features.find(feature => feature.id === id));
+    client.dispose();
+  });
+
+  describe('a regular polygon directed by a line the solve moves', () => {
+    const polygon = { id: 'poly', kind: 'generator' as const, idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon' as const, x: 0, y: 0, radius: 10, sides: 6, directionId: 'dir' } };
+    const direction = { points: [{ id: 'o', position: [0, 0] as const }, { id: 'e', position: [5, 0] as const }],
+      entities: [{ id: 'dir', kind: 'line' as const, construction: true, startPointId: 'o', endPointId: 'e' }] };
+    const corner = expandCadSketchGenerators({ ...direction, relations: [polygon] }, {}).points.find(point => point.id === 'poly_v2')!.position;
+    // A free point held on a generated corner, which must follow it when the polygon turns.
+    const part = () => parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false,
+      plane: 'XY', offset: 0, profiles: [], graph: { points: [...direction.points, { id: 'u', position: corner }], entities: direction.entities,
+        relations: [{ id: 'pin', kind: 'fixed-point', pointId: 'o', position: [0, 0] }, polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v2'] }] } }] });
+    // Each solution crosses the worker boundary, whose check is a solve's too.
+    const wire = { solve: async (input: Parameters<typeof solver.solve>[0]) => {
+      const reply = parseCadSketchSolverReply(structuredClone({ id: 1, kind: 'result', result: cadSketchSolverWireResult(await solver.solve(input)) }), parseCadSketchSolveInput(structuredClone(input)));
+      if (reply.kind !== 'result') throw new Error(reply.message);
+      return reply.result;
+    } };
+    const graphOf = (document: CadDocument) => { const sketch = document.features[0]; if (sketch.kind !== 'sketch' || !sketch.graph) throw new Error('Expected a sketch graph'); return sketch.graph; };
+    const at = (document: CadDocument, id: string) => graphOf(document).points.find(point => point.id === id)!.position as readonly [number, number];
+    /** The polygon turned to `degrees`, with the free point solved again onto its third corner. */
+    const expectTurnedTo = (document: CadDocument, degrees: number) => {
+      const turn = (index: number) => [10 * Math.cos((degrees + 60 * index) * Math.PI / 180), 10 * Math.sin((degrees + 60 * index) * Math.PI / 180)];
+      for (const [id, index] of [['poly_v0', 0], ['poly_v2', 2], ['u', 2]] as const) at(document, id).forEach((value, axis) => expect(value).toBeCloseTo(turn(index)[axis], 9));
+      expect(checkCadSketchGraph(graphOf(document), document.parameters)).toEqual([]);
+    };
+
+    it('regenerates it when a drag turns the line, and solves the geometry on its corners again', async () => {
+      const dragged = (await prepareCadEdits(part(), [{ kind: 'move-sketch-point', sketchId: 'sketch', pointId: 'e', translation: [0, 5] }], wire)).document;
+      expect(at(dragged, 'e')).toEqual([5, 5]);
+      expectTurnedTo(dragged, 45);
+    });
+
+    it('regenerates it when a driving relation turns the line', async () => {
+      const angle = { id: 'angle', kind: 'line-angle' as const, rays: [{ lineId: '@h', towardPointId: '@h' }, { lineId: 'dir', towardPointId: 'e' }] as const, sense: 'ccw' as const, value: 30 };
+      expectTurnedTo((await prepareCadEdits(part(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: angle }], wire)).document, 30);
+    });
+
+    it('refuses a line held on a corner it turns, since each turn moves the corner again', async () => {
+      await expect(prepareCadEdits(part(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'chase', kind: 'coincident', pointIds: ['e', 'poly_v1'] } }], wire))
+        .rejects.toMatchObject({ code: 'invalid-sketch-generator', message: expect.stringContaining('keep moving with the geometry it generates') });
+    });
+
+    it('deletes the line only with the polygon, which the refusal names, and a cascade takes its corners and the relations on them', async () => {
+      const remove = (cascade: boolean): CadEdit => ({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: [], entityIds: ['dir'], relationIds: [], cascade });
+      await expect(prepareCadEdits(part(), [remove(false)], wire)).rejects.toMatchObject({ code: 'dependent-sketch-element',
+        message: 'Regular polygon "poly" is generated from the selected geometry. Select it too, detach it first to keep its geometry, or use cascade deletion.' });
+      const deleted = graphOf((await prepareCadEdits(part(), [remove(true)], wire)).document);
+      expect({ points: deleted.points.map(point => point.id), entities: deleted.entities, relations: deleted.relations.map(relation => relation.id) })
+        .toEqual({ points: ['o', 'e', 'u'], entities: [], relations: ['pin'] });
+      // Detached first, the polygon's edges stay as plain geometry when the line goes.
+      const kept = graphOf(applyCadEdits(part(), [{ kind: 'detach-sketch-generator', sketchId: 'sketch', generatorId: 'poly' }, remove(false)]));
+      expect(kept.entities.map(entity => entity.id)).toEqual(expect.arrayContaining(['poly_e0', 'poly_e5']));
+      expect(kept.relations.map(relation => relation.id)).toContain('tie');
+    });
+  });
+
+  it('ask before removing a relation on a vertex an edit moves in the gap it also inserts into, and never move the geometry on it to another vertex', async () => {
+    type Point = readonly [number, number];
+    const plate = (points: readonly Point[], ids?: readonly number[]) => ({ id: 'p', kind: 'generator' as const, idPrefix: 'p', construction: false,
+      geometry: { kind: 'polygon' as const, points, ...ids ? { ids } : {} } });
+    const square: readonly Point[] = [[0, 0], [20, 0], [20, 20], [0, 20]];
+    const document = parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false,
+      plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [20, 0] }], entities: [],
+        relations: [plate(square), { id: 'tie', kind: 'coincident', pointIds: ['u', 'p_v1'] }] } }] });
+    const set = (generator: ReturnType<typeof plate>, removedRelationIds?: readonly string[]): CadEdit => ({ kind: 'set-sketch-generator', sketchId: 'sketch', generator,
+      ...removedRelationIds ? { removedRelationIds } : {} });
+    const at = (graph: ReturnType<typeof graphOf>, id: string) => graph.points.find(point => point.id === id)!.position as readonly [number, number];
+    // The second vertex moved and another inserted after it: nothing says which new vertex, if either, is the one the point is on.
+    const reshaped: readonly Point[] = [[0, 0], [18, -2], [22, 8], [20, 20], [0, 20]];
+    await expect(prepareCadEdits(document, [set(plate(reshaped))], solver)).rejects.toMatchObject({ code: 'unconfirmed-sketch-generator-removals', relationIds: ['tie'] });
+    // Confirmed, both vertices are new and the point stays where it was.
+    const confirmed = graphOf((await prepareCadEdits(document, [set(plate(reshaped), ['tie'])], solver)).document);
+    expect(confirmed.relations.map(relation => relation.id)).toEqual(['p']);
+    expect(confirmed.relations[0]).toMatchObject({ geometry: { ids: [0, 4, 5, 2, 3] } });
+    expect(at(confirmed, 'u')).toEqual([20, 0]);
+    // The caller's ids say which: the moved vertex is still the second, so the relation stays and the point follows it.
+    const identified = graphOf((await prepareCadEdits(document, [set(plate(reshaped, [0, 1, 4, 2, 3]))], solver)).document);
+    expect(identified.relations.map(relation => relation.id)).toEqual(['p', 'tie']);
+    at(identified, 'u').forEach((value, axis) => expect(value).toBeCloseTo([18, -2][axis], 9));
   });
 });

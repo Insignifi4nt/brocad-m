@@ -6,7 +6,7 @@ import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadSketchGraph, CadSketchGraphEntity, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
 import { cadSketchLinearPatternForSelection, cadSketchLinearPatternInstances } from '@/domain/cad/cadSketchLinearPattern';
-import { cadSketchExternalReferenceComponents } from '@/domain/cad/cadSketchExternalReferences';
+import { cadSketchFixedComponents } from '@/domain/cad/cadSketchFixedComponents';
 import { cadSketchRelationEntityIds, cadSketchRelationPointIds } from '@/domain/cad/cadSketchGraphReferences';
 import { cadSketchRelationDefinition, cadSketchRelationMeaning } from '@/domain/cad/sketch-relations/cadSketchRelationRegistry';
 import { page } from '@/features/webmcp/siteTools';
@@ -102,7 +102,7 @@ export function pageCadSketchConstraints(inspection: CadSketchConstraintInspecti
   for (const entity of graph?.entities ?? []) for (const id of entityPoints(entity)) {
     const edges = adjacency.get(id) ?? []; edges.push(entity.id); adjacency.set(id, edges);
   }
-  const referenceComponents = graph ? cadSketchExternalReferenceComponents(graph) : null;
+  const referenceComponents = graph ? cadSketchFixedComponents(graph) : null;
   const scalar = (value: CadScalar, driving = false, linked = false) => ({ scalar: value, valueMm: evaluateCadScalar(value, inspection.parameters),
     role: linked ? 'linked-reference' : typeof value === 'string' ? 'expression-driver' : driving ? 'constant-driver' : 'solver-variable' });
   const pattern = (kind: 'point' | 'entity', id: string) => {

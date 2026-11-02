@@ -8,6 +8,17 @@ import type { CadTopologyAdjacency, CadTopologyAdjacencyRequest, CadTopologyTang
 import type { CadFeatureTopologyPickCommand } from './cadFeatureReferencePicking';
 import type { CadInspectTopology } from './CadTopologyInspector';
 import { CadTangentChainReads, mergeTopologySelection, sharedCadTopologyRead, validateTopologySelection, type CadTopologyHit } from './cadTopologyPicking';
+import { cadGeneratorRemovals, cadGeneratorRemovalText } from './cadGeneratorRemovals';
+
+/**
+ * Why the input body could not be shown. Parameters that remove relations as generators regenerate build no input, as a preview
+ * removes nothing: the editor asks about them on Apply, so the pick says what they remove and waits for that.
+ */
+function inputFailure(cause: unknown, document: CadDocument): string {
+  const removals = cadGeneratorRemovals(cause);
+  return removals ? `${cadGeneratorRemovalText(document, removals)} Apply or cancel the parameter change first, then choose geometry.`
+    : userFacingMessage(cause, 'Unable to show the feature input.');
+}
 
 export interface CadFeatureInputPicking {
   build(request: CadFeatureInputRequest, version: string, signal: AbortSignal): Promise<CadFeatureInputSnapshot>;
@@ -47,7 +58,7 @@ export function useCadFeatureTopologyPick(command: CadFeatureTopologyPickCommand
       if (source.documentId !== document.id || source.version !== version || source.featureId !== command.request.featureId || source.bodyId !== command.request.bodyId
         || source.result.diagnostics.length || !source.result.meshes.some(mesh => mesh.featureId === source.bodyId)) throw new Error('The feature input changed. Cancel and choose its geometry again.');
       setState({ command, source, selection: null, busy: false, error: null, notice: null });
-    }).catch((cause: unknown) => { if (current()) setState({ command, source: null, selection: null, busy: false, error: userFacingMessage(cause, 'Unable to show the feature input.'), notice: null }); });
+    }).catch((cause: unknown) => { if (current()) setState({ command, source: null, selection: null, busy: false, error: inputFailure(cause, document), notice: null }); });
     return () => { owner.abort.abort(); if (job.current === owner) job.current = null; if (token) operations.release(token); };
   }, [command, document, version, Boolean(operations)]);
   const current = state?.command === command && job.current?.document === document && job.current.version === version && command?.expectedVersion === version ? state : null;

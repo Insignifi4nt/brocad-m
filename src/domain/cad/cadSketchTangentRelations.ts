@@ -1,6 +1,7 @@
 import { CadError } from './cadError';
-import type { CadSketchGraph, CadSketchTangentJointRelation, CadSketchGraphIssue } from './cadSketchGraph';
-import { resolveCadSketchPointIdentities, resolveCadSketchGraphJoints } from './cadSketchGraphJoints';
+import type { CadSketchGraph, CadSketchGraphRelation, CadSketchTangentJointRelation, CadSketchGraphIssue } from './cadSketchGraph';
+import { cadSketchPointIdentityClass, resolveCadSketchPointIdentities, resolveCadSketchGraphJoints } from './cadSketchGraphJoints';
+import { cadSketchGraphEntity } from './cadSketchGraphLookup';
 import { resolveCadSketchCornerTopology } from './cadSketchCornerGeometry';
 import { cadSketchLineDirection } from './cadSketchLineRelations';
 import { cadPathClosureTolerance } from './cadAnalyticSegments';
@@ -14,10 +15,26 @@ export class CadSketchTangentOwnershipError extends CadError<'already-driven-ske
   }
 }
 
+type FilletCorner = Extract<CadSketchGraphRelation, { kind: 'fillet-corner' }>;
+// The fillet corners of a frozen graph by their arc, so each tangent joint finds its owner without scanning every relation.
+const cornerIndexes = new WeakMap<readonly CadSketchGraphRelation[], ReadonlyMap<string, readonly FilletCorner[]>>();
+function filletCornersOn(graph: CadSketchGraph, arcId: string): readonly FilletCorner[] {
+  if (!Object.isFrozen(graph.relations)) return graph.relations.filter((relation): relation is FilletCorner => relation.kind === 'fillet-corner' && relation.arcId === arcId);
+  let index = cornerIndexes.get(graph.relations);
+  if (!index) {
+    const corners = new Map<string, FilletCorner[]>();
+    for (const relation of graph.relations) if (relation.kind === 'fillet-corner') {
+      const list = corners.get(relation.arcId); if (list) list.push(relation); else corners.set(relation.arcId, [relation]);
+    }
+    cornerIndexes.set(graph.relations, index = corners);
+  }
+  return index.get(arcId) ?? [];
+}
+
 /** Authored finite endpoints only; equal coordinates never declare a joint. */
 export function resolveCadSketchTangentJoint(graph: CadSketchGraph, relation: Pick<CadSketchTangentJointRelation, 'endpoints'>) {
   const [first, second] = relation.endpoints;
-  const a = graph.entities.find(entity => entity.id === first.entityId), b = graph.entities.find(entity => entity.id === second.entityId);
+  const a = cadSketchGraphEntity(graph, first.entityId), b = cadSketchGraphEntity(graph, second.entityId);
   const line = a?.kind === 'line' ? a : b?.kind === 'line' ? b : null;
   const arc = a?.kind === 'arc' ? a : b?.kind === 'arc' ? b : null;
   if (!line || !arc)
@@ -31,7 +48,7 @@ export function resolveCadSketchTangentJoint(graph: CadSketchGraph, relation: Pi
   const otherLineEndId = linePointId === line.startPointId ? line.endPointId : line.startPointId;
   if (identity(otherLineEndId) === joint || new Set([arc.centerPointId, arc.startPointId, arc.endPointId].map(identity)).size !== 3)
     throw new CadError('invalid-sketch-tangent-joint', 'Tangent supports must retain distinct line ends, arc ends and arc center.');
-  for (const owner of graph.relations) if (owner.kind === 'fillet-corner' && owner.arcId === arc.id && owner.lineIds.includes(line.id)) {
+  for (const owner of filletCornersOn(graph, arc.id)) if (owner.lineIds.includes(line.id)) {
     const topology = resolveCadSketchCornerTopology(graph, owner), index = topology.lines.findIndex(item => item.id === line.id);
     if (identity(topology.trimPointIds[index]) === joint) throw new CadSketchTangentOwnershipError(owner.id);
   }
@@ -49,7 +66,7 @@ export function checkCadSketchTangentJoint(graph: CadSketchGraph, relation: CadS
     if (!outwardLine || !radial || !otherArcEnd) return []; // Owning coordinate checks report unavailable positions.
     const identity = resolveCadSketchPointIdentities(graph), joint = identity(linePointId);
     // Check the complete declared class with strict closure roundoff, never the driver floor.
-    resolveCadSketchGraphJoints(graph, new Map([...points].filter(([id]) => identity(id) === joint)));
+    resolveCadSketchGraphJoints(graph, new Map(cadSketchPointIdentityClass(graph, joint).flatMap(id => { const at = points.get(id); return at ? [[id, at] as const] : []; })), identity);
     const sigma = (arc.direction === 'ccw' ? 1 : -1) * (arcJointIsStart ? 1 : -1);
     const tangent = { x: -sigma * radial.y, y: sigma * radial.x };
     const dot = outwardLine.x * tangent.x + outwardLine.y * tangent.y;

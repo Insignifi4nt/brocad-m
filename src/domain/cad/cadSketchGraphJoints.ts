@@ -1,11 +1,46 @@
 import { CadError } from './cadError';
 import { cadPathClosureTolerance } from './cadAnalyticSegments';
-import type { CadSketchGraph } from './cadSketchGraph';
+import type { CadSketchGraph, CadSketchGraphPoint, CadSketchGraphRelation } from './cadSketchGraph';
 import type { Point2 } from '@/domain/path-intel/types';
 import { isCadSketchVirtualId } from './sketch-relations/cadSketchVirtualElements';
 
+interface Identities {
+  readonly points: readonly CadSketchGraphPoint[];
+  readonly root: (pointId: string) => string;
+  /** The stored points of each identity, by the identity; made the first time a caller asks. */
+  classes?: ReadonlyMap<string, readonly string[]>;
+}
+// Each relation check that joins points asks for the graph's identities. Made again for each one, they would make a graph with many
+// generated tangent joints quadratic to check, so a frozen graph, whose points and relations cannot change, keeps them with its relations.
+const identityMemo = new WeakMap<readonly CadSketchGraphRelation[], Identities>();
+function identitiesOf(graph: Pick<CadSketchGraph, 'points' | 'relations'>): Identities {
+  const frozen = Object.isFrozen(graph.relations) && Object.isFrozen(graph.points), known = frozen ? identityMemo.get(graph.relations) : undefined;
+  if (known && known.points === graph.points) return known;
+  const made: Identities = { points: graph.points, root: pointIdentities(graph) };
+  if (frozen) identityMemo.set(graph.relations, made);
+  return made;
+}
+
 /** Declared source identities only; numeric intent may still be unsolved. */
 export function resolveCadSketchPointIdentities(graph: CadSketchGraph): (pointId: string) => string {
+  return identitiesOf(graph).root;
+}
+
+/** The stored points that share `pointId`'s identity, itself included when stored; none for the origin. */
+export function cadSketchPointIdentityClass(graph: CadSketchGraph, pointId: string): readonly string[] {
+  const identities = identitiesOf(graph);
+  if (!identities.classes) {
+    const classes = new Map<string, string[]>();
+    for (const point of graph.points) {
+      const key = identities.root(point.id), members = classes.get(key);
+      if (members) members.push(point.id); else classes.set(key, [point.id]);
+    }
+    identities.classes = classes;
+  }
+  return identities.classes.get(identities.root(pointId)) ?? [];
+}
+
+function pointIdentities(graph: Pick<CadSketchGraph, 'points' | 'relations'>): (pointId: string) => string {
   // The origin and the axes are their own identity: nothing stored joins them, since a point at the origin is stored as its coordinates.
   if (!graph.relations.some(relation => relation.kind === 'coincident')) return id => id;
   const parents = new Map(graph.points.map(point => [point.id, point.id]));

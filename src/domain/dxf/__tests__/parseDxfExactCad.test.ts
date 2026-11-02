@@ -2,6 +2,7 @@
 import { expect, it } from 'vitest';
 import { parseDxf } from '../parseDxf';
 import { importCadDxfSketch } from '@/domain/cad/cadDxfImport';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const line = '0\nLINE\n10\n0\n20\n0\n11\n1\n21\n0\n';
 const block = (name: string, contents: string) => `0\nBLOCK\n2\n${name}\n10\n0\n20\n0\n${contents}0\nENDBLK\n`;
@@ -51,8 +52,8 @@ it('resolves a deep acyclic block chain without recursion while preserving every
   const chain = parsed.entities[0].source?.insertChain;
   expect(chain).toHaveLength(depth + 1); expect(chain?.every((entry, index) => entry.blockName === `B${depth - index}`)).toBe(true);
   const imported = importCadDxfSketch({ fileName: 'deep-circle.dxf', units: 'mm', text });
-  expect(imported.sketch.source?.text).toBe(text); expect(imported.sketch.profiles).toHaveLength(1);
-  expect(imported.sketch.profiles[0].geometry).toEqual({ kind: 'circle', x: 2 + depth + 1, y: 3 - depth - 1, radius: 2 });
+  expect(imported.sketch.source?.text).toBe(text); expect(cadSketchProfileViews(imported.sketch)).toHaveLength(1);
+  expect(cadSketchProfileViews(imported.sketch)[0].geometry).toEqual({ kind: 'circle', x: 2 + depth + 1, y: 3 - depth - 1, radius: 2 });
   expect(() => parseDxf(text)).toThrow(expect.objectContaining({ resource: 'insertDepth' }));
 }, 15_000);
 

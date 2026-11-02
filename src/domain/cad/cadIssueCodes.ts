@@ -18,16 +18,16 @@ export const CAD_REFUSAL_CODES = Object.freeze([
   'invalid-pocket-bounds', 'invalid-pocket-extent', 'invalid-profile', 'invalid-profile-role', 'invalid-radius', 'invalid-reference',
   'invalid-region-selection', 'invalid-scalar', 'invalid-selector', 'invalid-selector-dimension', 'invalid-shell-opening',
   'invalid-sketch-angle', 'invalid-sketch-angle-ray', 'invalid-sketch-annotation', 'invalid-sketch-cell-id', 'invalid-sketch-cells',
-  'invalid-sketch-cycle', 'invalid-sketch-graph', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair', 'invalid-sketch-midpoint',
+  'invalid-sketch-cycle', 'invalid-sketch-generator', 'invalid-sketch-graph', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair', 'invalid-sketch-midpoint',
   'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve',
   'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair', 'invalid-sketch-reference',
   'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry', 'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'invalid-solid',
   'kernel-operation-failed', 'loft-failed', 'loft-invalid', 'loft-open', 'loft-overshoot', 'loft-placement', 'loft-section-limit',
   'loft-sections', 'loft-volume', 'missing-body', 'missing-sketch', 'missing-sketch-entity', 'missing-sketch-point', 'missing-target',
-  'non-canonical-sketch-relation', 'open-profile', 'overconstrained-sketch-dimension', 'owned-sketch-pattern', 'pattern-limit',
+  'non-canonical-sketch-relation', 'open-profile', 'overconstrained-sketch-dimension', 'owned-sketch-generator', 'owned-sketch-pattern', 'pattern-limit',
   'plugin-limit', 'plugin-size', 'pocket-erased', 'pocket-invalid', 'pocket-no-material', 'pocket-open', 'pocket-span-limit', 'pocket-tool',
   'profile-intersection', 'rebuild-stopped', 'reserved-sketch-id', 'selection-count-mismatch', 'selection-empty', 'selection-tangent-chain',
-  'self-intersection', 'shell-components', 'shell-failed', 'shell-thickness', 'sketch-graph-precision', 'stale-sketch-reference',
+  'self-intersection', 'shell-components', 'shell-failed', 'shell-thickness', 'sketch-graph-precision', 'stale-sketch-generator', 'stale-sketch-reference',
   'stale-sketch-region', 'step-read', 'step-roots', 'step-transfer', 'step-units', 'step-units-unsupported', 'stl-coordinate', 'stl-facets',
   'stl-incomplete', 'stl-open', 'stl-orientation', 'stl-read', 'stl-shells', 'suppressed-curve', 'suppressed-sketch', 'sweep-curve',
   'sweep-empty', 'sweep-failed', 'sweep-invalid', 'sweep-open', 'sweep-section', 'sweep-volume', 'sweep-work-limit', 'topology-mapping',
@@ -35,7 +35,7 @@ export const CAD_REFUSAL_CODES = Object.freeze([
   'unsupported-cut-removal', 'unsupported-cut-target', 'unsupported-datum-frame', 'unsupported-datum-operation',
   'unsupported-datum-precision', 'unsupported-loft-planes', 'unsupported-loft-section', 'unsupported-pocket-precision',
   'unsupported-pocket-removal', 'unsupported-pocket-span', 'unsupported-pocket-target', 'unsupported-selection', 'unsupported-sketch-cells',
-  'unsupported-sketch-dimension', 'unsupported-sketch-format', 'unsupported-sketch-operand', 'unsupported-sweep-clearance',
+  'unsupported-sketch-dimension', 'unsupported-sketch-format', 'unsupported-sketch-offset', 'unsupported-sketch-operand', 'unsupported-sweep-clearance',
   'unsupported-sweep-corner', 'unsupported-sweep-placement', 'unsupported-sweep-precision', 'unsupported-sweep-section'
 ] as const);
 export type CadRefusalCode = (typeof CAD_REFUSAL_CODES)[number];
@@ -146,13 +146,13 @@ export const CAD_CAM_STEP_CODES = Object.freeze({
     'empty-sketch', 'expression-limit', 'fixed-sketch-relation', 'invalid-corner-geometry', 'invalid-corner-topology', 'invalid-distance',
     'invalid-expression', 'invalid-gear', 'invalid-plugin', 'invalid-plugin-inputs', 'invalid-plugin-rules', 'invalid-profile', 'invalid-profile-role',
     'invalid-radius', 'invalid-region-selection', 'invalid-scalar', 'invalid-sketch-angle', 'invalid-sketch-angle-ray', 'invalid-sketch-cell-id',
-    'invalid-sketch-cells', 'invalid-sketch-cycle', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair', 'invalid-sketch-midpoint',
-    'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve',
+    'invalid-sketch-cells', 'invalid-sketch-cycle', 'invalid-sketch-generator', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair',
+    'invalid-sketch-midpoint', 'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve',
     'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair', 'invalid-sketch-reference',
     'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry', 'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'missing-sketch',
     'missing-sketch-entity', 'missing-sketch-point', 'open-profile', 'owned-sketch-pattern', 'plugin-limit', 'plugin-size', 'profile-intersection',
     'self-intersection', 'sketch-graph-precision', 'stale-sketch-region', 'suppressed-sketch', 'unknown-parameter', 'unlowerable-sketch-operand',
-    'unsupported-sketch-cells', 'unsupported-sketch-operand'] as const),
+    'unsupported-sketch-cells', 'unsupported-sketch-offset', 'unsupported-sketch-operand'] as const),
   section: Object.freeze(['cam-geometry', 'degenerate-section', 'division-by-zero', 'empty-section', 'expression-limit', 'invalid-expression',
     'invalid-plane', 'invalid-scalar', 'invalid-section', 'kernel-operation-failed', 'missing-body', 'open-section', 'section-failed', 'tangent-section',
     'unknown-parameter', 'unsupported-section-curve'] as const)
@@ -175,7 +175,8 @@ export function isCadCamCode<O extends CadCamOperation>(operation: O, code: unkn
  *   the body, contours the path planner cannot close, which the section counts, or curves DXF cannot write; a kernel failure without a code
  *   of its own is `kernel-operation-failed`.
  * - `dxf-sketch`: a sketch DXF export: the sketch it names, which must be active and have a contour that is no construction geometry, its
- *   contours as a sketch sent to CAM evaluates them (expressions, relations, cells, plugins and profiles), or curves DXF cannot write.
+ *   contours as a sketch sent to CAM evaluates them (expressions, relations, cells, plugins, profiles and generated shapes), or curves DXF
+ *   cannot write.
  * - `dxf-curve`: a reference curve DXF export: the curve it names, which must be active, its edges as the curve resolves them (expressions,
  *   an imported DXF source, and a chain that is open, connected and does not cross itself), or an open polyline that cannot keep them exactly.
  * A step's other failures are no problem of the export or its source and give no issue (`cadRefusalIssue`).
@@ -188,12 +189,14 @@ export const CAD_EXPORT_STEP_CODES = Object.freeze({
     'empty-sketch', 'expression-limit', 'fixed-sketch-relation', 'invalid-corner-geometry', 'invalid-corner-topology', 'invalid-distance',
     'invalid-expression', 'invalid-gear', 'invalid-plugin', 'invalid-plugin-inputs', 'invalid-plugin-rules', 'invalid-profile', 'invalid-profile-role',
     'invalid-radius', 'invalid-region-selection', 'invalid-scalar', 'invalid-sketch-angle', 'invalid-sketch-angle-ray', 'invalid-sketch-cell-id',
-    'invalid-sketch-cells', 'invalid-sketch-cycle', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair', 'invalid-sketch-midpoint',
-    'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve', 'invalid-sketch-point-on-line',
+    'invalid-sketch-cells', 'invalid-sketch-cycle', 'invalid-sketch-generator', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair',
+    'invalid-sketch-midpoint', 'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve',
+    'invalid-sketch-point-on-line',
     'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair', 'invalid-sketch-reference', 'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry',
     'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'missing-sketch', 'missing-sketch-entity', 'missing-sketch-point', 'open-profile',
     'owned-sketch-pattern', 'plugin-limit', 'plugin-size', 'profile-intersection', 'self-intersection', 'sketch-graph-precision', 'stale-sketch-region',
-    'suppressed-sketch', 'unknown-parameter', 'unlowerable-sketch-operand', 'unsupported-entity', 'unsupported-sketch-cells', 'unsupported-sketch-operand'] as const),
+    'suppressed-sketch', 'unknown-parameter', 'unlowerable-sketch-operand', 'unsupported-entity', 'unsupported-sketch-cells', 'unsupported-sketch-offset',
+    'unsupported-sketch-operand'] as const),
   'dxf-curve': Object.freeze(['closed-curve', 'disconnected-curve', 'division-by-zero', 'dxf-arc-precision', 'dxf-inexact', 'empty-curve', 'expression-limit',
     'invalid-curve', 'invalid-dxf-source', 'invalid-expression', 'invalid-profile', 'invalid-scalar', 'missing-curve', 'self-intersection', 'suppressed-curve',
     'unknown-parameter'] as const)

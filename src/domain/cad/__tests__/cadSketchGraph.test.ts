@@ -34,6 +34,17 @@ describe('owned sketch graph source', () => {
     expect(() => parseCadSketchGraph({ ...source(), surprise: true })).toThrow();
   });
 
+  it('refuses an edge or relation that names one point twice', () => {
+    const points = [...source().points, { id: 'c', position: [0, 10] }];
+    const repeats = [
+      { points, entities: [{ id: 'line', kind: 'line', startPointId: 'a', endPointId: 'a', construction: false }], relations: [] },
+      { points, entities: [{ id: 'arc', kind: 'arc', centerPointId: 'a', startPointId: 'a', endPointId: 'b', direction: 'ccw', construction: false }], relations: [] },
+      { ...source(), relations: [{ id: 'join', kind: 'coincident', pointIds: ['b', 'b'] }] }
+    ];
+    for (const graph of repeats) expect(() => parseCadSketchGraph(graph)).toThrowError(expect.objectContaining({ code: 'invalid-sketch-reference' }));
+    expect(parseCadSketchGraph({ points, entities: [{ id: 'arc', kind: 'arc', centerPointId: 'a', startPointId: 'b', endPointId: 'c', direction: 'ccw', construction: false }], relations: [] }).entities).toHaveLength(1);
+  });
+
   it('returns an accepted graph as it is and parses copies, proxies and frozen lookalikes in full', () => {
     const graph = parseCadSketchGraph(source());
     expect(parseCadSketchGraph(graph)).toBe(graph);

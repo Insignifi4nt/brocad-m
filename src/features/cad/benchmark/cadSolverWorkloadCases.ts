@@ -1,6 +1,6 @@
 import { parseCadSketchGraph, type CadSketchGraph, type CadSketchGraphEntity, type CadSketchGraphPoint, type CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
 import { createCadSketchCornerTreatmentFromIds } from '@/domain/cad/cadSketchCornerTreatment';
-import { cadSketchExternalReferenceComponents } from '@/domain/cad/cadSketchExternalReferences';
+import { cadSketchFixedComponents } from '@/domain/cad/cadSketchFixedComponents';
 import type { CadSketchSolveInput } from '../sketch-solver/cadSketchSolverTypes';
 import { createCadBenchmarkRectangleGraph } from './cadBenchmarkCases';
 
@@ -13,7 +13,7 @@ export interface CadSolverWorkloadCase {
 /** Small, deterministic displacement of numeric starts, including fixed-point relation starts.
  * Expressions and external snapshots retain their ownership. Never timed as part of a solve. */
 export function perturbCadSolverInput(input: CadSketchSolveInput, amount = .015): CadSketchSolveInput {
-  const owned = cadSketchExternalReferenceComponents(input.graph);
+  const owned = cadSketchFixedComponents(input.graph);
   return { ...input, graph: parseCadSketchGraph({ ...input.graph, points: input.graph.points.map((point, index) => ({ ...point,
     position: point.position.map((value, axis) => typeof value === 'number' && !owned.pointIds.has(point.id)
       ? value + amount * Math.sin((index + 1) * 7 + axis * 3) : value)

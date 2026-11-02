@@ -250,6 +250,17 @@ type Binding =
   | { readonly kind: 'element'; readonly of: ts.Expression }
   | { readonly kind: 'variable'; readonly element?: ts.BindingElement };
 const destructuring = (pattern: ts.BindingName, name: string): Binding => ({ kind: 'variable', element: elementNamed(pattern, name) });
+/**
+ * The declaration with a value that `identifier` is destructured from, as a statement declares it, or undefined for any other name. Its
+ * value runs as a variable's does, wherever the name is used, a closure entered apart from the code around it included.
+ */
+function destructuredDeclaration(identifier: ts.Identifier): ts.VariableDeclaration | undefined {
+  const found = binding(identifier);
+  if (!found || !isBinding(found) || found.kind !== 'variable' || !found.element) return undefined;
+  let root: ts.Node = found.element;
+  while (ts.isBindingElement(root) || ts.isObjectBindingPattern(root) || ts.isArrayBindingPattern(root)) root = root.parent;
+  return ts.isVariableDeclaration(root) && root.initializer && ts.isVariableStatement(root.parent.parent) ? root : undefined;
+}
 /** The path segment that reads any element of a list, or any property of an object read by a key the walk cannot tell. */
 const ELEMENT = '[]';
 /** The path segment that calls a function and reads what it returns. */
@@ -876,6 +887,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       codesOf(file, value.expression, [keyText(file, value.argumentExpression) ?? ELEMENT, ...path], at);
       return;
     }
+    // `Array.from(source, map)` holds what `map` returns.
+    if (ts.isCallExpression(value) && path[0] === ELEMENT && value.arguments.length === 2 && value.expression.getText() === 'Array.from') {
+      codesOf(file, value.arguments[1], [CALL, ...path.slice(1)], at);
+      return;
+    }
     if (ts.isCallExpression(value)) { codesOf(file, value.expression, [CALL, ...path], at); return; }
     if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) { called(file, value, path); return; }
     if (ts.isArrayLiteralExpression(value) && path[0] === ELEMENT) {
@@ -1214,11 +1230,14 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   };
   /**
    * A name the walk resolves to no declaration of the source. A parameter, a caught error and a loop or destructured variable stand for a
-   * value read where it is given. A namespace runs its exports as its members are read; used as a value any other way, it is reported, and
+   * value read where it is given; a variable a statement destructures also runs the value it is destructured from
+   * (`destructuredDeclaration`). A namespace runs its exports as its members are read; used as a value any other way, it is reported, and
    * runs them all, as a constant object does. Any other name is reported unless TypeScript shows it names nothing of the source
    * (`outsideName`): the walk never takes a name it cannot find to run nothing.
    */
   const unfound = (file: string, name: ts.Identifier) => {
+    const declaration = destructuredDeclaration(name);
+    if (declaration) { push({ file, node: declaration }); return; }
     if (lexical(name) === 'parameter') return;
     const namespace = index.namespace(file, name);
     if (namespace) {

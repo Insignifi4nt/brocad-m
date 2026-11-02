@@ -29,7 +29,7 @@ export default defineConfig({
     projects: [
       {
         extends: true,
-        test: { name: 'pure-domain', environment: 'node', include: pureDomainTests, setupFiles: [] }
+        test: { name: 'pure-domain', environment: 'node', include: pureDomainTests, setupFiles: ['./src/domain/domainTestSetup.ts'] }
       },
       {
         extends: true,
@@ -38,7 +38,7 @@ export default defineConfig({
           environment: 'jsdom',
           include: ['src/**/*.{test,spec}.{ts,tsx}'],
           exclude: pureDomainTests,
-          setupFiles: ['./src/testSetup.ts']
+          setupFiles: ['./src/domain/domainTestSetup.ts', './src/testSetup.ts']
         }
       }
     ]

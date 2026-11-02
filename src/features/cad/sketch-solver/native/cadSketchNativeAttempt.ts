@@ -62,7 +62,9 @@ const STALLED_DRAG = 'The point could not be moved toward the target from this s
  */
 export function attemptCadSketchNativeSolve(input: CadSketchSolveInput, solver: CadSketchNativeSolver, observe?: CadSketchSolverStageObserver): CadSketchNativeAttempt {
   const clock = cadSketchSolverStageClock(observe, 'parseCompile');
-  const check: Check = observe ? (graph, parameters) => clock.during('validation', () => checkCadSketchGraph(graph, parameters)) : checkCadSketchGraph;
+  // A solution is checked as a solve's: its caller regenerates generated geometry from the inputs it moved.
+  const check: Check = observe ? (graph, parameters) => clock.during('validation', () => checkCadSketchGraph(graph, parameters, 'solve'))
+    : (graph, parameters) => checkCadSketchGraph(graph, parameters, 'solve');
   try {
     let model: CadSketchCompiledSketch;
     try { model = compileCadSketchEquations(input); }

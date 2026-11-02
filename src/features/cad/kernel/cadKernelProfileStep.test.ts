@@ -62,7 +62,7 @@ describe('the profile step of a feature that builds faces from its sketch', () =
     expect(diagnostic).toEqual({ code: 'kernel-operation-failed', featureId: 'solid', message: expect.stringMatching(PROFILE),
       details: { ...profileStep('profile'), kernelMessage: 'Forced face failure' } });
     // The issue row names the sketch the face was built from, by its name.
-    const [issue] = cadBuildIssues(document(features), { diagnostics: [diagnostic] }, 'v1', true).items;
+    const [issue] = cadBuildIssues(document(features), { diagnostics: [diagnostic] }, 'v1').items;
     expect(cadIssueSubjectLabel(issue.subject, cadIssueNames([issue], document(features)))).toBe('solid · input profile sketch');
     restores.pop()!();
     fault('BRepPrimAPI_MakePrism', 'Shape', 1, { error: 'Forced prism failure' });

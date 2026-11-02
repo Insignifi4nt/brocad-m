@@ -1,4 +1,5 @@
-import type { CadDocument, CadProfile, CadSketchFeature } from './cadDocument';
+import type { CadDocument, CadFeature, CadProfile, CadSketchFeature } from './cadDocument';
+import { cadFeatureDependencies } from './cadFeatureInputs';
 import { cadFeatureActive } from './features/cadFeatureActivity';
 import type { DxfPoint } from '../dxf/types';
 import { CadError } from './cadError';
@@ -14,11 +15,12 @@ import { prepareCadSketchGraphCells } from './cadSketchGraphCells';
 export type { CadSketchCellMode, CadSketchCellId } from './cadSketchRegionSelection';
 import { readCadSketchGeometryParameters, sameCadSketchGeometryValues } from './cadSketchParameterReads';
 import { CadSketchSplitTargetSchema, splitCadSketchEntity, type CadSketchSplitTarget } from './cadSketchSplit';
-import { CadSketchCutAxesSchema, CadSketchTrimTargetSchema, prepareCadSketchTrim, trimCadSketchEntity, type CadSketchTrimTarget,
+import { CadSketchCutAxesSchema, CadSketchRemovedRelationIdsSchema, CadSketchTrimTargetSchema, prepareCadSketchTrim, trimCadSketchEntity, type CadSketchTrimTarget,
   CadSketchExtendTargetSchema, prepareCadSketchExtend, extendCadSketchEntity, type CadSketchExtendTarget } from './cadSketchTrimExtend';
 import { CadSketchOffsetRequestSchema, prepareCadSketchOffset, type CadSketchOffsetRequest } from './cadSketchOffset';
 import { CadSketchMirrorRequestSchema, prepareCadSketchMirror, type CadSketchMirrorRequest } from './cadSketchMirror';
 import { deepFreezeCadData } from './cadDeepFreeze';
+import { CadSketchGeneratorSchema, type CadSketchGenerator } from './cadSketchGraph';
 
 export interface CadPreparedSketchCell {
   readonly id: CadSketchCellId;
@@ -139,23 +141,38 @@ export function cadSketchCellModeForAreas(sketch: CadSketchFeature, parameters: 
 
 /** Numeric additions/overrides keep existing semantics; topology proposals never accept a replacement sketch. */
 export type CadSketchRegionProposal =
-  | { readonly sketch?: CadSketchFeature; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly parameterValues?: CadDocument['parameters'] }
-  | { readonly split: CadSketchSplitTarget; readonly sketch?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly parameterValues?: CadDocument['parameters'] }
-  | { readonly trim: CadSketchTrimTarget; readonly sketch?: never; readonly split?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly parameterValues?: CadDocument['parameters'] }
-  | { readonly extend: CadSketchExtendTarget; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly offset?: never; readonly mirror?: never; readonly parameterValues?: CadDocument['parameters'] }
-  | { readonly offset: CadSketchOffsetRequest; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly mirror?: never; readonly parameterValues?: CadDocument['parameters'] }
-  | { readonly mirror: CadSketchMirrorRequest; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly parameterValues?: CadDocument['parameters'] };
+  | { readonly sketch?: CadSketchFeature; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly generator?: never; readonly parameterValues?: CadDocument['parameters'] }
+  | { readonly split: CadSketchSplitTarget; readonly sketch?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly generator?: never; readonly parameterValues?: CadDocument['parameters'] }
+  | { readonly trim: CadSketchTrimTarget; readonly sketch?: never; readonly split?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly generator?: never; readonly parameterValues?: CadDocument['parameters'] }
+  | { readonly extend: CadSketchExtendTarget; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly offset?: never; readonly mirror?: never; readonly generator?: never; readonly parameterValues?: CadDocument['parameters'] }
+  | { readonly offset: CadSketchOffsetRequest; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly mirror?: never; readonly generator?: never; readonly parameterValues?: CadDocument['parameters'] }
+  | { readonly mirror: CadSketchMirrorRequest; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly generator?: never; readonly parameterValues?: CadDocument['parameters'] }
+  | { readonly generator: CadSketchGeneratorProposal; readonly sketch?: never; readonly split?: never; readonly trim?: never; readonly extend?: never; readonly offset?: never; readonly mirror?: never; readonly parameterValues?: CadDocument['parameters'] };
+/** The fields of a set-sketch-generator edit after its kind and sketch: the complete record and the relations its regeneration removes. */
+export interface CadSketchGeneratorProposal { readonly generator: CadSketchGenerator; readonly removedRelationIds?: readonly string[] }
 export const CadSketchRegionProposalSchema = Type.Union([
   Type.Object({ sketch: Type.Optional(CadSketchFeatureSchema), parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false, minProperties: 1 }),
   Type.Object({ split: CadSketchSplitTargetSchema, parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false }),
   Type.Object({ trim: CadSketchTrimTargetSchema, parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false }),
   Type.Object({ extend: CadSketchExtendTargetSchema, parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false }),
   Type.Object({ offset: CadSketchOffsetRequestSchema, parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false }),
-  Type.Object({ mirror: CadSketchMirrorRequestSchema, parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false })
+  Type.Object({ mirror: CadSketchMirrorRequestSchema, parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false }),
+  Type.Object({ generator: Type.Object({ generator: CadSketchGeneratorSchema, removedRelationIds: CadSketchRemovedRelationIdsSchema }, { additionalProperties: false }),
+    parameterValues: Type.Optional(CadDocumentSchema.properties.parameters) }, { additionalProperties: false })
 ]);
 export function validateCadSketchRegionProposal(proposal: CadSketchRegionProposal): void {
   if (!isCadImportData(proposal) || !Value.Check(CadSketchRegionProposalSchema, proposal))
-    throw new CadError('invalid-region-proposal', 'Propose a complete same-ID sketch, one exact split, one witnessed trim or extension, one detached loop offset, or one mirror copy, with optional numeric parameter values; parameter-only proposals are also supported.');
+    throw new CadError('invalid-region-proposal', 'Propose a complete same-ID sketch, one exact split, one witnessed trim or extension, one detached loop offset, one mirror copy, or the fields of one set-sketch-generator edit, with optional numeric parameter values; parameter-only proposals are also supported.');
+}
+
+/** The features of `preceding` that `feature` depends on, directly or through one another, in their order. */
+function precedingDependencies(preceding: readonly CadFeature[], feature: CadFeature): readonly CadFeature[] {
+  const byId = new Map(preceding.map(entry => [entry.id, entry])), needed = new Set<string>(), pending = [...cadFeatureDependencies(feature)];
+  for (let id = pending.pop(); id !== undefined; id = pending.pop()) {
+    const dependency = byId.get(id);
+    if (dependency && !needed.has(id)) { needed.add(id); pending.push(...cadFeatureDependencies(dependency)); }
+  }
+  return preceding.filter(entry => needed.has(entry.id));
 }
 
 function activeSketch(document: CadDocument, sketchId: string, proposal?: CadSketchRegionProposal) {
@@ -168,9 +185,9 @@ function activeSketch(document: CadDocument, sketchId: string, proposal?: CadSke
     validateCadSketchRegionProposal(proposal);
     if (proposal.sketch !== undefined && proposal.sketch.id !== sketchId)
       throw new CadError('invalid-region-proposal', 'The proposed sketch must keep the same requested sketch identity.');
-    // Read only this complete source and its actual preceding datum dependency.
-    // Other selected solids may intentionally need repair in the same later
-    // atomic batch; validating them here would prevent inspecting fresh cells.
+    // Read only this complete source and the preceding features it needs: its datum plane and the sketches its references use, with
+    // what they need in turn. Later consumers may intentionally need repair in the same atomic batch; validating them here would
+    // prevent inspecting fresh cells.
     const parameters = { ...validated.parameters, ...proposal.parameterValues };
     let source = proposal.sketch ?? sketch;
     if (proposal.split !== undefined) {
@@ -186,11 +203,13 @@ function activeSketch(document: CadDocument, sketchId: string, proposal?: CadSke
       source = prepareCadSketchOffset({ sketch, parameters, ...proposal.offset }).sketch;
     } else if (proposal.mirror !== undefined) {
       source = prepareCadSketchMirror({ sketch, parameters, ...proposal.mirror }).sketch;
+    } else if (proposal.generator !== undefined) {
+      // Free geometry related to the members moves only when the edit is solved, so a generator proposal is read after its edit is
+      // prepared, as a complete same-ID sketch (`prepareCadSketchRegionProposal`).
+      throw new CadError('invalid-region-proposal', 'Prepare a generator proposal as its set-sketch-generator edit before reading its cells.');
     }
-    const sourcePlane = source.plane;
-    const requiredDatums = typeof sourcePlane === 'string' ? [] : validated.features.slice(0, index)
-      .filter(feature => feature.kind === 'datum-plane' && feature.id === sourcePlane.featureId);
-    const candidate = parseCadDocument({ ...validated, schemaVersion: source.graph ? 2 : validated.schemaVersion, parameters, features: [...requiredDatums, source] });
+    const candidate = parseCadDocument({ ...validated, schemaVersion: source.graph ? 2 : validated.schemaVersion, parameters,
+      features: [...precedingDependencies(validated.features.slice(0, index), source), source] });
     const effective = candidate.features[candidate.features.length - 1];
     if (effective.kind !== 'sketch') throw new CadError('invalid-region-proposal', 'The proposed source must remain a sketch.');
     if (!cadFeatureActive(effective, candidate)) throw new CadError('suppressed-sketch', `Sketch "${effective.name}" is suppressed. Resume it before choosing its areas.`);

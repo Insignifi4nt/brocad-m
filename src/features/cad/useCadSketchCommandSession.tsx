@@ -39,14 +39,14 @@ export function useCadSketchCommandSession<P extends CadSketchCommandSessionProp
     onDispose?.(callbacks.current); callbacks.current.onPendingChange(false); callbacks.current.onPreviewDocument(null);
   }; }, []);
   const blocked = ended.current || !sourceCurrent || props.interactionLocked || submission.applying;
-  /** Submits prepared edits once; `accept` runs only if the session is still open. */
-  const submit = (edits: readonly CadEdit[], prepared: CadDocument, accept: () => void, failure: string) => {
+  /** Submits prepared edits once; `accept` runs only if the session is still open, and `refused` may handle a refusal instead of its message. */
+  const submit = (edits: readonly CadEdit[], prepared: CadDocument, accept: () => void, failure: string, refused?: (cause: unknown) => boolean) => {
     if (blocked) return;
     submitted.current = prepared;
     submission.submit(signal => callbacks.current.onEditMany(edits, signal), () => {
       if (ended.current) return;
       ended.current = true; accept();
-    }, cause => { submitted.current = null; setError(userFacingMessage(cause, failure)); });
+    }, cause => { submitted.current = null; if (!refused?.(cause)) setError(userFacingMessage(cause, failure)); });
   };
   /** Live check for deferred callbacks such as canvas picks; reads refs, never render-time values. */
   const closed = () => ended.current || applying.current || callbacks.current.interactionLocked || callbacks.current.document !== owner.document || callbacks.current.documentVersion !== owner.version;

@@ -6,6 +6,7 @@ import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { cadFeatureProducesBody, createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { cadRefusalAt, cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 import { cadBuildIssues, NO_CAD_BUILD_ISSUES, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
+import { storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
 import { archiveCadDocument, listCadDocuments, loadCadDocument, renameCadDocument, restoreCadDocument, saveCadDocument, type CadLibraryEntry } from '@/domain/cad/cadStorage';
 import { readExactUtf8Blob } from '@/domain/storage/exactTextStream';
 import { applyCadEdits, validateCadEditBatch, type CadEdit } from '@/domain/cad/cadOperations';
@@ -35,6 +36,7 @@ import { createCadSketchSolverLoader } from './sketch-solver/cadSketchSolverLoad
 import { createCadKernelLoader, loadCadKernelClient } from './kernel/cadKernelLoader';
 import type { CadSketchConstraintInspection } from './cadSketchConstraintInspection';
 import { useCadSketchEditing } from './useCadSketchEditing';
+import { cadSketchGeneratorHandleError, cadSketchProfileViews, cadSketchWholeGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 type App = Pick<ReturnType<typeof useWorkbenchAppController>, 'connectedWorkbench' | 'workbenchInteractionLocked' | 'runAgentWorkbenchOperation'>
   & Partial<Pick<ReturnType<typeof useWorkbenchAppController>, 'showStatusToast'>>;
@@ -160,7 +162,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   }
   function publishBuild(result: CadBuildResult, version: string, document: CadDocument) {
     const state = result.diagnostics.length ? 'error' : 'ready';
-    buildIssues.current.set(result, cadBuildIssues(document, result, version, import.meta.env.DEV));
+    buildIssues.current.set(result, cadBuildIssues(document, result, version));
     liveBuild.current = { result, version, state };
     setErrorMessage(null);
     setBuild(result); setBuildVersion(version); setBuildState(state);
@@ -476,7 +478,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       if (!original || original.format !== 'dxf' || original.fileName !== source.fileName || original.text !== source.text || original.units !== source.units) {
         throw new ToolError('INVALID_IMPORT_RESULT', 'DXF import did not preserve the supplied original.');
       }
-      const document = parseCadDocument({ ...createCadDocument(result.sketch.name), features: [result.sketch] });
+      const document = parseCadDocument({ ...createCadDocument(result.sketch.name), schemaVersion: 2, features: [result.sketch] });
       session.replace(document); setBuild(null); setBuildVersion(null); setBuildState('idle'); changeOpen(true); setImportFile(null);
       return { imported: true, documentId: document.id, version: session.getSnapshot().version, sketchId: result.sketch.id,
         unitDeclaration: importUnitReceipt(result.unitDeclaration), scaleToMillimeters: result.scaleToMillimeters, sourceEntityCount: result.sourceEntityCount, contourCount: result.contourCount };
@@ -548,7 +550,10 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const { inspectCadSketchHandles } = await import('@/domain/cad/cadSketchHandles');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document, sketch = document.features.find(feature => feature.id === sketchId);
-    const profile = sketch?.kind === 'sketch' ? sketch.profiles.find(profile => profile.id === profileId) : undefined;
+    const profile = sketch?.kind === 'sketch' ? cadSketchProfileViews(sketch).find(profile => profile.id === profileId) : undefined;
+    // A generator with no profile view, such as a regular polygon, has no grips: it is refused as move-sketch-handle refuses it.
+    const whole = !profile && sketch?.kind === 'sketch' ? cadSketchWholeGenerator(sketch, profileId) : undefined;
+    if (whole) throw cadSketchGeneratorHandleError(whole);
     if (!profile) throw new ToolError('NOT_FOUND', 'Choose an existing profile in a sketch.');
     return inspectCadSketchHandles(profile, document.parameters);
   }
@@ -568,9 +573,17 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     editable(expectedVersion); session.assertWorkflowClosed(); signal?.throwIfAborted();
     if (!isCadImportData(page)) throw new ToolError('INVALID_ARGUMENT', 'Malformed sketch region query.');
     const captured = structuredClone(page);
-    const { inspectCadSketchRegions } = await import('@/domain/cad/cadSketchRegionInspection');
+    const [{ inspectCadSketchRegions }, { prepareCadSketchRegionProposal }] = await Promise.all([import('@/domain/cad/cadSketchRegionInspection'), import('./cadSketchRegionProposalPreparation')]);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
-    const result = inspectCadSketchRegions(session.getSnapshot().document, sketchId, captured);
+    const document = session.getSnapshot().document;
+    // A generator proposal is read as its edit is prepared, through the solver; a Trim or Extend query beside it is refused unprepared.
+    let query = captured, source = document;
+    if (captured.proposal?.generator !== undefined && captured.trimAt === undefined && captured.extendAt === undefined) {
+      const prepared = await prepareCadSketchRegionProposal(document, sketchId, captured.proposal, sketchSolvers.solver(), signal);
+      query = { ...captured, proposal: prepared.proposal }; source = prepared.document;
+      signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
+    }
+    const result = inspectCadSketchRegions(source, sketchId, query);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(); return result;
   }
   async function readSketchRegionReference(sketchId: string, target: CadSketchRegionReadTarget, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, proposal?: CadSketchRegionProposal) {
@@ -580,7 +593,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const capturedTarget = structuredClone(target), capturedProposal = proposal === undefined ? undefined : structuredClone(proposal);
     const document = session.getSnapshot().document, targetKey = JSON.stringify(capturedTarget), key = JSON.stringify([sketchId, capturedTarget]);
     if (capturedProposal !== undefined) {
-      const { readCadSketchRegionReference, validateCadSketchRegionProposal } = await import('@/domain/cad/cadSketchRegionInspection');
+      const [{ readCadSketchRegionReference, validateCadSketchRegionProposal }, { prepareCadSketchRegionProposal }] = await Promise.all([
+        import('@/domain/cad/cadSketchRegionInspection'), import('./cadSketchRegionProposalPreparation')]);
       signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
       validateCadSketchRegionProposal(capturedProposal);
       const proposalKey = JSON.stringify(capturedProposal), previous = proposedRegionReferenceTexts.current;
@@ -588,7 +602,13 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
         ? previous : { document, sketchId, proposalKey, texts: new Map<string, string>() };
       let text = cache.texts.get(targetKey);
       if (text === undefined) {
-        text = JSON.stringify(readCadSketchRegionReference(document, sketchId, capturedTarget, capturedProposal));
+        // A generator proposal is read as its edit is prepared, through the solver.
+        let prepared = { document, proposal: capturedProposal };
+        if (capturedProposal.generator !== undefined) {
+          prepared = await prepareCadSketchRegionProposal(document, sketchId, capturedProposal, sketchSolvers.solver(), signal);
+          signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
+        }
+        text = JSON.stringify(readCadSketchRegionReference(prepared.document, sketchId, capturedTarget, prepared.proposal));
         signal?.throwIfAborted(); cache.texts.set(targetKey, text);
         proposedRegionReferenceTexts.current = cache;
       }
@@ -609,7 +629,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const { inspectCadPluginProfile } = await import('@/domain/cad/plugins/cadPlugins');
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document, sketch = document.features.find(feature => feature.id === sketchId);
-    const profile = sketch?.kind === 'sketch' ? sketch.profiles.find(profile => profile.id === profileId) : undefined;
+    const profile = sketch?.kind === 'sketch' ? cadSketchProfileViews(sketch).find(profile => profile.id === profileId) : undefined;
     if (profile?.geometry.kind !== 'plugin') throw new ToolError('NOT_FOUND', 'Choose an existing plugin profile in a sketch.');
     const inspection = inspectCadPluginProfile(profile.geometry, document.parameters);
     return { version: expectedVersion, sketchId, profileId, pluginId: profile.geometry.package.id, pluginVersion: profile.geometry.package.version,
@@ -681,7 +701,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   function exportDocument(expectedVersion = session.getSnapshot().version) {
     editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document;
-    downloadCadBlob(new Blob([JSON.stringify(document)], { type: 'application/json' }), `${fileBase(document.name)}.cad.json`);
+    downloadCadBlob(new Blob([storedCadDocumentText(document)], { type: 'application/json' }), `${fileBase(document.name)}.cad.json`);
     return { downloadRequested: true, fileName: `${fileBase(document.name)}.cad.json`, version: expectedVersion };
   }
   async function exportSolid(format: 'step' | 'stl', expectedVersion = session.getSnapshot().version, signal?: AbortSignal) {
@@ -838,11 +858,9 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     editable(expectedVersion); session.assertWorkflowClosed(scope); signal?.throwIfAborted();
     const document = session.getSnapshot().document;
     const section = await inspectSection(request, expectedVersion, 'dxf-export', signal, scope);
-    const { cadEntitiesToDxf } = await import('@/domain/cad/cadDxfExport');
+    const [{ cadEntitiesToDxf }, { cadSketchPluginNoteLines }] = await Promise.all([import('@/domain/cad/cadDxfExport'), import('@/domain/cad/cadCam')]);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
-    const notes = document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document)
-      ? feature.profiles.flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin'
-        ? [`${profile.geometry.package.id}@${profile.geometry.package.version}: ${profile.geometry.package.notes}`] : []) : []);
+    const notes = cadSketchPluginNoteLines(document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document) ? [feature] : []));
     // Curves DXF cannot write are the export's refusal too.
     let text: string;
     try { text = cadEntitiesToDxf(section.entities, notes); } catch (error) { throw cadRefusalAt(error, { kind: 'export-operation', format: 'dxf-section', sourceId: section.bodyId }, since); }

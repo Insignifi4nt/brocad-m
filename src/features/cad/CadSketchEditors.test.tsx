@@ -2,7 +2,8 @@ import { act, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CadDocument, CadSketchFeature } from '@/domain/cad/cadDocument';
-import type { CadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import type { CadSketchGenerator, CadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { CadSession } from './cadSession';
@@ -304,6 +305,37 @@ describe('selection inspector', () => {
     expect(field('X mm').value).toBe('2');
     await input('X mm', '3'); await click('Apply');
     expect(point.session.getSnapshot().document.parameters.offset).toBe(3);
+  });
+
+  it('asks before a parameter removes relations as a generator regenerates, applies the confirmed removal as one edit, and Cancel keeps them', async () => {
+    // Five sides from n, a user point on the fifth corner, and a point whose X reads n: four sides lose the corner and "c4" on it.
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+    const source = part({ points: [{ id: 'u', position: corner }, { id: 'w', position: [' n ', '0'] }], entities: [],
+      relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] }, { n: 5 });
+    const h = await mount(source, inspector([{ kind: 'point', id: 'w' }]));
+    const asked = () => container.querySelector('.cad-form-hint[role="status"]')?.textContent ?? null;
+    const prompt = /^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*. Apply removes it, or Cancel keeps it.$/;
+    // Apply before the preview has looked: its refusal asks in the editor's words and changes nothing.
+    await input('X mm', '4'); await click('Apply');
+    expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain('removedRelationIds'); expect(h.session.getSnapshot().document).toBe(source);
+    // Typing the value back drops the question with the edits it was about; typing them again asks again.
+    await input('X mm', '5'); expect(asked()).toBeNull(); expect(container.querySelector('[role="alert"]')).toBeNull();
+    await input('X mm', '4'); expect(asked()).toMatch(prompt);
+    await settle(); await click('Apply');
+    expect(h.edit).toHaveBeenLastCalledWith([{ kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }], expect.any(AbortSignal));
+    expect(sketchOf(h.session.getSnapshot().document).graph.relations.filter(relation => !relation.id.startsWith('g-poly_')).map(relation => relation.id)).toEqual(['poly']);
+    await act(async () => h.session.undo()); expect(h.session.getSnapshot().document).toBe(source);
+    // The preview asks as well; Cancel drops the change and its question, and the part keeps the relation.
+    // The confirmed edit previews next, so the canvas shows what Apply makes. A fresh editor has nothing held: the preview alone asks.
+    await act(async () => root.render(<></>)); await h.rerender();
+    await input('X mm', '4'); await settle(); await settle();
+    expect(asked()).toMatch(prompt); expect(h.preview).toHaveBeenLastCalledWith(expect.objectContaining({ parameters: { n: 4 } }), null);
+    await click('Cancel');
+    expect(asked()).toBeNull(); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(field('X mm').value).toBe('5');
+    expect(h.session.getSnapshot().document).toBe(source); expect(h.edit).toHaveBeenCalledTimes(2);
   });
 });
 

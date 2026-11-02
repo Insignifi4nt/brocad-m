@@ -34,6 +34,13 @@ describe('CAD diagnostic reach', () => {
     { templates: { [`${FILE}: kind`]: ['cut', 'pocket'] } })).toEqual({ codes: ['new-cut', 'new-pocket', 'shared-code'], unexpanded: [] });
   });
 
+  it('runs the value a name is destructured from where the name is used, as a variable\'s', () => {
+    expect(reach(`const make = () => { throw new CadError('array-value', ''); }, take = () => { throw new CadError('object-value', ''); };
+      const [first] = [make()], { second: { third } } = { second: { third: take() } };
+      const unused = () => { throw new CadError('unused-value', ''); }, [fourth] = [unused()];
+      export function check() { for (const [each] of [[first]]) return each + third; }`)).toEqual({ codes: ['array-value', 'object-value'], unexpanded: [] });
+  });
+
   it('reports a template code nothing expands, and a code whose origin it cannot read', () => {
     expect(reach(`export function check(kind: string) { const issue = { code: \`new-\${kind}\`, message: 'failure' }; throw new CadError(issue.code, issue.message); }`))
       .toEqual({ codes: [], unexpanded: [`${FILE}: kind`] });

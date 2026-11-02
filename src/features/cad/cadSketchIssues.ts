@@ -163,7 +163,7 @@ export function cadSketchIssues({ sketchId, graph, version, analysis, feedback, 
       omittedSubjectCount: refused?.omittedSubjectCount ?? 0, ...kernelMessage ? { kernelMessage } : {} } }) : null;
   const byRelation = new Map<string, CadSketchIssue[]>();
   for (const row of list) if (row.relationId) byRelation.set(row.relationId, [...byRelation.get(row.relationId) ?? [], row]);
-  const issues = createCadIssueList([...refusal ? [refusal] : [], ...list.map(row => row.issue)], import.meta.env.DEV);
+  const issues = createCadIssueList([...refusal ? [refusal] : [], ...list.map(row => row.issue)]);
   return Object.freeze({ sketchId, refusal, message, list: Object.freeze(list), omitted: refused?.omittedSubjectCount ?? 0,
     byRelation: list.length ? byRelation : NO_CAD_SKETCH_ISSUES_BY_RELATION, issues });
 }

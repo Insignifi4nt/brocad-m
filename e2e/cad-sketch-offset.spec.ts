@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { expect, test } from './fixtures/native-sketch-solver';
 import type { CadSketchFeature } from '../src/domain/cad/cadDocument';
 import type { CadSketchCellReference } from '../src/domain/cad/cadSketchRegionSelection';
-import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, historyRow } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, historyRow, importCadDraft } from './cad-tool-helpers';
 
 test('offsets a consumed plate into an independent wall loop and matches the exact agent repair through save', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
@@ -108,9 +108,8 @@ test('previews a legacy rounded loop exclusively and keeps its analytic copy ind
   const sketch: CadSketchFeature = { id: 'clearance', kind: 'sketch', name: 'Rounded clearance', suppressed: false, plane: 'XY', offset: 0,
     profiles: [{ id: 'slot', name: 'Rotated slot', construction: false,
       geometry: { kind: 'slot', x: '11.00', y: '-7.00', length: ' slotLength ', width: '10.0000', angle: '30.00' } }] };
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version,
-    edits: [{ kind: 'set-parameter', name: 'slotLength', value: 30 }, { kind: 'add-feature', feature: sketch }] });
-  const base = await context(page);
+  // A legacy slot loads from a saved draft; an edit can no longer add one.
+  const base = await importCadDraft(page, [sketch], { parameters: { slotLength: 30 } });
   await (await historyRow(page, 'Rounded clearance')).dblclick();
   await page.getByRole('button', { name: 'Rotated slot profile', exact: true }).click();
   await page.getByRole('button', { name: 'Offset loop', exact: true }).click();

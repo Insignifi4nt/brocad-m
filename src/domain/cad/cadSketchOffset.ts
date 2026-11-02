@@ -3,7 +3,7 @@ import { cadFeatureActive } from './features/cadFeatureActivity';
 import { Value } from '@sinclair/typebox/value';
 import type { CadSketchFeature } from './cadDocument';
 import { CadIdentifierSchema, CadScalarSchema } from './cadPrimitives';
-import { cadPathClosureTolerance, type ResolvedCadPathSegment } from './cadAnalyticSegments';
+import type { ResolvedCadPathSegment } from './cadAnalyticSegments';
 import { CadError } from './cadError';
 import { isCadImportData } from './cadImportData';
 import { evaluateCadScalar } from './cadExpression';
@@ -11,12 +11,13 @@ import { cadProfileToEntities, resolveCadSketchContours } from './cadSketchGeome
 import { appendCadSketchCopiedRelations, appendCadSketchEntities } from './cadSketchGraphEdits';
 import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraphEntity } from './cadSketchGraph';
 import { compileCadSketchGraph } from './cadSketchGraphGeometry';
-import { createArcSegment, createCircleSegment, createLineSegment, cross } from '@/domain/path-intel/segments';
+import { createArcSegment, createCircleSegment, createLineSegment } from '@/domain/path-intel/segments';
+import { cadSketchOffsetPathSegment, offsetCadSketchLoop } from './cadSketchLoopOffset';
 import { signedDxfArcSweepRadians } from '@/domain/dxf/arcSweep';
 import type { DxfEntity } from '@/domain/dxf/types';
-import type { ArcPathSegment, LinePathSegment, PathSegment, Point2 } from '@/domain/path-intel/types';
+import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
-import { CAD_PRECISION, cadRoundoff } from '@/domain/precision/cadPrecision';
+import { cadSketchGeneratorName, cadSketchGenerators } from './sketch-generators/cadSketchGenerators';
 import type { CadSketchRelationCopy, CadSketchRemapPiece } from './sketch-relations/cadSketchRelationRemap';
 
 const strict = { additionalProperties: false };
@@ -38,15 +39,9 @@ export interface CadSketchOffsetPreparation {
   readonly distanceMm: number;
 }
 
-type Edge = LinePathSegment | ArcPathSegment;
 const fail = (message: string): never => { throw new CadError('unsupported-sketch-offset', message); };
 const position = (point: Point2): readonly [number, number] => [point.x, point.y];
-function pathSegment(segment: PathSegment): ResolvedCadPathSegment {
-  return segment.kind === 'line' ? { kind: 'line', start: position(segment.start), end: position(segment.end) }
-    : { kind: 'arc', center: position(segment.center), radius: segment.radius,
-      startAngle: segment.kind === 'circle' ? 0 : segment.startAngleRadians * 180 / Math.PI,
-      sweep: segment.kind === 'circle' ? 360 : segment.sweepRadians * 180 / Math.PI };
-}
+const pathSegment = cadSketchOffsetPathSegment;
 function analyticSegment(entity: DxfEntity, index: number, authoredSweep?: number): PathSegment {
   const common = { id: `offset_${index}`, source: { sourceEntityIndex: index, sourceEntityType: entity.type, layer: null, exact: true } };
   if (entity.type === 'line') return createLineSegment({ ...common, start: entity.start, end: entity.end });
@@ -57,65 +52,6 @@ function analyticSegment(entity: DxfEntity, index: number, authoredSweep?: numbe
   const at = (angle: number) => ({ x: entity.center.x + entity.radius * Math.cos(angle), y: entity.center.y + entity.radius * Math.sin(angle) });
   return createArcSegment({ ...common, center: entity.center, radius: entity.radius, start: entity.start ?? at(entity.startAngle),
     end: entity.end ?? at(entity.startAngle + sweep), sweepRadians: sweep, clockwise: sweep < 0 });
-}
-function supports(edge: Edge): readonly Point2[] { return edge.kind === 'arc' ? [edge.start, edge.end, edge.center] : [edge.start, edge.end]; }
-function tangent(edge: Edge, end = false): Point2 {
-  if (edge.kind === 'line') return { x: (edge.end.x - edge.start.x) / edge.length, y: (edge.end.y - edge.start.y) / edge.length };
-  const point = end ? edge.end : edge.start, x = point.x - edge.center.x, y = point.y - edge.center.y, length = Math.hypot(x, y), sign = edge.clockwise ? -1 : 1;
-  return { x: -sign * y / length, y: sign * x / length };
-}
-function shifted(point: Point2, direction: Point2, distance: number): Point2 {
-  return { x: point.x + direction.y * distance, y: point.y - direction.x * distance };
-}
-function checkPoint(point: Point2): void {
-  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || Math.abs(point.x) > 1e9 || Math.abs(point.y) > 1e9)
-    fail('The offset cannot be represented within the supported coordinate range.');
-}
-function targetRadius(radius: number, distance: number): number {
-  const result = radius + distance;
-  if (result <= CAD_PRECISION.minimumLengthMm || result > CAD_PRECISION.modelExtentMm || !Number.isFinite(result)) return fail('The offset collapses a circular support or exceeds the supported radius.');
-  if (result === radius) return fail('The nonzero offset is too small to represent at this radius.');
-  return result;
-}
-function joint(previous: Edge, current: Edge, distance: number): Point2 {
-  const a = tangent(previous, true), b = tangent(current), determinant = cross(a, b), dot = a.x * b.x + a.y * b.y;
-  const rounding = cadPathClosureTolerance([...supports(previous), ...supports(current)]);
-  if (previous.kind !== 'line' || current.kind !== 'line') {
-    if (dot <= 0 || Math.abs(determinant) > CAD_PRECISION.angularAccuracyRad || Math.abs(determinant) * Math.max(previous.length, current.length) > rounding)
-      return fail('Offset supports smooth circular joints only; sharp line/arc or arc/arc corners need an explicit join policy.');
-    return shifted(previous.end, a, distance);
-  }
-  const first = shifted(previous.end, a, distance), second = shifted(current.start, b, distance);
-  if (Math.abs(determinant) <= cadRoundoff(32)) {
-    if (dot <= 0) return fail('Offset cannot choose an overlapping or reversing line joint.');
-    return first;
-  }
-  const delta = { x: second.x - first.x, y: second.y - first.y }, along = cross(delta, b) / determinant;
-  return { x: first.x + along * a.x, y: first.y + along * a.y };
-}
-function checkOffsetEdge(source: Edge, result: Edge, distance: number): void {
-  const rounding = cadPathClosureTolerance([...supports(source), ...supports(result)]);
-  if (result.length <= CAD_PRECISION.minimumLengthMm) return fail('The offset collapses an edge.');
-  if (source.kind === 'line' && result.kind === 'line') {
-    const a = tangent(source), b = tangent(result), q = Math.abs(cross(a, b));
-    if (a.x * b.x + a.y * b.y <= 0 || q > CAD_PRECISION.angularAccuracyRad || q * Math.max(source.length, result.length) > rounding)
-      return fail('The offset cannot preserve the line direction and corner branch.');
-    for (const point of [result.start, result.end]) {
-      const normalDistance = a.y * (point.x - source.start.x) - a.x * (point.y - source.start.y);
-      if (Math.abs(normalDistance - distance) > rounding) return fail('The offset line does not preserve the requested support distance.');
-    }
-    if (distance !== 0 && result.start.x === source.start.x && result.start.y === source.start.y && result.end.x === source.end.x && result.end.y === source.end.y)
-      return fail('The nonzero offset is too small to represent on this line.');
-  } else if (source.kind === 'arc' && result.kind === 'arc') {
-    const radius = targetRadius(source.radius, (source.clockwise ? -1 : 1) * distance), angleError = Math.abs(source.sweepRadians - result.sweepRadians);
-    const sourceSide = Math.sign(Math.abs(source.sweepRadians) - Math.PI);
-    // An authored half-turn has no strict major/minor side. Its atan2
-    // reconstruction still obeys the unchanged angular and physical gates.
-    if (sourceSide !== 0 && sourceSide !== Math.sign(Math.abs(result.sweepRadians) - Math.PI)
-      || angleError > CAD_PRECISION.angularAccuracyRad || angleError * Math.max(source.radius, radius) > rounding
-      || [result.start, result.end].some(point => Math.abs(Math.hypot(point.x - source.center.x, point.y - source.center.y) - radius) > rounding))
-      return fail('The offset cannot preserve the circular support, shared joints and signed arc branch.');
-  }
 }
 
 /**
@@ -149,6 +85,9 @@ export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSk
   if (!cadFeatureActive(sketch, { parameters })) return fail('Resume the sketch before offsetting a loop.');
   const { source, idPrefix } = request, distanceMm = evaluateCadScalar(request.distance, parameters);
   if (source.kind === 'profile') {
+    // A profile source names a saved legacy profile only. A generated shape is sketch geometry, so its loop is offset as a graph cycle.
+    const generator = sketch.graph ? cadSketchGenerators(sketch.graph).find(generator => generator.id === source.profileId) : undefined;
+    if (generator) return fail(`${cadSketchGeneratorName(generator)} is sketch geometry, not a saved profile. Offset its loop with a graph-cycle source, the sourceRefs of its contour in the region reference.`);
     const profile = sketch.profiles.find(profile => profile.id === source.profileId);
     if (!profile || profile.construction || profile.geometry.kind === 'plugin') return fail('Choose a nonconstruction standard profile or an exact graph loop.');
   }
@@ -162,29 +101,24 @@ export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSk
     contour.geometry.kind === 'slot' && entity.type === 'arc' ? Math.PI : undefined)), sourceSegments = sourceEdges.map(pathSegment);
   deepFreezeCadData(sourceSegments);
   if (distanceMm === 0) return Object.freeze({ sketch, sourceSegments, resultSegments: sourceSegments, distanceMm });
-  const points: { id: string; position: readonly [number, number] }[] = [], entities: CadSketchGraphEntity[] = [], resultEdges: PathSegment[] = [];
-  const point = (id: string, value: Point2) => { checkPoint(value); points.push({ id, position: position(value) }); return id; };
-  if (sourceEdges.length === 1 && sourceEdges[0].kind === 'circle') {
-    const sourceCircle = sourceEdges[0], radius = targetRadius(sourceCircle.radius, distanceMm), id = `${idPrefix}_e0`;
-    entities.push({ id, kind: 'circle', construction: false, centerPointId: point(`${idPrefix}_c0`, sourceCircle.center), radius });
-    resultEdges.push(createCircleSegment({ id, source: sourceCircle.source, center: sourceCircle.center, radius }));
+  const points: { id: string; position: readonly [number, number] }[] = [], entities: CadSketchGraphEntity[] = [];
+  const point = (id: string, value: Point2) => { points.push({ id, position: position(value) }); return id; };
+  const offset = offsetCadSketchLoop(sourceEdges, distanceMm), resultEdges = offset.edges;
+  if (!offset.vertices.length) {
+    const circle = resultEdges[0] as Extract<PathSegment, { kind: 'circle' }>;
+    entities.push({ id: `${idPrefix}_e0`, kind: 'circle', construction: false, centerPointId: point(`${idPrefix}_c0`, circle.center), radius: circle.radius });
   } else {
-    const edges: Edge[] = sourceEdges.map(edge => edge.kind === 'circle' ? fail('A full circle must be a standalone offset source.') : edge);
-    const vertices = edges.map((edge, index) => joint(edges[(index + edges.length - 1) % edges.length], edge, distanceMm));
-    vertices.forEach((vertex, index) => point(`${idPrefix}_p${index}`, vertex));
-    edges.forEach((edge, index) => {
-      const start = vertices[index], end = vertices[(index + 1) % vertices.length], id = `${idPrefix}_e${index}`;
-      const common = { id, construction: false, startPointId: `${idPrefix}_p${index}`, endPointId: `${idPrefix}_p${(index + 1) % vertices.length}` };
-      const result = edge.kind === 'line' ? createLineSegment({ ...edge, id, start, end })
-        : createArcSegment({ ...edge, id, start, end, radius: targetRadius(edge.radius, (edge.clockwise ? -1 : 1) * distanceMm), sweepRadians: undefined });
-      checkOffsetEdge(edge, result, distanceMm); resultEdges.push(result);
-      entities.push(edge.kind === 'line' ? { ...common, kind: 'line' }
-        : { ...common, kind: 'arc', centerPointId: point(`${idPrefix}_c${index}`, edge.center), direction: edge.clockwise ? 'cw' : 'ccw' });
+    offset.vertices.forEach((vertex, index) => point(`${idPrefix}_p${index}`, vertex));
+    resultEdges.forEach((edge, index) => {
+      const id = `${idPrefix}_e${index}`;
+      const common = { id, construction: false, startPointId: `${idPrefix}_p${index}`, endPointId: `${idPrefix}_p${(index + 1) % resultEdges.length}` };
+      entities.push(edge.kind === 'arc' ? { ...common, kind: 'arc', centerPointId: point(`${idPrefix}_c${index}`, edge.center), direction: edge.clockwise ? 'cw' : 'ccw' }
+        : { ...common, kind: 'line' });
     });
   }
-  const addition = parseCadSketchGraph({ points, entities, relations: [] }), issue = checkCadSketchGraph(addition, {})[0];
+  const addition = parseCadSketchGraph({ points, entities, relations: [] }), issue = checkCadSketchGraph(addition, parameters)[0];
   if (issue) return fail(`The offset does not preserve exact graph geometry: ${issue.message}`);
-  const isolated = compileCadSketchGraph(addition, {});
+  const isolated = compileCadSketchGraph(addition, parameters);
   if (isolated.cycles.length !== 1 || isolated.cycles[0].sourceRefs.length !== entities.length || isolated.arrangementEntityIds.length)
     return fail('The offset crosses, touches or overlaps itself; topology-changing offsets are not supported.');
   const result = appendCadSketchEntities({ sketch: structuredClone(sketch), geometry: addition });

@@ -1,13 +1,15 @@
 import { Type } from '@sinclair/typebox';
 import { CadIdentifierSchema, CadScalarSchema } from '../cadPrimitives';
 import { CadSketchDimensionAnnotationSchema } from '../cadSketchGraph';
+import { CAD_SKETCH_ELEMENT_ID_PATTERN } from '../sketch-relations/cadSketchVirtualElements';
 import type { CadAnyFeaturePresentation, CadFeatureForm, CadFeatureFormComponent, CadFeatureKind, CadFeaturePresentation, CadFeaturePresentations } from './cadFeatureDefinitionTypes';
-import { CadSketchFeatureSchema, CadSketchProfileSchema } from './kinds/references';
+import { CadProfileSchema, CadSketchFeatureSchema, CadSketchProfileSchema } from './kinds/references';
 
 // What each kind shows people and agents: its form and its agent description. The definitions in `kinds/` hold what the kernel and the
 // parser read; only the feature editor, the agent tools and the docs read these, so the kernel worker never loads their text.
 
 const strict = { additionalProperties: false };
+const pascal = (kind: string) => kind.split('-').map(word => word[0].toUpperCase() + word.slice(1)).join('');
 const xyz = (label: (axis: string) => CadFeatureFormComponent) =>
   [label('X'), label('Y'), label('Z')] as const satisfies readonly [CadFeatureFormComponent, CadFeatureFormComponent, CadFeatureFormComponent];
 const edgeTreatmentForm = (title: string, size: string): CadFeatureForm<'targetId' | 'radius'> => ({ editor: 'fields', title, controls: [
@@ -29,10 +31,12 @@ const sketch = {
   agent: { exposed: true, description: 'Plane-local legacy closed profiles and optional schema-2 graph of stable open/closed line, arc and circle entities on XY/XZ/YZ or a preceding active datum-plane, with optional construction geometry. Offset follows the resolved plane normal; changing placement preserves local coordinates. Nesting automatically determines material, voids and islands. Dimensions accept finite arithmetic over document parameters. Use cad_inspect_plane for world placement.',
     // Saved legacy contour roles remain parseable, but new contours use nesting.
     authoringSchema: Type.Object({ ...CadSketchFeatureSchema.properties, profiles: Type.Array(Type.Omit(CadSketchProfileSchema, ['role'])) }, strict),
-    // A sketch definition repeats its scalar, identifier and dimension placement schemas dozens of times.
+    // A sketch definition repeats its scalar, identifier, element reference and dimension placement schemas dozens of times, and its profiles and generators
+    // share each profile geometry.
     sharedDefinitions: {
-      CadScalar: CadScalarSchema, CadIdentifier: CadIdentifierSchema,
-      ...Object.fromEntries(CadSketchDimensionAnnotationSchema.anyOf.map(variant => [`CadSketch${variant.properties.kind.const[0].toUpperCase()}${variant.properties.kind.const.slice(1)}Annotation`, variant]))
+      CadScalar: CadScalarSchema, CadIdentifier: CadIdentifierSchema, CadSketchElementId: Type.String({ pattern: CAD_SKETCH_ELEMENT_ID_PATTERN }),
+      ...Object.fromEntries(CadProfileSchema.anyOf.map(variant => [`CadProfile${pascal(variant.properties.kind.const)}`, variant])),
+      ...Object.fromEntries(CadSketchDimensionAnnotationSchema.anyOf.map(variant => [`CadSketch${pascal(variant.properties.kind.const)}Annotation`, variant]))
     } }
 } satisfies CadFeaturePresentation<'sketch'>;
 

@@ -3,7 +3,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CadDocument, CadProfile, CadSketchProfile } from '@/domain/cad/cadDocument';
 import type { CadEdit } from '@/domain/cad/cadOperations';
-import { createCadDocument } from '@/domain/cad/cadSchema';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CAD_GEAR_V2_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
 import { CadSession } from './cadSession';
 import { CadSketchDimensionControls, type CadSketchDimensionControlsProps } from './CadSketchDimensionControls';
@@ -47,6 +49,35 @@ async function renderControls(document: CadDocument, apply?: CadSketchDimensionC
 }
 function currentGeometry(session: CadSession) { const sketch = session.getSnapshot().document.features[0]; if (sketch.kind !== 'sketch') throw new Error('Missing sketch'); return sketch.profiles[0].geometry; }
 describe('on-part sketch dimension editing', () => {
+  it('asks before a parameter-bound dimension removes relations as a generator regenerates, applies the confirmed removal as one edit, and Cancel keeps them', async () => {
+    // The width and a five-sided polygon both read n, and a user point sits on the polygon's fifth corner: four removes "c4".
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+    const base = makeDocument({ kind: 'rectangle', x: 40, y: 0, width: ' n ', height: 15, cornerRadius: 0 }, { n: 5 }), sketch = base.features[0];
+    if (sketch.kind !== 'sketch') throw new Error('Missing sketch');
+    const source = parseCadDocument({ ...base, schemaVersion: 2, features: [{ ...sketch, graph: { points: [{ id: 'u', position: corner }], entities: [],
+      relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } }] });
+    // The first Apply reaches a part that drops the confirmation, so it is refused as an unconfirmed removal would be.
+    let calls = 0, session: CadSession | undefined;
+    const h = await renderControls(source, edits => session!.edit(calls++ ? edits : edits.map(entry => entry.kind === 'set-parameter' ? { kind: entry.kind, name: entry.name, value: entry.value } : entry)));
+    session = h.session;
+    const asked = () => container.querySelector('.cad-form-hint[role="status"]')?.textContent ?? null;
+    const prompt = /^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*. Apply removes it, or Cancel keeps it.$/;
+    await open('Width'); await input('Width value', '4');
+    expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull();
+    await click('Apply');
+    expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(container.textContent).not.toContain('removedRelationIds');
+    expect(h.session.getSnapshot().document).toBe(source);
+    await click('Apply');
+    expect(h.edit).toHaveBeenLastCalledWith([{ kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }], expect.any(AbortSignal));
+    const after = h.session.getSnapshot().document.features[0];
+    expect(after.kind === 'sketch' && after.graph?.relations.filter(relation => !relation.id.startsWith('g-poly_')).map(relation => relation.id)).toEqual(['poly']);
+    await act(async () => h.session.undo()); expect(h.session.getSnapshot().document).toBe(source);
+    await open('Width'); await input('Width value', '4'); expect(asked()).toMatch(prompt);
+    await click('Cancel');
+    expect(asked()).toBeNull(); expect(h.session.getSnapshot().document).toBe(source); expect(h.edit).toHaveBeenCalledTimes(2);
+  });
   it.each(['width', 'diameter', 'angle'] as const)('displays a supported tiny %s without zeroing its signed value or changing an unchanged edit', async quantity => {
     const magnitude = 4e-7, parameters: Readonly<Record<string, number>> = quantity === 'width' ? { size: magnitude } : {};
     const geometry: CadProfile = quantity === 'width' ? { kind: 'rectangle', x: 0, y: 0, width: ' size ', height: 20, cornerRadius: 0 }

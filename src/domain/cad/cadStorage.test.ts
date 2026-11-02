@@ -15,6 +15,9 @@ import { createCadDocument, parseCadDocument } from './cadSchema';
 import { applyCadEdits } from './cadOperations';
 import { CAD_GEAR_V2_PLUGIN } from './plugins/cadPlugins';
 import { importCadDxfSketch } from './cadDxfImport';
+import type { CadProfile, CadSketchFeature } from './cadDocument';
+import { cadSketchProfileViews, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
+import { storedCadDocument } from './cadStoredDocument';
 import { importCadDxfCurve } from './cadCurveDxf';
 import { cadDocumentPath, listCadDocuments, loadCadDocument, saveCadDocument } from './cadStorage';
 import { measureCadSketchReferenceDimension } from './cadSketchReferenceDimensions';
@@ -315,12 +318,11 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
   it('round trips Through-all Pocket, its exact sources and editable expressions without saving inactive dimensions', async () => {
     const text = '\uFEFF0\r\nSECTION\r\n2\r\nENTITIES\r\n0\r\nCIRCLE\r\n10\r\n0\r\n20\r\n0\r\n40\r\n2\r\n0\r\nENDSEC\r\n0\r\nEOF\r\n';
     const imported = importCadDxfSketch({ fileName: 'Profile.dxf', text, units: 'mm', sketchId: 'section' }).sketch;
-    const section = { ...imported, offset: 'station', profiles: imported.profiles.map(profile => ({ ...profile,
-      geometry: { kind: 'circle' as const, x: 0, y: 0, radius: 'radius' } })) };
+    const section = { ...withContour(imported, { kind: 'circle', x: 0, y: 0, radius: 'radius' }), offset: 'station' };
     const pocket: CadPocketFeature = { id: 'pocket', name: 'Through all', kind: 'pocket', suppressed: false,
       sketchId: 'section', targetId: 'target', extent: { kind: 'through-all', direction: 'both' } };
     const originalStep = '\uFEFFISO-10303-21;\r\n/* exact source 名称 */\r\nEND-ISO-10303-21;\r\n';
-    const document = parseCadDocument({ ...createCadDocument('Pocket originals', 'cad_pocket_save'), parameters: { radius: 2, station: 3 }, features: [
+    const document = parseCadDocument({ ...createCadDocument('Pocket originals', 'cad_pocket_save'), schemaVersion: 2, parameters: { radius: 2, station: 3 }, features: [
       section, { kind: 'imported', id: 'target', name: 'Original target', suppressed: false,
         source: { format: 'step', fileName: 'Target.step', encoding: 'utf8', data: originalStep } }, pocket,
     ] });
@@ -336,11 +338,13 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
     expect(writes).not.toHaveBeenCalled();
     expect(await adapter.readExactText?.(path)).toBe(original);
     expect(await adapter.readText(WORKBENCH_FILE_TRANSACTION_PATH)).toBeNull();
-    const next = await saveCadDocument(adapter, { ...document, parameters: { radius: 4, station: -20 } },
+    // The contour's radius is an input, so the save takes the stored form, which the parse regenerates for the new radius.
+    const next = await saveCadDocument(adapter, { ...storedCadDocument(document), parameters: { radius: 4, station: -20 } },
       { expectedSavedVersion: saved.savedVersion });
     const reopened = await loadCadDocument(adapter, document.id);
     expect(reopened).toEqual(next);
-    expect(reopened.document.features[0]).toMatchObject({ source: { text }, offset: 'station', profiles: [{ geometry: { radius: 'radius' } }] });
+    expect(reopened.document.features[0]).toMatchObject({ source: { text }, offset: 'station', profiles: [] });
+    expect(cadSketchProfileViews(reopened.document.features[0] as CadSketchFeature)).toMatchObject([{ id: 'contour_1', geometry: { radius: 'radius' } }]);
     expect(reopened.document.features[1]).toMatchObject({ source: { data: originalStep } });
     expect(reopened.document.features[2]).toEqual(pocket);
   });
@@ -356,7 +360,7 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
     const curve = { ...rail, plane, offset: 'station' };
     const pad: Extract<CadFeature, { kind: 'extrude' }> = { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false,
       sketchId: 'section', operation: 'new', targetId: null, distance: 'depth', symmetric: true };
-    const document = parseCadDocument({ ...createCadDocument('Datum originals', 'cad_datum_save'),
+    const document = parseCadDocument({ ...createCadDocument('Datum originals', 'cad_datum_save'), schemaVersion: 2,
       parameters: { position: 37, angle: 23, station: -3, depth: -10 }, features: [datum, section, curve, pad] });
     const saved = await saveCadDocument(adapter, document, { expectedSavedVersion: null });
     const path = cadDocumentPath(document.id);
@@ -391,7 +395,7 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
     const last = { ...first, id: 'last', name: 'Last section', offset: 'height' };
     const loft: Extract<CadFeature, { kind: 'loft' }> = { kind: 'loft', id: 'loft', name: 'Loft', suppressed: false,
       sketchIds: ['first', 'last'], ruled: false, operation: 'new', targetId: null };
-    const document = parseCadDocument({ ...createCadDocument('Placed Loft', 'cad_loft_frames'),
+    const document = parseCadDocument({ ...createCadDocument('Placed Loft', 'cad_loft_frames'), schemaVersion: 2,
       parameters: { tilt: 23, height: 20 }, features: [datum, first, last, loft] });
     const saved = await saveCadDocument(adapter, document, { expectedSavedVersion: null });
     const path = cadDocumentPath(document.id); const original = await adapter.readExactText?.(path);
@@ -420,13 +424,12 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
       definition: { kind: 'world', basePlane: 'XY', origin: [37, -24, 11], rotation: ['railTilt', 'railPitch', 61] } };
     const sectionPlane: CadDatumPlaneFeature = { ...railPlane, id: 'section_plane', name: 'Section plane',
       definition: { ...railPlane.definition, basePlane: 'YZ', rotation: ['sectionTilt', 'sectionPitch', 61] } };
-    const section = { ...importedSection, plane: { kind: 'datum-plane' as const, featureId: 'section_plane' },
-      profiles: importedSection.profiles.map(profile => ({ ...profile, geometry: { kind: 'circle' as const, x: 0, y: 0, radius: 'radius' } })) };
+    const section = { ...withContour(importedSection, { kind: 'circle', x: 0, y: 0, radius: 'radius' }), plane: { kind: 'datum-plane' as const, featureId: 'section_plane' } };
     const rail = { ...importedRail, plane: { kind: 'datum-plane' as const, featureId: 'rail_plane' },
       segments: [{ kind: 'line' as const, start: [0, 0] as const, end: ['length', 0] as const }] };
     const sweep: Extract<CadFeature, { kind: 'sweep' }> = { kind: 'sweep', id: 'sweep', name: 'Sweep', suppressed: false,
       sketchId: 'section', curveId: 'rail', operation: 'new', targetId: null };
-    const document = parseCadDocument({ ...createCadDocument('Placed Sweep', 'cad_sweep_frames'),
+    const document = parseCadDocument({ ...createCadDocument('Placed Sweep', 'cad_sweep_frames'), schemaVersion: 2,
       parameters: { railTilt: 23, sectionTilt: 23, railPitch: -37, sectionPitch: -37, radius: 1, length: 20 }, features: [railPlane, sectionPlane, section, rail, sweep] });
     const saved = await saveCadDocument(adapter, document, { expectedSavedVersion: null });
     const path = cadDocumentPath(document.id); const exact = await adapter.readExactText?.(path);
@@ -437,11 +440,12 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
     expect(writes).not.toHaveBeenCalled();
     expect(await adapter.readExactText?.(path)).toBe(exact);
     expect(await adapter.readText(WORKBENCH_FILE_TRANSACTION_PATH)).toBeNull();
-    await saveCadDocument(adapter, { ...document, parameters: { railTilt: 90, sectionTilt: 90, railPitch: -20, sectionPitch: -20, radius: 2, length: 30 } },
+    await saveCadDocument(adapter, { ...storedCadDocument(document), parameters: { railTilt: 90, sectionTilt: 90, railPitch: -20, sectionPitch: -20, radius: 2, length: 30 } },
       { expectedSavedVersion: saved.savedVersion });
     const reopened = (await loadCadDocument(adapter, document.id)).document;
     expect(reopened.features[0]).toEqual(railPlane); expect(reopened.features[1]).toEqual(sectionPlane);
-    expect(reopened.features[2]).toMatchObject({ source: { text: sectionText }, profiles: [{ geometry: { radius: 'radius' } }] });
+    expect(reopened.features[2]).toMatchObject({ source: { text: sectionText }, profiles: [] });
+    expect(cadSketchProfileViews(reopened.features[2] as CadSketchFeature)).toMatchObject([{ id: 'contour_1', geometry: { radius: 'radius' } }]);
     expect(reopened.features[3]).toMatchObject({ source: { text: railText }, segments: [{ end: ['length', 0] }] });
     expect(reopened.features[4]).toEqual(sweep);
   });
@@ -471,7 +475,7 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
     if (!opened.ok) throw new Error(opened.error.message);
     const originalDxf = '\uFEFF0\r\nSECTION\r\n2\r\nENTITIES\r\n0\r\nCIRCLE\r\n10\r\n0\r\n20\r\n0\r\n40\r\n2\r\n0\r\nENDSEC\r\n0\r\nEOF\r\n';
     const sketch = importCadDxfSketch({ fileName: 'source.dxf', text: originalDxf, units: 'mm' }).sketch;
-    const document = parseCadDocument({ ...createCadDocument('Imported originals', 'cad_originals'), features: [sketch,
+    const document = parseCadDocument({ ...createCadDocument('Imported originals', 'cad_originals'), schemaVersion: 2, features: [sketch,
       { id: 'step', name: 'STEP source', kind: 'imported', suppressed: true, source: { format: 'step', fileName: 'source.step', encoding: 'utf8', data: '\uFEFFISO-10303-21;\r\n/* 名称 */\r\nEND-ISO-10303-21;\r\n' } },
       { id: 'stl', name: 'STL source', kind: 'imported', suppressed: true, source: { format: 'stl', fileName: 'source.stl', encoding: 'base64', data: 'AP/+AR+AAw==', units: 'inch' } }
     ] });
@@ -634,3 +638,5 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
     for (const file of retained) expect(await restoredAdapter.readExactText?.(file.path)).toBe(file.text);
   });
 });
+/** `sketch`, an imported drawing, with its one contour generator given `geometry`. */
+const withContour = (sketch: CadSketchFeature, geometry: CadProfile) => withCadSketchProfile(sketch, { ...cadSketchProfileViews(sketch)[0], geometry });

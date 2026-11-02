@@ -1,8 +1,11 @@
 import initOpenCascade from 'replicad-opencascadejs';
 import wasmUrl from 'replicad-opencascadejs/wasm?url';
 import { setOC } from 'replicad';
+import { setCadDevelopmentChecks } from '@/domain/cad/cadDevelopmentChecks';
 import { isCadKernelEnvelope } from './cadKernelProtocol';
 import { createCadKernelRuntime } from './cadKernelRuntime';
+
+setCadDevelopmentChecks(import.meta.env.DEV);
 
 // This entire module is only loaded after the first explicit CAD operation. The runtime keeps an initialization that succeeded, and
 // never one that failed.

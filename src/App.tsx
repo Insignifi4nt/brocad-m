@@ -137,7 +137,7 @@ function WorkbenchApp({ services }: AppProps) {
             onEditMany={(edits, signal) => cad.sketchEditing.sketchId ? cad.sketchEditing.edit(edits, signal) : cad.edit(edits, undefined, false, signal)}
             onPrepareEdits={cad.sketchEditing.sketchId ? cad.sketchEditing.prepare : cad.preparePreviewEdits}
             onInspectSketchConstraints={cad.sketchEditing.sketchId ? cad.sketchEditing.inspect : cad.inspectSketchConstraints}
-            sketchAnalysisReady={cad.sketchEditing.analysisReady} sketchWarnings={cad.sketchWarnings}
+            sketchAnalysisReady={cad.sketchEditing.analysisReady} sketchAnalysisPaused={cad.sketchEditing.analysisPaused} sketchWarnings={cad.sketchWarnings}
             onWorkflowChange={cad.sketchEditing.setWorkflowOpen}
             onBeginSketchEdit={cad.sketchEditing.begin}
             sketchEdit={cad.sketchEditing.sketchId ? { sketchId: cad.sketchEditing.sketchId, inspectAreaRepairs: cad.sketchEditing.inspectAreaRepairs, finish: cad.sketchEditing.finish, cancel: cad.sketchEditing.cancel } : undefined}

@@ -1,7 +1,8 @@
 import { Type, type Static, type TSchema } from '@sinclair/typebox';
-import { CadEditSchema } from '@/domain/cad/cadOperations';
+import { CadEditSchema, refuseCadEditsBeforeSchema } from '@/domain/cad/cadOperations';
 import { CadParameterNameSchema } from '@/domain/cad/cadParameters';
 import { CadDocumentSchema } from '@/domain/cad/cadSchema';
+import { storedCadDocument, storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
 import { CadError } from '@/domain/cad/cadError';
 import { CadStorageError } from '@/domain/cad/cadStorage';
 import { CadSectionRequestSchema } from '@/domain/cad/cadSection';
@@ -20,7 +21,7 @@ import { CadSessionError } from './cadSession';
 import { CadPluginPackageSchema, fingerprintCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
 import type { CadController } from './useCadController';
 import type { CadSketchEditWarning } from './cadEditPreparation';
-import { CadToolDocumentEnvelope, CadToolEditDefinitions, CadToolEditEnvelope, CadToolPluginPackageEnvelope, CadToolSketchEnvelope, CadToolSketchConstraintsQuerySchema } from './cadToolSchemas';
+import { CadToolDocumentEnvelope, CadToolEditDefinitions, CadToolEditEnvelope, CadToolPluginPackageEnvelope, CadToolSketchEnvelope, CadToolSketchConstraintsQuerySchema, cadToolOpenObject } from './cadToolSchemas';
 import { pageCadSketchConstraints, summarizeCadSketchConstraintAnalysis } from './cadSketchConstraintInspection';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { cadSketchIssues } from './cadSketchIssues';
@@ -34,6 +35,7 @@ import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
 import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 import { cadAgentIssue, cadAgentIssueDigest, cadAgentKernelMessage } from './cadAgentIssues';
 import type { CadBuildIssues } from '@/domain/cad/cadBuildIssues';
+import { CadSketchGeneratorRemovalError } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CadSketchPlacementDependencyError } from '@/domain/cad/cadSketchPlacement';
 import { CAD_SKETCH_AGENT_RELATION_KINDS } from '@/domain/cad/sketch-relations/cadSketchRelationRegistry';
 import { CadConstructionPointSchema, CadPathConstructionStepSchema, createCadPathProfile, createCadOpenCurveSegments } from '@/domain/cad/cadPathConstruction';
@@ -42,20 +44,22 @@ import { resolveCadCurve } from '@/domain/cad/cadCurve';
 import { CadIdentifierSchema } from '@/domain/cad/cadPrimitives';
 import { MAX_CAD_LOFT_SECTIONS, MIN_CAD_LOFT_SECTIONS } from '@/domain/cad/cadLoft';
 import { CadFeatureInputRequestSchema } from './cadFeatureInput';
+import { refuseNewCadSketchProfiles } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const id = Type.String({ minLength: 1, maxLength: 160 });
 const version = { expectedVersion: id };
 const pageFields = { ...workbenchPageFields, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })) };
 /** Discovery names each proposal branch; execution validates the complete witnessed target. */
-const proposalTarget = (description: string) => Type.Object({}, { additionalProperties: true, description });
+const proposalTarget = cadToolOpenObject;
 const regionProposalEnvelope = Type.Object({ sketch: Type.Optional(CadToolSketchEnvelope),
   split: Type.Optional(proposalTarget('split-sketch-entity target fields.')),
   trim: Type.Optional(proposalTarget('trimPreview.target plus allocated trim-sketch-entity IDs.')),
   extend: Type.Optional(proposalTarget('extendPreview.target plus endPointId.')),
   offset: Type.Optional(proposalTarget('{source,distance,idPrefix}')),
   mirror: Type.Optional(proposalTarget('{entityIds,axisLineId,idPrefix}')),
+  generator: Type.Optional(proposalTarget('{generator,removedRelationIds}')),
   parameterValues: CadSketchRegionProposalSchema.anyOf[0].properties.parameterValues
-}, { additionalProperties: false, minProperties: 1, description: 'At most one of sketch, split, trim, extend, offset or mirror.' });
+}, { additionalProperties: false, minProperties: 1, description: 'At most one of sketch, split, trim, extend, offset, mirror or generator.' });
 const regionInspectionSchema = Type.Union([
   object({ ...version, sketchId: CadIdentifierSchema, ...pageFields, mode: Type.Optional(Type.Literal('graph-cells')), proposal: Type.Optional(CadSketchRegionProposalSchema) }),
   object({ ...version, sketchId: CadIdentifierSchema, ...pageFields, mode: Type.Optional(Type.Literal('graph-cells')), trimAt: CadSketchTrimAtSchema, axes: Type.Optional(CadSketchCutAxesSchema) }),
@@ -82,16 +86,19 @@ const pathConstructionSchema = object({ start: CadConstructionPointSchema,
  */
 function withSharedDefinitions(schema: TSchema, shared: Readonly<Record<string, TSchema>>): TSchema {
   const names = new Map(Object.entries(shared).map(([name, definition]) => [JSON.stringify(definition), name]));
-  const visit = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(visit);
-    if (!node || typeof node !== 'object') return node;
-    const name = names.get(JSON.stringify(node));
-    if (name) return Type.Ref(name);
+  const members = (node: object) => {
     const copy: Record<string | symbol, unknown> = {};
     for (const key of Reflect.ownKeys(node)) copy[key] = visit((node as Record<string | symbol, unknown>)[key]);
     return copy;
   };
-  return { ...visit(schema) as TSchema, $defs: Object.fromEntries(Object.entries(shared).map(([name, definition]) => [name, { ...definition, $id: name }])) };
+  const visit = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(visit);
+    if (!node || typeof node !== 'object') return node;
+    const name = names.get(JSON.stringify(node));
+    return name ? Type.Ref(name) : members(node);
+  };
+  // A definition names the others it holds as well.
+  return { ...visit(schema) as TSchema, $defs: Object.fromEntries(Object.entries(shared).map(([name, definition]) => [name, { ...members(definition), $id: name }])) };
 }
 const documentText = new WeakMap<CadDocument, string>();
 /**
@@ -149,13 +156,54 @@ function parameterContext(document: CadDocument) {
     omittedParameterCount: parameterCount - retainedParameterCount, parameterGroups, parameterGroupCount: allGroups.length,
     omittedParameterGroups: parameterGroups.length < allGroups.length, omittedParameterGroupCount: allGroups.length - parameterGroups.length };
 }
+/**
+ * A removal refusal lists at most this many IDs in at most this many bytes, then the rows placing them while the page stays within its
+ * bytes, well inside a refusal's details.
+ */
+const REMOVAL_PAGE_IDS = 64, REMOVAL_PAGE_ID_BYTES = 6 * 1024, REMOVAL_PAGE_BYTES = 12 * 1024;
+/**
+ * A removal refusal's details: the version it was refused at, how many relations the edit removes and how many it confirmed, and a page
+ * of the IDs it did not, each placed in its sketches by `relations`. Resent at that version with the page added to removedRelationIds, the
+ * edit lists the next page, and applies once it confirms them all. The IDs are paged first and any one fits, so each page confirms at
+ * least one, however many sketches share it; rows that do not fit after them are counted.
+ */
+function removalPage(error: CadSketchGeneratorRemovalError, version: string) {
+  const relationIds: string[] = [];
+  let bytes = 0;
+  for (const id of error.pendingRelationIds) {
+    const cost = jsonByteLength(id) + 1;
+    if (relationIds.length === REMOVAL_PAGE_IDS || bytes + cost > REMOVAL_PAGE_ID_BYTES) break;
+    relationIds.push(id); bytes += cost;
+  }
+  const rows = relationIds.flatMap(id => error.relations.filter(relation => relation.relationId === id)
+    .map(({ sketchId, relationId }) => ({ ...sketchId === undefined ? {} : { sketchId }, relationId })));
+  let shown = 0;
+  for (const row of rows) {
+    const cost = jsonByteLength(row) + 1;
+    if (bytes + cost > REMOVAL_PAGE_BYTES) break;
+    shown++; bytes += cost;
+  }
+  return { version, relationIds, relations: rows.slice(0, shown), relationCount: error.relationIds.length, confirmedCount: error.relationIds.length - error.pendingRelationIds.length,
+    omittedRelationCount: error.pendingRelationIds.length - relationIds.length, omittedRelationRowCount: rows.length - shown };
+}
+/**
+ * A removal refusal's message: whole when it fits a tool reply's message, which is cut at 1 KiB; otherwise its first generator, how
+ * many there are and how many relations they remove, and how the details page confirms them, so the instruction is never cut off.
+ */
+function removalMessage(error: CadSketchGeneratorRemovalError) {
+  if (jsonByteLength(error.message) <= 1024) return error.message;
+  const generators = new Set(error.relations.map(relation => `${relation.sketchId ?? ''}\u0000${relation.generator}`)).size;
+  return `${error.relations[0].generator}${generators > 1 ? ` and ${generators - 1} more` : ''} no longer generate${generators > 1 ? '' : 's'} geometry that ${error.relations.length} relations use.`
+    + ' Send error.details.relationIds as removedRelationIds at error.details.version, adding the IDs each refusal lists next, until it applies; or keep the generator\'s inputs.';
+}
 // The kinds agents may name, in catalog order; each definition holds what they are told of it.
 const agentFeatureKinds = cadFeatureKinds().filter(kind => cadFeaturePresentation(kind).agent.exposed);
 
 /** No code execution or hidden controller shortcuts: agents use the visible CAD operations. */
 export function cadSiteTools(getController: () => CadController) {
   function tool<S extends TSchema>(name: string, description: string, schema: S,
-    execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema) {
+    execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema,
+    refuse?: (input: unknown) => void) {
     const operation = siteTool(name, description, schema, async (input, signal) => {
       let cad: CadController | undefined;
       const since = cadRefusalMark();
@@ -178,6 +226,11 @@ export function cadSiteTools(getController: () => CadController) {
           pointIds: error.pointIds.slice(0, 8), pointCount: error.pointIds.length, omittedPointCount: Math.max(0, error.pointIds.length - 8)
         });
         if (error instanceof CadSketchTangentOwnershipError) throw new ToolError(error.code, error.message, { ownerRelationId: error.ownerRelationId });
+        if (error instanceof CadSketchGeneratorRemovalError) {
+          // The edit was prepared at its expectedVersion, so its page is that version's; an edit sent without one ran at the current version.
+          const pinned = (input as { readonly expectedVersion?: unknown }).expectedVersion;
+          throw new ToolError(error.code, removalMessage(error), removalPage(error, typeof pinned === 'string' ? pinned : getController().session.getSnapshot().version));
+        }
         // A refusal of a feature or a CAM step also gives its issue: the feature, input slot or CAM step this call's steps recorded it at. The
         // kernel's own words go with the issue, or alone when no issue covers the refusal.
         if (error instanceof CadError) {
@@ -187,7 +240,10 @@ export function cadSiteTools(getController: () => CadController) {
         if (error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }
-    }, readOnly);
+    }, readOnly, refuse && (input => {
+      try { refuse(input); }
+      catch (error) { throw error instanceof CadError ? new ToolError(error.code, error.message) : error; }
+    }));
     return { ...operation, inputSchema: discoverySchema ?? operation.inputSchema, execute(input: unknown, options?: { signal?: AbortSignal }) {
       // Validate portable own data before TypeBox reads fields or a handler runs.
       if (!options?.signal?.aborted && !isCadImportData(input)) return Promise.resolve({ ok: false,
@@ -205,7 +261,7 @@ export function cadSiteTools(getController: () => CadController) {
       canUndo: state.canUndo, canRedo: state.canRedo, workflowOpen: state.workflowOpen, busy: cad.isBusy(),
       buildState: cad.buildState, buildVersion: cad.buildVersion, buildId: cad.build?.buildId ?? null,
       ...buildProblems(cad.build?.diagnostics ?? [], cad.buildIssues),
-      supported: { sketchEntities: { schemaVersion: 2, definition: 'cad_describe_features(kind=sketch)', inspection: 'cad_inspect_sketch_constraints', edits: ['append-sketch-entities', 'delete-sketch-elements', 'set-sketch-construction', 'translate-sketch-geometry', 'place-sketch-geometry', 'move-sketch-point', 'set-sketch-relation', 'remove-sketch-relation', 'create-sketch-corner', 'split-sketch-entity', 'trim-sketch-entity', 'extend-sketch-entity', 'offset-sketch-loop', 'mirror-sketch-geometry', 'copy-sketch-profile', 'use-sketch-entity'], relations: CAD_SKETCH_AGENT_RELATION_KINDS, material: 'Whole sketch retains simple closed cycles connected by shared point IDs or explicit coincidence. Deliberate graph-cells selection can Pad/Pocket exact bounded intersection cells; inspect mode=graph-cells and pack numeric cellIds with cad_read_sketch_region_reference. Unsupported contacts reject; new cells never become automatic material.' }, sketches: ['rectangle', 'circle', 'polygon', 'slot', 'path', 'plugin'], sketchDimensions: { rectangle: ['width', 'height'], circle: ['diameter', 'radius'], slot: ['length', 'width', 'angle'], intent: 'Legacy profile dimensions bind their geometry scalars. Numeric geometry stays free; expressions stay driven. Radius/diameter share one freedom. Graph point/entity constraints are listed under sketchEntities.' }, sketchTranslation: ['rectangle', 'circle', 'slot', 'polygon', 'path'], sketchHandles: { inspection: 'cad_inspect_sketch_handles', edit: 'move-sketch-handle', scope: 'Accepted revision only; free components move without replacing dimensions or expressions.' }, plugins: { apiVersion: 2, acceptedApiVersions: [1, 2], instances: 'Exact package embedded in each profile; inputs accept named CAD parameter expressions.', relations: 'API 2 supports derived values, conditional editing, dynamic ranges, choices and constraints. Derived values cannot be stored as editable inputs.', generators: ['builtin-spur-gear', 'polygon-recipe'] }, references: ['curve', 'datum-plane'], planes: ['XY', 'XZ', 'YZ'],
+      supported: { sketchEntities: { schemaVersion: 2, definition: 'cad_describe_features(kind=sketch)', inspection: 'cad_inspect_sketch_constraints', edits: ['append-sketch-entities', 'delete-sketch-elements', 'set-sketch-construction', 'translate-sketch-geometry', 'place-sketch-geometry', 'move-sketch-point', 'set-sketch-relation', 'remove-sketch-relation', 'create-sketch-corner', 'split-sketch-entity', 'trim-sketch-entity', 'extend-sketch-entity', 'offset-sketch-loop', 'mirror-sketch-geometry', 'copy-sketch-profile', 'use-sketch-entity', 'set-sketch-generator', 'detach-sketch-generator'], relations: CAD_SKETCH_AGENT_RELATION_KINDS, generators: 'A shape is a generator record whose inputs size and place it; its members regenerate from them. Dimensions anchor on members, but only inputs or a reference dimension size them. Detach keeps the members as plain geometry.', material: 'Whole sketch retains simple closed cycles connected by shared point IDs or explicit coincidence. Deliberate graph-cells selection can Pad/Pocket exact bounded intersection cells; inspect mode=graph-cells and pack numeric cellIds with cad_read_sketch_region_reference. Unsupported contacts reject; new cells never become automatic material.' }, sketches: ['rectangle', 'circle', 'polygon', 'regular-polygon', 'slot', 'path', 'plugin', 'circular-pattern', 'offset'], sketchDimensions: { rectangle: ['width', 'height'], circle: ['diameter', 'radius'], slot: ['length', 'width', 'angle'], intent: 'Legacy profile dimensions bind their geometry scalars. Numeric geometry stays free; expressions stay driven. Radius/diameter share one freedom. Graph point/entity constraints are listed under sketchEntities.' }, sketchTranslation: ['rectangle', 'circle', 'slot', 'polygon', 'path'], sketchHandles: { inspection: 'cad_inspect_sketch_handles', edit: 'move-sketch-handle', scope: 'Accepted revision only; free components move without replacing dimensions or expressions.' }, plugins: { apiVersion: 2, acceptedApiVersions: [1, 2], instances: 'Exact package embedded in each profile; inputs accept named CAD parameter expressions.', relations: 'API 2 supports derived values, conditional editing, dynamic ranges, choices and constraints. Derived values cannot be stored as editable inputs.', generators: ['builtin-spur-gear', 'polygon-recipe'] }, references: ['curve', 'datum-plane'], planes: ['XY', 'XZ', 'YZ'],
         datumPlacement: { definition: 'world', supported: ['sketch', 'curve', 'extrude', 'revolve', 'loft', 'sweep'], unsupported: ['pocket'], inspection: 'cad_inspect_plane' },
         solids: ['imported', 'extrude', 'pocket', 'revolve', 'loft', 'sweep', 'fillet', 'chamfer', 'shell', 'boolean', 'transform', 'linear-pattern', 'circular-pattern', 'mirror'],
         imports: ['cad-json', 'dxf', 'step', 'stl'],
@@ -250,7 +306,7 @@ export function cadSiteTools(getController: () => CadController) {
     }, false, object({ ...version, package: CadToolPluginPackageEnvelope })),
     tool('cad_inspect_plane', 'Resolve the current active datum, sketch or curve world frame and signed offset in mm. Preserves authored placement; does not certify native solid precision. Finish pending workflows; stale/unavailable references and cancellation reject. Feature definitions: cad_describe_features.', object({ ...version, featureId: id }),
       (cad, input, signal) => cad.inspectPlane(input.featureId, input.expectedVersion, signal)),
-    tool('cad_inspect_sketch_regions', 'Inspect current or proposed closed sketch cells with local area/bounds. Default rows keep contour references; mode=graph-cells lists all graph-owned bounded cells, including intersections, as numeric cellId receipts to pack with cad_read_sketch_region_reference. Pin version, sketch, mode and identical proposal across pages. proposal previews one complete same-ID change, with optional numeric parameterValues; source preflight only. trimAt or extendAt return trimPreview/extendPreview; axes:[@h,@v] also cut. Complete targets per cad_describe_edits, reusing witnessed endpoint IDs, then inspect proposal.trim/extend with that exact target. offset and mirror reuse the exact edit request. Reads reserve no IDs; apply topology and consumer repairs atomically.', regionInspectionSchema, async (cad, input, signal) => {
+    tool('cad_inspect_sketch_regions', 'Inspect current or proposed closed sketch cells with local area/bounds. Default rows keep contour references; mode=graph-cells lists all graph-owned bounded cells, including intersections, as numeric cellId receipts to pack with cad_read_sketch_region_reference. Pin version, sketch, mode and identical proposal across pages. proposal previews one complete same-ID change, with optional numeric parameterValues; source preflight only. trimAt or extendAt return trimPreview/extendPreview; axes:[@h,@v] also cut. Complete targets per cad_describe_edits, reusing witnessed endpoint IDs, then inspect proposal.trim/extend with that exact target. offset, mirror and generator reuse the exact edit fields. Reads reserve no IDs; apply topology and consumer repairs atomically.', regionInspectionSchema, async (cad, input, signal) => {
       const { expectedVersion, mode, limit, offset = 0 } = input;
       const inspection = await cad.inspectSketchRegions(input.sketchId, input, expectedVersion, signal);
       const rows: ReadonlyArray<(typeof inspection.items)[number]> = inspection.items;
@@ -309,7 +365,7 @@ export function cadSiteTools(getController: () => CadController) {
       }
       return { version: input.expectedVersion, persisted: false, ...page(inspection.parameters, input, summary) };
     }),
-    tool('cad_construct_path', 'Construct and measure a closed analytic line/arc profile from ordered local-mm start/steps. Keeps signed major/minor arcs; adds a final straight closing edge if needed. Rejects ambiguous, crossing or zero-area geometry. Insert returned geometry with cad_edit_document using cad_describe_features(kind=sketch). No edits.', pathConstructionSchema, (_cad, input) => {
+    tool('cad_construct_path', 'Construct and measure a closed analytic line/arc path from ordered local-mm start/steps. Keeps signed major/minor arcs; adds a final straight closing edge if needed. Rejects ambiguous, crossing or zero-area geometry. Insert the returned geometry as a set-sketch-generator path; detach it to keep plain lines and arcs. No edits.', pathConstructionSchema, (_cad, input) => {
       const geometry = createCadPathProfile(input.start, input.steps);
       const resolved = resolveCadProfile(geometry, {});
       if (resolved.kind !== 'path') throw new ToolError('CONSTRUCTION_FAILED', 'The constructed profile is not an analytic path.');
@@ -345,13 +401,13 @@ export function cadSiteTools(getController: () => CadController) {
     }, false),
     tool('cad_read_features', 'Read paginated feature definitions from the current CAD draft, including exact dimensions and expressions. Use IDs in updates; never infer them from names.', object({ ...version, ...pageFields }), (cad, input) => {
       cad.session.assertVersion(input.expectedVersion);
-      return { version: input.expectedVersion, ...page(cad.session.getSnapshot().document.features, input) };
+      return { version: input.expectedVersion, ...page(storedCadDocument(cad.session.getSnapshot().document).features, input) };
     }),
     tool('cad_read_document', 'Read complete current CAD JSON in exact bounded UTF-16 chunks, including large sketches that exceed one feature-page response. Concatenate text until nextOffset is null, then parse JSON. Offsets count JavaScript UTF-16 code units. Pin the same expectedVersion for every chunk. No save or browser download.', object({ ...version, offset: pageFields.offset, length: Type.Optional(Type.Integer({ minimum: 1, maximum: 4096 })) }), (cad, input) => {
       cad.session.assertVersion(input.expectedVersion);
       const document = cad.session.getSnapshot().document;
       let text = documentText.get(document);
-      if (text === undefined) { text = JSON.stringify(document); documentText.set(document, text); }
+      if (text === undefined) { text = storedCadDocumentText(document); documentText.set(document, text); }
       const offset = input.offset ?? 0;
       if (offset > text.length) throw new ToolError('INVALID_ARGUMENT', 'Offset exceeds the document text length.');
       const end = Math.min(text.length, offset + (input.length ?? 4096));
@@ -359,16 +415,23 @@ export function cadSiteTools(getController: () => CadController) {
     }),
     tool('cad_get_feature', 'Read one feature definition by exact ID in the current draft.', object({ ...version, featureId: id }), (cad, input) => {
       cad.session.assertVersion(input.expectedVersion);
-      const feature = cad.session.getSnapshot().document.features.find(value => value.id === input.featureId);
+      const feature = storedCadDocument(cad.session.getSnapshot().document).features.find(value => value.id === input.featureId);
       if (!feature) throw new ToolError('NOT_FOUND', 'Feature does not exist. Read cad_read_features.');
       return { version: input.expectedVersion, feature };
     }),
-    tool('cad_edit_document', 'Apply typed edits atomically to the CAD draft: parameters, sketch grips/dimensions/translations, independent profile copies, preceding-sketch construction references, rename, reorder or cascade deletion. copy-sketch-profile creates a new editable numeric graph sketch from one actual accepted profile; source data stays exact. One undo step; no save. Call cad_describe_edits(kind) for fields, cad_describe_features for complete add/update definitions; execution stays strict. Rejects invalid geometry, references, stale versions and active workflows. No code execution.', object({ ...version, edits: Type.Array(CadEditSchema, { minItems: 1, maxItems: 128 }) }), async (cad, input, signal) => {
+    tool('cad_edit_document', 'Apply typed edits atomically to the CAD draft: parameters, sketch geometry, grips, dimensions, relations and generators, profile copies, preceding-sketch construction references, rename, reorder or cascade deletion. One undo step; no save. Call cad_describe_edits(kind) for fields, cad_describe_features for complete add/update definitions; execution stays strict. Rejects invalid geometry, references, stale versions and active workflows. No code execution.', object({ ...version, edits: Type.Array(CadEditSchema, { minItems: 1, maxItems: 128 }) }), async (cad, input, signal) => {
       let warnings: readonly CadSketchEditWarning[] = [];
+      refuseNewCadSketchProfiles(cad.session.getSnapshot().document, input.edits);
       await cad.edit(input.edits, input.expectedVersion, true, signal, found => { warnings = found; });
       // At most eight warnings, as other edit diagnostics are listed, with how many there were.
       return { ...context(cad), ...(warnings.length ? { sketchWarnings: { items: warnings.slice(0, 8), count: warnings.length, omittedCount: Math.max(0, warnings.length - 8) } } : {}) };
-    }, false, object({ ...version, edits: Type.Array(CadToolEditEnvelope, { minItems: 1, maxItems: 128 }) })),
+    }, false, object({ ...version, edits: Type.Array(CadToolEditEnvelope, { minItems: 1, maxItems: 128 }) }), input => {
+      // The domain's own reasons for edits its schema refuses, such as a generator's count bound, come before the bare schema refusal. An
+      // envelope that is no object, or edits that are no list, have no such reason, so the schema check names what is wrong.
+      if (typeof input !== 'object' || input === null || Array.isArray(input)) return;
+      const edits = (input as { readonly edits?: unknown }).edits;
+      if (Array.isArray(edits)) refuseCadEditsBeforeSchema(edits);
+    }),
     tool('cad_describe_edits', 'Discover CAD edit fields without opening or changing a draft. No kind returns a catalog; kind returns its strict contract. Add/update features and plugin packages use their separate complete discovery tools. Execution always validates full definitions.', object({ kind: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })) }), (_cad, input) => {
       if (!input.kind) return { items: CadToolEditDefinitions.map(schema => ({ kind: schema.properties.kind.const, description: schema.description ?? null })) };
       const schema = CadToolEditDefinitions.find(schema => schema.properties.kind.const === input.kind);

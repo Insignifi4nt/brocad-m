@@ -133,6 +133,23 @@ describe('CAD tool argument boundary and discovery', () => {
     }
     expect(controller).not.toHaveBeenCalled();
   });
+  it('takes a generator edit\'s own fields as a region proposal, refusing a malformed or mixed one before the draft', async () => {
+    const controller = vi.fn<() => CadController>(() => { throw new Error('Malformed generator reached controller.'); });
+    const tools = cadSiteTools(controller), reads = tools.filter(tool => tool.name === 'cad_inspect_sketch_regions' || tool.name === 'cad_read_sketch_region_reference');
+    const generator = { generator: { id: 'ring', kind: 'generator', idPrefix: 'ring', construction: false,
+      geometry: { kind: 'circular-pattern', seedIds: ['edge'], centerId: '@origin', count: 'n', angle: 360 } }, removedRelationIds: ['tie'] };
+    const definition = CadToolEditDefinitions.find(edit => edit.properties.kind.const === 'set-sketch-generator');
+    if (!definition) throw new Error('Generator edit definition missing.');
+    expect(Value.Check(definition, { kind: 'set-sketch-generator', sketchId: 'sketch', ...generator })).toBe(true);
+    for (const tool of reads) {
+      const query = { expectedVersion: 'current', sketchId: 'sketch', ...(tool.name === 'cad_read_sketch_region_reference' ? { cellIds: [0] } : { mode: 'graph-cells' }) };
+      expect(Value.Check(tool.inputSchema, { ...query, proposal: { generator, parameterValues: { n: 6 } } })).toBe(true);
+      for (const proposal of [{ generator, offset: {} }, { generator: generator.generator }, { generator: { ...generator, sketchId: 'sketch' } },
+        { generator: { ...generator, generator: { ...generator.generator, idPrefix: 'ring_1' } } }, { generator: { ...generator, removedRelationIds: ['tie', 'tie'] } }])
+        expect(await tool.execute({ ...query, proposal })).toMatchObject({ ok: false, error: { code: 'INVALID_ARGUMENT' } });
+    }
+    expect(controller).not.toHaveBeenCalled();
+  });
   it('exposes the same strict detached offset request in edit discovery and mutually exclusive region proposals', async () => {
     const controller = vi.fn<() => CadController>(() => { throw new Error('Malformed offset reached controller.'); });
     const tools = cadSiteTools(controller), reads = tools.filter(tool => tool.name === 'cad_inspect_sketch_regions' || tool.name === 'cad_read_sketch_region_reference');
@@ -332,14 +349,20 @@ describe('CAD tool argument boundary and discovery', () => {
       profiles: Array.from({ length: 257 }, (_, index) => ({ id: `circle_${index}`, name: `Circle ${index}`, construction: false, geometry: { kind: 'circle', x: index * 4, y: 0, radius: 1 } })) };
     expect(Value.Check(CadFeatureSchema, sketch)).toBe(true); expect(Value.Check(data.schema, references, sketch)).toBe(true);
     expect(Value.Check(data.schema, references, { ...sketch, unknown: true })).toBe(false);
-    // Repeated scalar, identifier and placement schemas are named once, so the definition stays within the reply budget.
-    expect(Object.keys(data.schema.$defs)).toEqual(['CadScalar', 'CadIdentifier', 'CadSketchLinearAnnotation', 'CadSketchAngleAnnotation', 'CadSketchRadialAnnotation', 'CadSketchSetbacksAnnotation']);
+    // Repeated scalar, identifier, element reference, profile geometry and placement schemas are named once, so the definition stays within the reply budget.
+    expect(Object.keys(data.schema.$defs)).toEqual(['CadScalar', 'CadIdentifier', 'CadSketchElementId', 'CadProfilePlugin', 'CadProfileRectangle', 'CadProfileCircle', 'CadProfilePolygon',
+      'CadProfilePath', 'CadProfileSlot', 'CadSketchLinearAnnotation', 'CadSketchAngleAnnotation', 'CadSketchRadialAnnotation', 'CadSketchSetbacksAnnotation']);
     expect(JSON.stringify(reply).length).toBeLessThan(30 * 1024);
     const graph = (annotation: unknown) => ({ ...sketch, profiles: [], graph: { points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }], entities: [],
       relations: [{ id: 'width', kind: 'distance', pointIds: ['a', 'b'], value: 10, annotation }] } });
     expect(Value.Check(data.schema, references, graph({ kind: 'linear', offset: 5, along: 0.25 }))).toBe(true);
     expect(Value.Check(data.schema, references, graph({ kind: 'radial', angle: 0, distance: 5 }))).toBe(false);
     expect(Value.Check(data.schema, references, graph({ kind: 'linear', offset: 5e6, along: 0.25 }))).toBe(false);
+    // A generator reads the same profile geometry by reference.
+    const generator = (geometry: unknown) => ({ ...sketch, profiles: [], graph: { points: [], entities: [], relations: [{ id: 'g', kind: 'generator', idPrefix: 'g', construction: false, geometry }] } });
+    expect(Value.Check(data.schema, references, generator({ kind: 'slot', x: 0, y: 0, length: 20, width: 'w', angle: 0 }))).toBe(true);
+    expect(Value.Check(data.schema, references, generator({ kind: 'regular-polygon', x: 0, y: 0, radius: 5, sides: 6, directionId: '@h' }))).toBe(true);
+    expect(Value.Check(data.schema, references, generator({ kind: 'slot', x: 0, y: 0, length: 20 }))).toBe(false);
   });
   it('offers a narrow feature-input build and tokened topology reads without granting editor workflow scope', async () => {
     const controller = vi.fn<() => CadController>(() => { throw new Error('Invalid input reached controller'); });
@@ -556,6 +579,19 @@ describe('CAD tool argument boundary and discovery', () => {
     expect(JSON.stringify(edit.inputSchema).length).toBeLessThan(JSON.stringify(CadEditSchema).length / 3);
     expect(Value.Check(edit.inputSchema, { ...update, unknown: true })).toBe(false);
     expect(Value.Check(edit.inputSchema, { ...update, edits: Array(129).fill(update.edits[0]) })).toBe(false);
+  });
+  it('makes no new saved sketch profile through any tool that is not read-only', () => {
+    // Saved profiles still load, but no agent tool makes a new one. A tool added here must say what it gives a sketch.
+    const sketches: Readonly<Record<string, string>> = {
+      cad_edit_document: 'refuses a new saved profile (legacy-sketch-profile), and places a plugin as a plugin generator',
+      cad_import_dxf: 'one path or circle generator per contour', cad_import_curve_dxf: 'a curve feature, no sketch', cad_import_solid: 'an imported solid, no sketch',
+      cad_create_document: 'an empty draft', cad_history: 'an earlier state of the draft',
+      cad_import_document: 'the document as given, as the JSON Import loads a saved one', cad_open_document: 'the saved document as it was',
+      ...Object.fromEntries(['cad_install_plugin', 'cad_open_workspace', 'cad_set_viewport', 'cad_capture_preview', 'cad_save_document', 'cad_send_section_to_cam',
+        'cad_export_section_dxf', 'cad_send_to_cam', 'cad_export_document', 'cad_export_solid', 'cad_export_dxf', 'cad_export_curve_dxf'].map(name => [name, 'no change']))
+    };
+    const writing = cadSiteTools(() => { throw new Error('Unused controller'); }).filter(tool => !tool.annotations?.readOnlyHint).map(tool => tool.name);
+    expect([...writing].sort()).toEqual(Object.keys(sketches).sort());
   });
   it('retains full import validation behind the compact document registration', async () => {
     const controller = vi.fn<() => CadController>(() => { throw new Error('Invalid document reached the controller'); });

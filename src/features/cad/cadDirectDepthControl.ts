@@ -4,6 +4,7 @@ import { applyCadEdits } from '@/domain/cad/cadOperations';
 import type { CadTopologyPickSet } from '@/domain/cad/cadTopology';
 import { cadExtrudeDepthEdits, cadExtrudeForEndFace, inspectCadExtrudeDepth, type CadExtrudeDepthControl, type CadExtrudeDepthModel, type CadExtrudeDepthState } from './cadExtrudeDepthInteraction';
 import { cadFeatureCandidateEdits, cadFeatureCandidateKey, type CadFeatureCandidateEdits, type CadFeaturePreviewCommand } from './cadFeaturePreview';
+import { cadGeneratorRemovals } from './cadGeneratorRemovals';
 
 export interface CadDirectDepthEnvironment {
   readonly document: CadDocument;
@@ -49,12 +50,19 @@ export function createCadDirectDepthControl(options: {
   preview(command: CadFeaturePreviewCommand): void;
   /** Starts the one accepted edit; the caller owns cancellation and errors. */
   commit(edits: CadFeatureCandidateEdits): void;
+  /**
+   * Takes the edits of a drag released at a Length that removes relations as generators regenerate. The drag has no dialog, so it
+   * applies nothing and the caller asks, as the Pad's editor does.
+   */
+  ask?(edits: CadFeatureCandidateEdits): void;
   /** True from the first real Length change until release or cancel. */
   onGestureChange(active: boolean): void;
 }): CadDirectDepthControl {
   const { featureId, baseVersion, owner } = options;
   const listeners = new Set<() => void>();
-  let gesture: { token: string; document: CadDocument; edits: CadFeatureCandidateEdits | null; changed: boolean } | null = null;
+  let gesture: { token: string; document: CadDocument; edits: CadFeatureCandidateEdits | null; changed: boolean;
+    /** The edits of the latest Length when it removes relations; the preview keeps the last Length that removes none. */
+    removing?: CadFeatureCandidateEdits } | null = null;
   let disposed = false;
   let cached: { document: CadDocument; edits: CadFeatureCandidateEdits | null; enabled: boolean; gestureActive: boolean; state: CadExtrudeDepthState | null } | null = null;
   const environment = () => {
@@ -67,7 +75,8 @@ export function createCadDirectDepthControl(options: {
     const saved = gesture; if (!saved) return false;
     gesture = null;
     if (saved.changed) options.onGestureChange(false);
-    if (commit && saved.edits) options.commit(saved.edits);
+    if (commit && saved.removing && options.ask) { options.preview({ kind: 'clear', owner }); options.ask(saved.removing); }
+    else if (commit && saved.edits) options.commit(saved.edits);
     else options.preview({ kind: 'clear', owner });
     notify(); return true;
   };
@@ -113,7 +122,10 @@ export function createCadDirectDepthControl(options: {
       // Passing through zero or a refused value keeps the last valid preview.
       if (result.kind === 'locked') return true;
       const edits = result.kind === 'edits' ? result.edits : null;
-      if (edits) { try { applyCadEdits(owned.document, edits); } catch { return true; } }
+      if (edits) {
+        try { applyCadEdits(owned.document, edits); owned.removing = undefined; }
+        catch (cause) { owned.removing = cadGeneratorRemovals(cause) ? edits : undefined; return true; }
+      } else owned.removing = undefined;
       if (edits && !owned.changed) { owned.changed = true; options.onGestureChange(true); }
       owned.edits = edits;
       options.preview(edits ? { kind: 'candidate', owner, expectedVersion: baseVersion, edits } : { kind: 'clear', owner });

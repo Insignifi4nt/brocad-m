@@ -5,6 +5,9 @@ import { applyCadEdits, CadEditSchema, type CadEdit } from '@/domain/cad/cadOper
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { prepareCadSketchProfileCopy } from '@/domain/cad/cadSketchProfileCopy';
 import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
+import type { CadSketchFeature } from '@/domain/cad/cadDocument';
+import type { CadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import { cadAnalyticPathMetrics } from '@/domain/cad/cadSketchGeometry';
 import { resolveCadSketchPlacement } from '@/domain/cad/cadDatumPlanes';
 import { prepareCadDocumentFrames } from '@/domain/cad/cadDocumentFrames';
 import { prepareCadSketchCells } from '@/domain/cad/cadSketchRegionInspection';
@@ -16,17 +19,19 @@ import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTe
 const runtime = createCadSketchTestSolver();
 
 describe('document-level independent profile copy preparation', () => {
-  it.each([{ part: profileCopySlotPart, request: slotProfileCopyRequest, dof: 10 }, { part: profileCopyDxfPart, request: dxfProfileCopyRequest, dof: 5 }])('prepares the exact known $part.name candidate from schema 1 without changing its source', async ({ part, request, dof }) => {
+  // An imported DXF holds contour generators, which need schema 2.
+  it.each([{ part: profileCopySlotPart, request: slotProfileCopyRequest, dof: 10, schema: 1 }, { part: profileCopyDxfPart, request: dxfProfileCopyRequest, dof: 5, schema: 2 }])('prepares the exact known $part.name candidate from schema $schema without changing its source', async ({ part, request, dof, schema }) => {
     const document = part(), source = document.features[0]; if (source.kind !== 'sketch') throw new Error('Profile source missing.');
     const edit = { kind: 'copy-sketch-profile', ...request } as const;
-    expect(Value.Check(CadEditSchema, edit)).toBe(true); expect(document.schemaVersion).toBe(1);
+    expect(Value.Check(CadEditSchema, edit)).toBe(true); expect(document.schemaVersion).toBe(schema);
     expect(needsCadSketchPreparation(document, [edit])).toBe(true);
     const before = JSON.stringify(document), copy = prepareCadSketchProfileCopy({ sketch: source, parameters: document.parameters, ...request });
     const expected = parseCadDocument({ ...document, schemaVersion: 2, features: [...document.features, copy.sketch] });
     const prepared = await prepareCadEdits(document, [edit], runtime);
     expect(prepared.document).toEqual(expected); expect(prepared.document.features[0]).toEqual(source);
     expect(prepared.document.parameterGroups).toEqual(document.parameterGroups); expect(prepared.document.parameterMetadata).toEqual(document.parameterMetadata);
-    expect(prepared.sketchDiagnostics[0]).toEqual({ sketchId: 'copy', diagnostics: { status: 'success', degreesOfFreedom: dof,
+    // A DXF source is a graph sketch too, of fixed generated contours, so it is reported beside the copy.
+    expect(prepared.sketchDiagnostics.find(entry => entry.sketchId === 'copy')).toEqual({ sketchId: 'copy', diagnostics: { status: 'success', degreesOfFreedom: dof,
       conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } });
     expect(resolveCadSketchPlacement(copy.sketch, document.parameters, prepareCadDocumentFrames(expected))).toEqual(
       resolveCadSketchPlacement(source, document.parameters, prepareCadDocumentFrames(expected)));
@@ -35,6 +40,63 @@ describe('document-level independent profile copy preparation', () => {
     expect(copy.sketch.graph.relations).toEqual([]);
     if (request.profileId === 'contour_1') expect(compileCadSketchGraph(copy.sketch.graph, {}).segments.find(segment => segment.kind === 'arc')).toMatchObject({ radius: 25.4, sweepRadians: Math.PI * 1.5 });
     expect(JSON.stringify(document)).toBe(before);
+  });
+
+  it('copies a generated outline as its members with the joints and equal radii they were made with, the outline the legacy profile copies', async () => {
+    const legacy = profileCopySlotPart(), source = legacy.features[0]; if (source.kind !== 'sketch') throw new Error('Profile source missing.');
+    const [profile] = source.profiles;
+    const generated = parseCadDocument({ ...legacy, schemaVersion: 2, features: [{ ...source, profiles: [], graph: { points: [], entities: [],
+      relations: [{ id: profile.id, kind: 'generator', idPrefix: profile.id, name: profile.name, construction: false, geometry: profile.geometry }] } }] });
+    const edit = { kind: 'copy-sketch-profile', ...slotProfileCopyRequest } as const;
+    const prepared = await prepareCadEdits(generated, [edit], runtime), copied = prepared.document;
+    expect(copied.features[0]).toEqual(generated.features[0]);
+    const graph = (copied.features[1] as CadSketchFeature).graph!, bare = ((await prepareCadEdits(legacy, [edit], runtime)).document.features[1] as CadSketchFeature).graph!;
+    // The slot's sides, caps and centres under the copy's prefix, holding what a drawn slot holds; the legacy copy has bare edges.
+    expect(graph.entities.map(entity => entity.id)).toEqual(['copy_e0', 'copy_a0', 'copy_e1', 'copy_a1']);
+    expect(graph.relations.map(relation => [relation.id, relation.kind])).toEqual([['copy_j0', 'tangent-joint'], ['copy_j1', 'tangent-joint'], ['copy_j2', 'tangent-joint'],
+      ['copy_j3', 'tangent-joint'], ['copy_q0', 'equal-radius']]);
+    expect(graph.relations[0]).toEqual({ id: 'copy_j0', kind: 'tangent-joint', endpoints: [{ entityId: 'copy_e0', pointId: 'copy_t1' }, { entityId: 'copy_a0', pointId: 'copy_t1' }] });
+    expect(bare.relations).toEqual([]);
+    const metrics = (copy: CadSketchGraph) => cadAnalyticPathMetrics({ kind: 'path', segments: compileCadSketchGraph(copy, {}).cycles[0].path });
+    const [made, drawn] = [metrics(graph), metrics(bare)];
+    expect(made.signedArea).toBeCloseTo(drawn.signedArea, 9); expect(made.length).toBeCloseTo(drawn.length, 9);
+    expect(prepared.sketchDiagnostics.find(entry => entry.sketchId === 'copy')?.diagnostics).toMatchObject({ status: 'success', conflictingIds: [], redundantIds: [], partiallyRedundantIds: [] });
+  });
+
+  // A copied relation keeps its expression, so the copy is checked with the document's parameters, as the source was.
+  const square = [[0, 0], [10, 0], [10, 10], [0, 10]] as const;
+  const bound = (parameters: Readonly<Record<string, number>>, graph: CadSketchGraph) => parseCadDocument({ ...createCadDocument('Bound', 'cad_bound'), schemaVersion: 2, parameters,
+    features: [{ id: 'source', kind: 'sketch', name: 'Source', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph }] });
+  const prepared = (session: CadSession, edits: readonly CadEdit[]) => session.editPrepared(session.getSnapshot().version, async document => (await prepareCadEdits(document, edits, runtime)).document);
+  const copyOf = (session: CadSession) => session.getSnapshot().document.features.find((feature): feature is CadSketchFeature => feature.id === 'copy' && feature.kind === 'sketch');
+  const copyEdit = (profileId: string) => ({ kind: 'copy-sketch-profile', sourceSketchId: 'source', profileId, newSketchId: 'copy', name: 'Copy', idPrefix: 'copy' }) as const;
+
+  it('copies a linked offset whose angle is bound to a parameter, keeping the expression, and undoes the copy', async () => {
+    const session = new CadSession(bound({ theta: 90 }, {
+      points: square.map((position, index) => ({ id: `p${index}`, position: [...position] })),
+      entities: square.map((_, index) => ({ id: `l${index}`, kind: 'line', construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })),
+      relations: [{ id: 'angle', kind: 'line-angle', rays: [{ lineId: 'l1', towardPointId: 'p2' }, { lineId: 'l0', towardPointId: 'p0' }], sense: 'ccw', value: 'theta' }] }));
+    await prepared(session, [{ kind: 'set-sketch-generator', sketchId: 'source', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
+      geometry: { kind: 'offset', chain: square.map((_, index) => ({ entityId: `l${index}`, reversed: false })), distance: 2 } } }]);
+    const offset = session.getSnapshot();
+    await prepared(session, [copyEdit('wall')]);
+    const copy = copyOf(session)!.graph!;
+    expect(copy.relations).toContainEqual(expect.objectContaining({ id: 'copy_r_angle', kind: 'line-angle', value: 'theta' }));
+    // The square grown by 2 on each side.
+    expect(Math.abs(cadAnalyticPathMetrics({ kind: 'path', segments: compileCadSketchGraph(copy, { theta: 90 }).cycles[0].path }).signedArea)).toBeCloseTo(14 * 14, 9);
+    session.undo();
+    expect(session.getSnapshot().document).toEqual(offset.document); expect(copyOf(session)).toBeUndefined();
+  });
+
+  it('copies a generated rectangle with a user relation bound to a parameter, keeping the expression, and undoes the copy', async () => {
+    const session = new CadSession(bound({ zero: 0 }, { points: [], entities: [], relations: [
+      { id: 'rect', kind: 'generator', idPrefix: 'rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } }] }));
+    await prepared(session, [{ kind: 'set-sketch-relation', sketchId: 'source', relation: { id: 'pin', kind: 'fixed-point', pointId: 'rect_p0', position: ['zero', 'zero'] } }]);
+    const pinned = session.getSnapshot();
+    await prepared(session, [copyEdit('rect')]);
+    expect(copyOf(session)!.graph!.relations).toContainEqual({ id: 'copy_u0', kind: 'fixed-point', pointId: 'copy_p0', position: ['zero', 'zero'] });
+    session.undo();
+    expect(session.getSnapshot().document).toEqual(pinned.document); expect(copyOf(session)).toBeUndefined();
   });
 
   it('uses the preceding parameter intent and retains shared datum placement and existing source consumers', async () => {

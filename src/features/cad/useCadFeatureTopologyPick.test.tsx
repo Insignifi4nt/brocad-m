@@ -1,7 +1,10 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { createCadDocument } from '@/domain/cad/cadSchema';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { applyCadEdits } from '@/domain/cad/cadOperations';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import type { CadFeatureInputSnapshot } from './cadFeatureInput';
 import type { CadFeatureTopologyPickCommand } from './cadFeatureReferencePicking';
 import type { CadTopologyResolvePicksResult } from '@/domain/cad/cadTopology';
@@ -163,6 +166,22 @@ it('cancels an in-flight conversion and releases only its input without changing
   expect(signal.aborted).toBe(true); expect(h.operations.release).toHaveBeenCalledExactlyOnceWith('input');
   await act(async () => { h.resolution.resolve(h.result); await pending; });
   expect(h.command.onSelect).not.toHaveBeenCalled(); expect(picker.source).toBeNull(); expect(picker.meshes).toEqual([]);
+});
+
+it('says in user words what an unapplied parameter would remove when the input cannot be built without asking', async () => {
+  // The form's n would leave a polygon with four sides and drop "c4" on its fifth corner; the input never removes relations, so the pick waits for Apply.
+  const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+    geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+  const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+  const document = parseCadDocument({ ...createCadDocument('Owned input', 'owned-input'), schemaVersion: 2, parameters: { n: 5 }, features: [{ id: 'sketch', name: 'Sketch', kind: 'sketch',
+    suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } }] });
+  let refusal: unknown; try { applyCadEdits(document, [{ kind: 'set-parameter', name: 'n', value: 4 }]); } catch (cause) { refusal = cause; }
+  const command: CadFeatureTopologyPickCommand = { kind: 'pick-topology', owner: 'form', expectedVersion: 'v1', label: 'Edges', purpose: 'fillet', request: { featureId: 'fillet', bodyId: 'pad' }, onSelect: vi.fn(), onCancel: vi.fn() };
+  const operations = { build: vi.fn(async () => { throw refusal; }), inspect: vi.fn<CadFeatureInputPicking['inspect']>(), resolve: vi.fn<CadFeatureInputPicking['resolve']>(), release: vi.fn() } satisfies CadFeatureInputPicking;
+  function Harness() { picker = useCadFeatureTopologyPick(command, document, 'v1', operations); return null; }
+  await act(async () => root.render(<Harness />));
+  expect(picker.error).toMatch(/^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*. Apply or cancel the parameter change first, then choose geometry.$/);
+  expect(picker.source).toBeNull(); expect(operations.release).not.toHaveBeenCalled();
 });
 
 it('immediately hides a stale input and rejects retained point callbacks when its version changes', async () => {

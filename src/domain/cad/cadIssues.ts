@@ -1,5 +1,6 @@
 import type { CadBodyKey, CadBodyUntrackedReason } from './cadBodies';
 import type { CadDocument, CadKernelFailureDetails } from './cadDocument';
+import { cadDevelopmentChecks } from './cadDevelopmentChecks';
 import { CadError } from './cadError';
 import { cadFeatureDependencies } from './cadFeatureInputs';
 import type { CadCamCodeOf, CadCamOperation, CadExportCodeOf, CadExportFormat, CadRefusalCode, CadRefusalFactCode, CadRefusalFacts, CadSketchGraphCode, CadSketchRefusalCode, CadSketchRelationCode } from './cadIssueCodes';
@@ -251,12 +252,12 @@ export function cadIssueListProblems(issues: readonly CadIssue[]): readonly stri
 }
 
 /**
- * The issues of one list, frozen. With `checked`, which development and tests ask for, a list that is not one causal graph
- * (`cadIssueListProblems`) is a programming error that throws; production leaves it unchecked and the digest names what does not resolve.
- * The caller decides, so this module reads no host flag: the app passes its bundler's development flag.
+ * The issues of one list, frozen. With the development checks on (`cadDevelopmentChecks`), as in development and tests, a list that is not
+ * one causal graph (`cadIssueListProblems`) is a programming error that throws; production leaves it unchecked and the digest names what
+ * does not resolve. A well-formed list is the same either way.
  */
-export function createCadIssueList(issues: readonly CadIssue[], checked: boolean): readonly CadIssue[] {
-  if (checked) {
+export function createCadIssueList(issues: readonly CadIssue[]): readonly CadIssue[] {
+  if (cadDevelopmentChecks()) {
     const problems = cadIssueListProblems(issues);
     if (problems.length) throw new Error(`Malformed CAD issue list: ${problems.join(' ')}`);
   }

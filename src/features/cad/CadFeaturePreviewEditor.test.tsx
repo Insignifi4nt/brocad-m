@@ -1,8 +1,11 @@
 import { act, useState, useSyncExternalStore } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { createCadDocument } from '@/domain/cad/cadSchema';
-import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import type { CadBuildResult, CadDocument, CadFeature } from '@/domain/cad/cadDocument';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { cadGeneratorRemovals, cadGeneratorRemovalText } from './cadGeneratorRemovals';
 import { CadFeatureEditor } from './CadFeatureEditor';
 import { CadSession } from './cadSession';
 import { cadFeatureCandidateEdits, cadFeatureCandidateKey, type CadFeaturePreviewCommand, type CadFeaturePreviewState } from './cadFeaturePreview';
@@ -154,4 +157,70 @@ it('never promotes an unfinished feature draft to a replacement document version
   expect([...container.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Apply')?.disabled).toBe(true);
   expect(container.textContent).toContain('The part changed');
   expect(session.getSnapshot().document.features[1]).toMatchObject({ distance: 'depth' });
+});
+
+it('asks before a Pad parameter removes relations as a generator regenerates, applies the confirmed removal as one step, and Cancel keeps the part', async () => {
+  // n sizes the Pad and the polygon's sides; a user point on the fifth corner loses its "c4" when n becomes 4.
+  const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+    geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+  const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+  const source = parseCadDocument({ ...createCadDocument('Polygon block', 'polygon_block'), schemaVersion: 2, parameters: { n: 5 }, features: [
+    { kind: 'sketch', id: 'outline', name: 'Outline', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } },
+    { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'outline', distance: 'n', symmetric: false, operation: 'new', targetId: null }] });
+  const relationIds = (document: CadDocument) => { const sketch = document.features[0]; return sketch.kind === 'sketch' ? sketch.graph?.relations.map(relation => relation.id) : undefined; };
+  const prompt = /^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/;
+  const asked = () => container.querySelector('.cad-form-hint[role="status"]')?.textContent ?? null;
+  const session = new CadSession(source), before = session.getSnapshot(), preview = vi.fn<(command: CadFeaturePreviewCommand) => void>(), cancelled = vi.fn();
+  const onApply = vi.fn((feature: CadFeature, parameters: Readonly<Record<string, number>>, _signal?: AbortSignal, removedRelationIds?: readonly string[]) =>
+    session.edit(cadFeatureCandidateEdits({ feature, isNew: false, parameters, removedRelationIds })));
+  let publish: ((state: CadFeaturePreviewState) => void) | undefined;
+  function Harness({ previewing = true, opening }: { previewing?: boolean; opening?: Readonly<Record<string, number>> }) {
+    const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot), [state, setState] = useState<CadFeaturePreviewState>({ kind: 'idle' }); publish = setState;
+    return <CadFeatureEditor feature={snapshot.document.features[1]} document={snapshot.document} isNew={false} documentVersion={previewing ? snapshot.version : undefined}
+      featurePreview={state} onFeaturePreview={previewing ? preview : undefined} onApply={onApply} onCancel={cancelled} onPendingChange={session.setWorkflowOpen} initialParameters={opening} />;
+  }
+  /** Publishes what the coordinator would for the latest candidate: its unconfirmed removals, or the document it makes. */
+  async function answer() {
+    const command = preview.mock.calls.at(-1)?.[0]; if (!command || command.kind !== 'candidate') throw new Error('Expected candidate');
+    const identity = { owner: command.owner, baseVersion: command.expectedVersion, featureId: 'pad', candidateId: `c${preview.mock.calls.length}`, definitionKey: cadFeatureCandidateKey(command.edits) };
+    try {
+      const document = applyCadEdits(before.document, command.edits);
+      await act(async () => publish?.({ ...identity, kind: 'ready', document, result: { buildId: identity.candidateId, meshes: [], diagnostics: [], durationMs: 1 } }));
+    } catch (error) {
+      const removals = cadGeneratorRemovals(error); if (!removals) throw error;
+      await act(async () => publish?.({ ...identity, kind: 'error', stage: 'validation', message: cadGeneratorRemovalText(before.document, removals), removals, diagnostics: [] }));
+    }
+    return command;
+  }
+  const apply = () => { const found = container.querySelector<HTMLButtonElement>('button[type="submit"]'); if (!found) throw new Error('Apply missing'); return found; };
+  await act(async () => root.render(<Harness />)); await changeLength('4');
+  const first = await answer();
+  expect(first.edits).toEqual([{ kind: 'update-feature', feature: before.document.features[1] }, { kind: 'set-parameter', name: 'n', value: 4 }]);
+  // The preview's removals ask in the editor's words, never as an error, and the confirmed candidate previews next.
+  expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(apply().disabled).toBe(true);
+  const confirmed = await answer();
+  expect(confirmed.edits).toEqual([first.edits[0], { kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }]);
+  expect(asked()).toMatch(prompt); expect(apply().disabled).toBe(false); expect(session.getSnapshot().document).toBe(before.document);
+  await act(async () => apply().click());
+  expect(onApply).toHaveBeenLastCalledWith(before.document.features[1], { n: 4 }, expect.any(AbortSignal), ['c4']);
+  expect(session.getSnapshot()).toMatchObject({ canUndo: true }); expect(session.getSnapshot().document.parameters.n).toBe(4);
+  expect(relationIds(session.getSnapshot().document)?.filter(id => !id.startsWith('g-poly_'))).toEqual(['poly']);
+  await act(async () => session.undo()); expect(session.getSnapshot().document).toEqual(before.document); expect(session.getSnapshot().canUndo).toBe(false);
+  // Cancel drops the question with the change, and the part keeps the relation.
+  await act(async () => root.render(<></>)); await act(async () => root.render(<Harness />)); await changeLength('4'); await answer();
+  expect(asked()).toMatch(prompt);
+  const cancel = [...container.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Cancel'); if (!cancel) throw new Error('Missing Cancel');
+  await act(async () => cancel.click());
+  expect(cancelled).toHaveBeenCalledTimes(1); expect(onApply).toHaveBeenCalledTimes(1); expect(relationIds(session.getSnapshot().document)).toEqual(relationIds(before.document));
+  // Opened with a dragged Length and no preview, Apply's refusal asks in the same words, and the next Apply confirms it.
+  await act(async () => root.render(<></>)); await act(async () => root.render(<Harness previewing={false} opening={{ n: 4 }} />));
+  expect(container.querySelector<HTMLInputElement>('input[aria-label="Length mm"]')?.value).toBe('4');
+  const version = session.getSnapshot().version;
+  await act(async () => apply().click());
+  expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { n: 4 }, expect.any(AbortSignal)); expect(session.getSnapshot().version).toBe(version);
+  await act(async () => apply().click());
+  expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { n: 4 }, expect.any(AbortSignal), ['c4']);
+  expect(session.getSnapshot().document.parameters.n).toBe(4); expect(relationIds(session.getSnapshot().document)?.includes('c4')).toBe(false);
 });

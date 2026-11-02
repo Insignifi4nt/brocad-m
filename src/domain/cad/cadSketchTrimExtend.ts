@@ -27,8 +27,12 @@ const boundary = Type.Object({ entityId: Type.String({ pattern: '^(@[hv]|[A-Za-z
  * edges only, and a target that names an axis as its boundary is checked with that axis cutting.
  */
 export const CadSketchCutAxesSchema = Type.Array(Type.String({ pattern: '^@[hv]$' }), { uniqueItems: true });
-// The relations a trim removes with its piece; a request that omits them confirms that none are removed.
-const removedRelationIds = Type.Optional(Type.Array(id, { uniqueItems: true }));
+/**
+ * The relations an edit removes with geometry that leaves, as a trim's piece or a generator's members: a request that omits them
+ * confirms that none are removed.
+ */
+export const CadSketchRemovedRelationIdsSchema = Type.Optional(Type.Array(id, { uniqueItems: true }));
+const removedRelationIds = CadSketchRemovedRelationIdsSchema;
 // A fresh relation that keeps a cut inside a cutting edge on that edge's support; null leaves that cut numeric.
 const attachRelationIds = Type.Optional(Type.Tuple([Type.Union([id, Type.Null()]), Type.Union([id, Type.Null()])]));
 export const CadSketchTrimTargetSchema = Type.Union([

@@ -3,11 +3,15 @@ import type { CadBuildResult, CadDocument, CadFeature } from '@/domain/cad/cadDo
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import type { WorkbenchStorageAdapter } from '@/domain/storage/workbenchStorageAdapter';
 import type { CadKernelClient } from './kernel/cadKernelClient';
+import { cadGeneratorRemovals, cadGeneratorRemovalText, type CadGeneratorRemovals } from './cadGeneratorRemovals';
 
 export type CadFeatureCandidateEdits = readonly [Extract<CadEdit, { kind: 'add-feature' | 'update-feature' }>, ...Extract<CadEdit, { kind: 'set-parameter' }>[]];
-export function cadFeatureCandidateEdits(input: { feature: CadFeature; isNew: boolean; parameters?: Readonly<Record<string, number>> }): CadFeatureCandidateEdits {
+/** The edits that add or update `feature` and set `parameters`; the first parameter confirms the relations `removedRelationIds` its regeneration removes. */
+export function cadFeatureCandidateEdits(input: { feature: CadFeature; isNew: boolean; parameters?: Readonly<Record<string, number>>; removedRelationIds?: readonly string[] }): CadFeatureCandidateEdits {
+  const confirmed = input.removedRelationIds?.length ? { removedRelationIds: [...input.removedRelationIds] } : {};
   return [{ kind: input.isNew ? 'add-feature' : 'update-feature', feature: input.feature },
-    ...Object.entries(input.parameters ?? {}).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([name, value]) => ({ kind: 'set-parameter' as const, name, value }))];
+    ...Object.entries(input.parameters ?? {}).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([name, value], index) => ({ kind: 'set-parameter' as const, name, value, ...index ? {} : confirmed }))];
 }
 export function cadFeatureCandidateKey(edits: CadFeatureCandidateEdits): string { return JSON.stringify(edits); }
 
@@ -20,7 +24,9 @@ export type CadFeaturePreviewState = { readonly kind: 'idle' }
   | (PreviewIdentity & { readonly kind: 'waiting'; readonly lastValid?: CadFeaturePreviewSnapshot })
   | (PreviewIdentity & { readonly kind: 'building'; readonly lastValid?: CadFeaturePreviewSnapshot })
   | (CadFeaturePreviewSnapshot & { readonly kind: 'ready' })
-  | (PreviewIdentity & { readonly kind: 'error'; readonly stage: 'validation' | 'kernel'; readonly message: string; readonly diagnostics: CadBuildResult['diagnostics']; readonly lastValid?: CadFeaturePreviewSnapshot });
+  | (PreviewIdentity & { readonly kind: 'error'; readonly stage: 'validation' | 'kernel'; readonly message: string; readonly diagnostics: CadBuildResult['diagnostics']; readonly lastValid?: CadFeaturePreviewSnapshot;
+    /** The relations the candidate removes as generators regenerate; the preview applies none, so its editor asks and sends them confirmed. */
+    readonly removals?: CadGeneratorRemovals });
 interface Candidate extends PreviewIdentity {
   readonly serial: number;
   readonly document: CadDocument | null;
@@ -29,6 +35,11 @@ interface Candidate extends PreviewIdentity {
   readonly storage: WorkbenchStorageAdapter;
 }
 const idle: CadFeaturePreviewState = Object.freeze({ kind: 'idle' });
+/** Why a candidate failed: what it would remove, in the words its editor asks with, or the error's message. */
+function failure(error: unknown, fallback: string, document: CadDocument | undefined) {
+  const removals = document ? cadGeneratorRemovals(error) : undefined;
+  return removals && document ? { message: cadGeneratorRemovalText(document, removals), removals } : { message: userFacingMessage(error, fallback) };
+}
 
 /** Candidates never enter session history or the accepted kernel's exact cache. */
 export function createCadFeaturePreviewCoordinator(options: {
@@ -93,7 +104,7 @@ export function createCadFeaturePreviewCoordinator(options: {
     }).catch((error: unknown) => {
       if (job.controller.signal.aborted) return;
       if (!current(candidate)) { if (owns(candidate)) clear(); return; }
-      publish({ ...identity(candidate), ...retained(candidate), kind: 'error', stage, message: userFacingMessage(error, 'The candidate could not be prepared.'), diagnostics: [] });
+      publish({ ...identity(candidate), ...retained(candidate), kind: 'error', stage, ...failure(error, 'The candidate could not be prepared.', candidate.baseDocument), diagnostics: [] });
     }).finally(() => {
       if (active === job) { active = null; run(); }
     });
@@ -123,7 +134,7 @@ export function createCadFeaturePreviewCoordinator(options: {
       // A short throttle, not a debounce: a dragged handle keeps changing, and restarting the wait would show nothing until the pointer stops.
       timer ??= setTimeout(() => { timer = null; run(); }, options.debounceMs ?? 50);
     } catch (error) {
-      publish({ ...request, ...retained(request), kind: 'error', stage: 'validation', message: userFacingMessage(error, 'The candidate is not valid.'), diagnostics: [] });
+      publish({ ...request, ...retained(request), kind: 'error', stage: 'validation', ...failure(error, 'The candidate is not valid.', environment?.document), diagnostics: [] });
     }
   }
   return { update, invalidate: clear, dispose() { if (disposed) return; disposed = true; clear(); } };

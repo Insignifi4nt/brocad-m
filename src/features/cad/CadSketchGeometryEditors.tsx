@@ -35,6 +35,7 @@ export interface CadSketchGeometryEditorProps {
 function DraftActions({ draft, onCancel }: { readonly draft: CadSketchDraft; onCancel(): void }) {
   return <>
     {draft.issue && <p className="cad-error" role="alert">{draft.issue}</p>}
+    {draft.notice && <div className="cad-form-hint" role="status">{draft.notice}</div>}
     <div className="cad-form-actions"><Button type="button" disabled={draft.applying} onClick={onCancel}><CloseIcon size={13} /> Cancel</Button>
       <Button variant="primary" type="submit" disabled={!draft.canApply}><ConfirmIcon size={13} /> Apply</Button></div>
   </>;

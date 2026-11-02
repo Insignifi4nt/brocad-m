@@ -182,6 +182,21 @@ export function createCadPluginProfile(plugin: CadPluginPackage): CadPluginProfi
 
 /** Saved instances embed the exact package version, so library changes never rewrite parts. */
 export function resolveCadPluginProfile(profile: CadPluginProfile, parameters: Readonly<Record<string, number>>): ResolvedCadProfile {
+  return resolveCadPluginOutline(profile, parameters).shape;
+}
+
+/**
+ * How a plugin's outline divides into parts that keep their meaning when its inputs change, which a sketch generator keys its members
+ * by. A gear is `teeth` teeth in turn, each its left side from the root circle up, its tip arc, its right side down and the root arc
+ * after it; a side is `foot` chords up to the base of the involute, then `flank` chords up to the tip. A recipe is `repeat`
+ * repetitions of its `points` vertices.
+ */
+export type CadPluginOutlineParts =
+  | { readonly kind: 'gear'; readonly teeth: number; readonly foot: number; readonly flank: number }
+  | { readonly kind: 'recipe'; readonly repeat: number; readonly points: number };
+export interface CadPluginOutline { readonly shape: ResolvedCadProfile; readonly parts: CadPluginOutlineParts }
+/** The plugin's outline, as `resolveCadPluginProfile` gives it, with the parts it is made of. */
+export function resolveCadPluginOutline(profile: CadPluginProfile, parameters: Readonly<Record<string, number>>): CadPluginOutline {
   const resolved = inspectAndGenerateProfile(profile, parameters);
   if (!resolved.ok) throw new CadError('invalid-plugin-inputs', resolved.inspection.issues[0]);
   return resolved.geometry;
@@ -233,12 +248,15 @@ function inspectAndGenerateProfile(profile: CadPluginProfile, parameters: Readon
   return { ok: false as const, inspection };
 }
 
-function generatePluginProfile(plugin: CadPluginPackage, values: Readonly<Record<string, number>>): ResolvedCadProfile {
+function generatePluginProfile(plugin: CadPluginPackage, values: Readonly<Record<string, number>>): CadPluginOutline {
   if (plugin.generator.kind === 'builtin') {
     const { x, y, module, teeth, pressureAngle, profileShift, backlash, angle, tolerance } = values;
-    if (plugin.generator.implementation === 'wireedm.spur-gear.v3') return { kind: 'path', segments: resolveConfiguredCadGear({ x, y, module, teeth, pressureAngle, profileShift: values.effectiveShift, backlash, angle, tolerance: values.effectiveTolerance, cutterTipRadius: values.effectiveCutterTipRadius }, {}).segments };
-    if (plugin.generator.implementation === 'wireedm.spur-gear.v2') return { kind: 'path', segments: resolveGeneratedCadGear({ x, y, module, teeth, pressureAngle, profileShift: values.effectiveShift, backlash, angle, tolerance: values.effectiveTolerance }, {}).segments };
-    return { kind: 'path', segments: resolveCadGear({ x, y, module, teeth, pressureAngle, profileShift, backlash, angle, tolerance }, {}).segments };
+    const gear = plugin.generator.implementation === 'wireedm.spur-gear.v3'
+      ? resolveConfiguredCadGear({ x, y, module, teeth, pressureAngle, profileShift: values.effectiveShift, backlash, angle, tolerance: values.effectiveTolerance, cutterTipRadius: values.effectiveCutterTipRadius }, {})
+      : plugin.generator.implementation === 'wireedm.spur-gear.v2'
+        ? resolveGeneratedCadGear({ x, y, module, teeth, pressureAngle, profileShift: values.effectiveShift, backlash, angle, tolerance: values.effectiveTolerance }, {})
+        : resolveCadGear({ x, y, module, teeth, pressureAngle, profileShift, backlash, angle, tolerance }, {});
+    return { shape: { kind: 'path', segments: gear.segments }, parts: { kind: 'gear', teeth: gear.teeth, foot: gear.rootSteps, flank: gear.flankSteps } };
   }
   const repeat = evaluateCadRecipeScalar(plugin.generator.repeat, values);
   if (!Number.isInteger(repeat) || repeat < 1 || repeat * plugin.generator.points.length > 2048) throw new CadError('plugin-limit', 'Plugin repeat must be a positive integer producing at most 2048 vertices.');
@@ -248,5 +266,5 @@ function generatePluginProfile(plugin: CadPluginPackage, values: Readonly<Record
     for (const [x, y] of plugin.generator.points) points.push([evaluateCadRecipeScalar(x, scope), evaluateCadRecipeScalar(y, scope)]);
   }
   if (points.length < 3) throw new CadError('invalid-plugin', 'Plugin must generate at least three vertices.');
-  return { kind: 'polygon', points };
+  return { shape: { kind: 'polygon', points }, parts: { kind: 'recipe', repeat, points: plugin.generator.points.length } };
 }

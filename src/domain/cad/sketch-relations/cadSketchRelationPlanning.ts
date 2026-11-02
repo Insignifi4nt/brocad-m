@@ -1,6 +1,6 @@
 import type { CadScalar } from '../cadDocument';
 import { evaluateCadScalar } from '../cadExpression';
-import { cadSketchExternalReferenceComponents } from '../cadSketchExternalReferences';
+import { cadSketchFixedComponents } from '../cadSketchFixedComponents';
 import { isAcceptedCadSketchGraph, type CadSketchGraph, type CadSketchGraphEntity, type CadSketchGraphPoint, type CadSketchGraphRelation } from '../cadSketchGraph';
 import { resolveCadSketchPointIdentities } from '../cadSketchGraphJoints';
 import { cadSketchEntityPointIds } from '../cadSketchGraphReferences';
@@ -380,7 +380,7 @@ export function cadSketchRelationPlanner(graph: CadSketchGraph): CadSketchRelati
   });
   // Where a point stays whatever is solved: the origin and the axes' sample ends, or a point whose coordinates are expressions of
   // numbers alone, that a linked reference owns, or that Fix holds at such values. Undefined where a parameter or nothing sets it.
-  let owned: ReturnType<typeof cadSketchExternalReferenceComponents> | undefined;
+  let owned: ReturnType<typeof cadSketchFixedComponents> | undefined;
   const constant = (value: CadScalar) => { try { return evaluateCadScalar(value, NO_PARAMETERS); } catch { return undefined; } };
   const place = (position: readonly [CadScalar, CadScalar]) => {
     const [x, y] = position.map(constant);
@@ -390,7 +390,7 @@ export function cadSketchRelationPlanner(graph: CadSketchGraph): CadSketchRelati
     const virtual = cadSketchVirtualPosition(pointId);
     if (virtual) return virtual;
     const joined = joint(pointId);
-    owned ??= cadSketchExternalReferenceComponents(graph);
+    owned ??= cadSketchFixedComponents(graph);
     for (const id of joined) {
       const point = points.get(id);
       if (point && (typeof point.position[0] === 'string' && typeof point.position[1] === 'string' || owned.pointIds.has(id))) return place(point.position);
@@ -483,7 +483,7 @@ export function cadSketchRelationPlanner(graph: CadSketchGraph): CadSketchRelati
       const value = constant(relation.value);
       if (value !== undefined) return relation.quantity === 'diameter' ? value / 2 : value;
     }
-    if (curve.kind === 'circle') return typeof curve.radius === 'string' ? constant(curve.radius) : (owned ??= cadSketchExternalReferenceComponents(graph)).circleIds.has(curve.id) ? curve.radius : undefined;
+    if (curve.kind === 'circle') return typeof curve.radius === 'string' ? constant(curve.radius) : (owned ??= cadSketchFixedComponents(graph)).circleIds.has(curve.id) ? curve.radius : undefined;
     if (curve.kind !== 'arc') return undefined;
     const centre = fixedAt(curve.centerPointId), end = fixedAt(curve.startPointId) ?? fixedAt(curve.endPointId);
     return centre && end ? Math.hypot(end.x - centre.x, end.y - centre.y) : undefined;

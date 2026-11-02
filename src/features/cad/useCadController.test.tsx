@@ -26,9 +26,11 @@ import { importCadDxfSketch, type CadDxfImportInput, type CadDxfImportResult } f
 import { importCadDxfCurve, type CadDxfCurveImportInput, type CadDxfCurveImportResult } from '@/domain/cad/cadCurveDxf';
 import { parseDxf } from '@/domain/dxf/parseDxf';
 import { part as regionPart, refs as regionRefs, sketch as regionSketch, pad as regionPad } from '@/domain/cad/__tests__/cadSketchRegionFixtures';
+import { storedCadDocument } from '@/domain/cad/cadStoredDocument';
 import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchSolveInput, CadSketchSolveResult } from './sketch-solver/cadSketchSolverTypes';
 import { inspectCadSketchRegions } from '@/domain/cad/cadSketchRegionInspection';
+import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
 import type { CadSketchCellReference } from '@/domain/cad/cadSketchRegionSelection';
 import { endTrim, trimPart } from '@/domain/cad/__tests__/cadSketchTrimFixtures';
 import type { CadSketchEndTrimPreparation } from '@/domain/cad/cadSketchTrimExtend';
@@ -59,6 +61,9 @@ vi.mock('@/domain/cad/cadDxfExport', async importOriginal => {
     return actual.cadEntitiesToDxf(...input);
   } };
 });
+// Loaded with that writer before any test: a section export imports this module and the writer at once, and a module first loaded while the
+// writer's mock still awaits the original would keep the original writer, which a sketch export then calls.
+import '@/domain/cad/cadCam';
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
@@ -772,6 +777,25 @@ describe('CAD controller asynchronous guards', () => {
     expect(h.session.getSnapshot()).toBe(before);
     await expect(loadCadDocument(h.workbench().adapter, before.document.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
+  it('names in the section DXF the plugin package of a construction star that a linked offset copies as material', async () => {
+    const h = await harness(true);
+    await act(async () => h.session.edit([{ kind: 'add-feature', feature: { id: 'stars', kind: 'sketch', name: 'Stars', plane: 'XY', offset: 0, suppressed: false, profiles: [] } },
+      { kind: 'add-plugin-profile', sketchId: 'stars', profileId: 'star', name: CAD_STAR_PLUGIN.name, package: CAD_STAR_PLUGIN, groupId: 'star_drivers' }]));
+    const drawn = h.session.getSnapshot().document.features.find(feature => feature.id === 'stars');
+    if (drawn?.kind !== 'sketch' || !drawn.graph) throw new Error('Missing star sketch');
+    const star = drawn.graph.relations.find(relation => relation.id === 'star' && relation.kind === 'generator');
+    if (star?.kind !== 'generator') throw new Error('Missing star generator');
+    const chain = compileCadSketchGraph(drawn.graph, h.session.getSnapshot().document.parameters).cycles[0].sourceRefs.map(({ entityId, reversed }) => ({ entityId, reversed }));
+    await act(async () => h.session.edit([{ kind: 'set-sketch-generator', sketchId: 'stars', generator: { ...star, construction: true } },
+      { kind: 'set-sketch-generator', sketchId: 'stars', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false, geometry: { kind: 'offset', chain, distance: 1 } } }]));
+    kernel.section.mockResolvedValue({ bodyId: 'pad', plane: 'XY', offset: 5, contourCount: 1, entities: [{ type: 'circle', layer: 'CAD', center: { x: 0, y: 0 }, radius: 10 }] });
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { if (blob instanceof Blob) blobs.push(blob); return 'blob:dxf'; });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    await h.cad().exportSectionDxf({ bodyId: 'pad', plane: 'XY', offset: 5 }, h.session.getSnapshot().version);
+    const lines = (await blobs[0].text()).split(/\r?\n/);
+    expect(lines.flatMap((line, index) => line.trim() === '999' ? [lines[index + 1]] : [])).toContain(`${CAD_STAR_PLUGIN.id}@${CAD_STAR_PLUGIN.version}: ${CAD_STAR_PLUGIN.notes}`);
+  });
   it.each(['cancel', 'version', 'workflow', 'close', 'substitution'] as const)('rejects section DXF after %s while exact geometry is being computed', async change => {
     const h = await harness(true), before = h.session.getSnapshot(), abort = new AbortController();
     const result = deferred<CadSectionResult>(); kernel.section.mockReturnValue(result.promise);
@@ -1219,7 +1243,11 @@ describe('CAD controller asynchronous guards', () => {
     expect(h.session.getSnapshot()).toBe(before);
     await act(async () => { expect(await tool.execute({ expectedVersion: before.version, source: { units: 'inch', text: dxfText, fileName: 'circle.dxf', format: 'dxf' } })).toMatchObject({ ok: true, data: { imported: true, contourCount: 1, scaleToMillimeters: 25.4 } }); });
     const sketch = h.session.getSnapshot().document.features[0];
-    expect(sketch).toMatchObject({ kind: 'sketch', profiles: [{ geometry: { kind: 'circle', radius: 50.8 } }], source: { text: dxfText, units: 'inch' } });
+    // The circle is a contour generator: the document holds it with the circle it generates, and no saved profile.
+    expect(h.session.getSnapshot().document.schemaVersion).toBe(2);
+    expect(sketch).toMatchObject({ kind: 'sketch', profiles: [], source: { text: dxfText, units: 'inch' }, graph: {
+      relations: expect.arrayContaining([expect.objectContaining({ id: 'contour_1', kind: 'generator', geometry: { kind: 'circle', x: 0, y: 0, radius: 50.8 } })]),
+      entities: [expect.objectContaining({ kind: 'circle', radius: 50.8 })] } });
     expect(h.workbench().manifest.projects).toHaveLength(0);
   });
   it('rejects cancelled and substituted DXF source results without replacing the draft', async () => {
@@ -1533,10 +1561,12 @@ describe('CAD controller asynchronous guards', () => {
       const inspect = tools.find(tool => tool.name === 'cad_inspect_sketch_regions'), read = tools.find(tool => tool.name === 'cad_read_sketch_region_reference');
       const edit = tools.find(tool => tool.name === 'cad_edit_document');
       if (!inspect || !read || !edit) throw new Error('Missing public region operations');
-      const proposedSource = { ...second, profiles: second.profiles.filter(profile => profile.id !== 'island').concat([
-        { id: 'fresh', name: 'Fresh', construction: false, geometry: { kind: 'circle', x: 0, y: 0, radius: 1 } },
-      ]) };
-      const proposal = { sketch: proposedSource, parameterValues: { location: 50 } }, expected = { boundaryProfileId: 'outer', voidProfileIds: ['fresh'], ancestorProfileIds: [] };
+      // The new hole is a circle generator: its region is named by its member's stable id, as a saved profile was by its own.
+      const proposedSource = { ...second, profiles: second.profiles.filter(profile => profile.id !== 'island'), graph: { points: [], entities: [], relations: [
+        { id: 'fresh', kind: 'generator' as const, idPrefix: 'fresh', construction: false, geometry: { kind: 'circle' as const, x: 0, y: 0, radius: 1 } },
+      ] } };
+      const proposal = { sketch: proposedSource, parameterValues: { location: 50 } }, expected = { boundaryProfileId: 'outer', voidProfileIds: ['fresh_c0'], ancestorProfileIds: [],
+        graphContours: [{ profileId: 'fresh_c0', sourceRefs: [{ entityId: 'fresh_c0', reversed: false }] }] };
       const reply = await inspect.execute({ expectedVersion: before.version, sketchId: 'second', proposal });
       expect(reply).toMatchObject({ ok: true, data: { version: before.version, proposed: true,
         items: expect.arrayContaining([{ boundaryProfileId: 'outer', reference: expected, areaMm2: expect.closeTo(99 * Math.PI, 9),
@@ -1567,11 +1597,13 @@ describe('CAD controller asynchronous guards', () => {
       const abort = new AbortController(), pending = inspect.execute({ expectedVersion: before.version, sketchId: 'second', proposal }, { signal: abort.signal });
       abort.abort(); expect(await pending).toMatchObject({ ok: false, error: { code: 'CANCELLED' } });
       const earlier = { boundaryProfileId: 'outer', voidProfileIds: ['island'], ancestorProfileIds: [] };
+      // The generator gives the sketch a graph, so the edit solves it first.
+      sketchSolver.solve.mockImplementation(async (input: CadSketchSolveInput) => inspectedSolve(input));
       await act(async () => { expect(await edit.execute({ expectedVersion: before.version, edits: [
         { kind: 'set-parameter', name: 'location', value: 50 }, { kind: 'update-feature', feature: proposedSource },
         { kind: 'update-feature', feature: regionPad([earlier]) }, { kind: 'update-feature', feature: { ...regionPad([expected]), id: 'second_pad', sketchId: 'second' } },
       ] })).toMatchObject({ ok: true }); });
-      const accepted = h.session.getSnapshot(); expect(accepted.document.features[2]).toEqual(proposedSource); expect(accepted.document.features[0]).toEqual(first);
+      const accepted = h.session.getSnapshot(); expect(storedCadDocument(accepted.document).features[2]).toEqual(proposedSource); expect(accepted.document.features[0]).toEqual(first);
       expect(await read.execute({ expectedVersion: before.version, sketchId: 'second', boundaryProfileId: 'outer', proposal }))
         .toMatchObject({ ok: false, error: { code: 'STALE_STATE' } });
       await act(async () => h.cad().undo(accepted.version)); expect(h.session.getSnapshot().document).toEqual(before.document); expect(h.session.getSnapshot().canUndo).toBe(false);

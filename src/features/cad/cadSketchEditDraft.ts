@@ -10,6 +10,8 @@ import { resolveCadSketchRegions } from '@/domain/cad/cadSketchGeometry';
 import type { CadSketchRegionSelection } from '@/domain/cad/cadSketchRegionSelection';
 import { CadSession, CadSessionError, type CadSessionSnapshot } from './cadSession';
 import { deepFreezeCadData } from '@/domain/cad/cadDeepFreeze';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { cadSketchGeneratorRemovals, cadSketchGenerators, settleCadSketchGenerators, storedCadSketchGraph } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 
 export type CadSketchEditDraftSource = Pick<CadSessionSnapshot, 'document' | 'version'>;
 export type CadSketchDraftPreparation = (document: CadDocument, edits: readonly CadEdit[], signal?: AbortSignal) => Promise<CadDocument>;
@@ -50,10 +52,37 @@ function withoutSolvedGraphValues(original: CadFeature, candidate: CadFeature): 
 }
 
 /**
+ * Whether the earlier feature `candidate` keeps the stored intent of `original` as the draft's `parameters` regenerate it: the same
+ * fields and generator records, user geometry whose only changes are solver-updated numbers, and the user relations `original` keeps when
+ * its generators regenerate under `parameters`, less those the relation remap removes with the members that leave. Generated members are
+ * derived, and the document parse already checked that they are what the records make; their number may change with a parameter.
+ */
+function keepsEarlierIntent(original: CadFeature, candidate: CadFeature, parameters: Readonly<Record<string, number>>): boolean {
+  if (original.kind !== 'sketch' || candidate.kind !== 'sketch' || !original.graph || !candidate.graph || !cadSketchGenerators(original.graph).length)
+    return same(withoutSolvedGraphValues(original, candidate), original);
+  const was = storedCadSketchGraph(original.graph), now = storedCadSketchGraph(candidate.graph);
+  let relations = was.relations;
+  if (!same(now.relations, was.relations)) {
+    // The original's relations as the regeneration under the new parameters leaves them, with every removal the remap makes confirmed:
+    // the preparation already required the draft's edit to confirm those.
+    try {
+      const regenerated = settleCadSketchGenerators({ ...now, relations: was.relations }, original.graph, parameters, cadSketchGeneratorRemovals(was.relations.map(relation => relation.id)));
+      relations = storedCadSketchGraph(regenerated).relations;
+    } catch (error) {
+      if (error instanceof CadError) return false;
+      throw error;
+    }
+  }
+  const expected: CadFeature = { ...original, graph: { ...was, relations } };
+  return same(withoutSolvedGraphValues(expected, { ...candidate, graph: now }), expected);
+}
+
+/**
  * Private valid prefix and bounded local history for one consumed sketch.
  * Preparation is the controller's existing trusted pipeline, never another solver.
- * Shared parameters may solve earlier numeric graph coordinates/radii; exact drivers,
- * topology, relations, profiles, provenance and all other earlier fields stay pinned.
+ * Shared parameters may solve earlier numeric graph coordinates/radii and regenerate earlier generators, whose members and the
+ * relations the remap removes with them may change; exact drivers, generator records, other topology and relations, profiles,
+ * provenance and all other earlier fields stay pinned.
  * Finish returns snapshots, not replayed gestures. The controller must prepare the
  * batch against the full base and recheck assertCurrent immediately before acceptance.
  */
@@ -99,6 +128,7 @@ export class CadSketchEditDraft {
         case 'add-sketch-dimension': case 'set-sketch-dimension': case 'remove-sketch-dimension':
         case 'translate-sketch-profiles': case 'translate-sketch-geometry': case 'place-sketch-geometry': case 'move-sketch-handle': case 'append-sketch-entities': case 'delete-sketch-elements':
         case 'set-sketch-construction': case 'move-sketch-point': case 'set-sketch-relation': case 'remove-sketch-relation': case 'create-sketch-corner': case 'split-sketch-entity': case 'trim-sketch-entity': case 'extend-sketch-entity': case 'offset-sketch-loop': case 'mirror-sketch-geometry': case 'use-sketch-entity':
+        case 'set-sketch-generator': case 'detach-sketch-generator':
           if (edit.sketchId !== this.pin.sketchId) throw scopeError();
           break;
         default: throw scopeError();
@@ -113,20 +143,21 @@ export class CadSketchEditDraft {
     const owned = candidate.features[this.sketchIndex], original = this.initialDocument.features[this.sketchIndex];
     if (owned?.kind !== 'sketch' || owned.id !== this.pin.sketchId || original.kind !== 'sketch') throw scopeError();
     if (!same(owned.source, original.source)) throw scopeError();
-    for (const profile of original.profiles) if (profile.geometry.kind === 'plugin') {
-      const retained = owned.profiles.find(value => value.id === profile.id);
+    // A plugin instance, a saved profile or a generator, keeps its pinned package.
+    for (const profile of cadSketchProfileViews(original)) if (profile.geometry.kind === 'plugin') {
+      const retained = cadSketchProfileViews(owned).find(value => value.id === profile.id);
       if (retained && (retained.geometry.kind !== 'plugin' || !same(retained.geometry.package, profile.geometry.package))) throw scopeError();
     }
     this.parameterEdits(candidate);
     const added = Object.keys(candidate.parameters).filter(name => !Object.hasOwn(this.initialDocument.parameters, name));
+    if (candidate.features.length !== this.sketchIndex + 1) throw scopeError();
+    for (let index = 0; index < this.sketchIndex; index++)
+      if (!keepsEarlierIntent(this.initialDocument.features[index], candidate.features[index], candidate.parameters)) throw scopeError();
     const expected = { ...this.initialDocument, parameters: candidate.parameters,
-      schemaVersion: candidate.features.some(feature => feature.kind === 'sketch' && feature.graph) ? 2 : this.initialDocument.schemaVersion,
-      features: [...this.initialDocument.features.slice(0, this.sketchIndex), owned],
+      schemaVersion: candidate.features.some(feature => feature.kind === 'sketch' && feature.graph) ? 2 : this.initialDocument.schemaVersion, features: [],
       ...(added.length ? { parameterMetadata: { ...this.initialDocument.parameterMetadata,
         ...Object.fromEntries(added.map(name => [name, { source: { kind: 'manual' } }])) } } : {}) };
-    const normalized = { ...candidate, features: candidate.features.map((feature, index) => index < this.sketchIndex
-      ? withoutSolvedGraphValues(this.initialDocument.features[index], feature) : feature) };
-    if (!same(normalized, expected)) throw scopeError();
+    if (!same({ ...candidate, features: [] }, expected)) throw scopeError();
   }
   async editPrepared(edits: readonly CadEdit[], prepare: CadSketchDraftPreparation,
     expectedLocalVersion = this.local.getSnapshot().version, signal?: AbortSignal, assertCurrent?: () => void) {
@@ -177,7 +208,12 @@ export class CadSketchEditDraft {
     if (this.owner.signal.aborted) return;
     this.owner.abort(); this.local.replace(this.initialDocument);
   }
-  finishEdits(source: CadSketchEditDraftSource, consumerRepairs: readonly CadEdit[] = []): CadSketchEditDraftFinish {
+  /**
+   * The edits that publish the draft: its parameters, then each sketch it changed, then `consumerRepairs`. `removedRelationIds` confirms the
+   * relations a later sketch loses as its generators regenerate under those parameters, which preparing the edits against the whole part
+   * refuses with their IDs until Finish confirms them; they go on the first parameter edit, as the parameter editor sends them.
+   */
+  finishEdits(source: CadSketchEditDraftSource, consumerRepairs: readonly CadEdit[] = [], removedRelationIds: readonly string[] = []): CadSketchEditDraftFinish {
     this.assertSource(source); validateCadEditBatch(consumerRepairs);
     const snapshot = this.local.getSnapshot(), candidate = snapshot.document;
     this.assertOwnedPrefix(candidate);
@@ -211,6 +247,11 @@ export class CadSketchEditDraft {
         || repaired.has(feature.id) || !same({ ...feature, regionSelection: undefined }, { ...original, regionSelection: undefined })) throw scopeError();
       repaired.add(feature.id);
       if (!same(feature, original)) edits.push(edit);
+    }
+    if (removedRelationIds.length) {
+      const index = edits.findIndex(edit => edit.kind === 'set-parameter'), parameter = edits[index];
+      if (parameter?.kind !== 'set-parameter') throw new CadError('stale-sketch-generator-removals', 'This sketch edit changes no parameter, so finishing it removes no relations. Finish it again.');
+      edits[index] = { ...parameter, removedRelationIds: [...removedRelationIds] };
     }
     validateCadEditBatch(edits);
     const finish = { baseVersion: this.pin.version, localVersion: snapshot.version, edits, noOp: edits.length === 0 };

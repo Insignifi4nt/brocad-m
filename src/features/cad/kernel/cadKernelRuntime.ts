@@ -1,6 +1,7 @@
 import { CadError } from '../../../domain/cad/cadError';
 import { cadFeatureActive } from '../../../domain/cad/features/cadFeatureActivity';
 import { cadFeatureProducesBody, parseCadDocument } from '../../../domain/cad/cadSchema';
+import { storedCadDocument, storedCadDocumentText } from '../../../domain/cad/cadStoredDocument';
 import { parseCadSectionRequest } from '../../../domain/cad/cadSection';
 import { parseCadTopologyInspectRequest, parseCadTopologyResolvePicksRequest } from '../../../domain/cad/cadTopology';
 import { parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest } from '../../../domain/cad/cadTopologyAdjacency';
@@ -42,7 +43,8 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
         if (request.kind === 'export' && request.format !== 'step' && request.format !== 'stl') throw new CadError('unsupported-format', 'Unsupported CAD export format.');
         const section = request.kind === 'section' ? parseCadSectionRequest(request.section) : undefined;
         const document = parseCadDocument(request.document);
-        const key = JSON.stringify(document);
+        // Keys read the stored form, which leaves out generated sketch geometry its records determine.
+        const key = storedCadDocumentText(document);
         if (request.kind === 'inspect-topology') {
           const inspection = parseCadTopologyInspectRequest(request.inspection);
           if (!cached || cached.key !== key || cached.model.result.buildId !== inspection.expectedBuildId) throw new CadError('STALE_BUILD', 'The displayed exact model is no longer cached. Rebuild and select again.');
@@ -68,7 +70,7 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
         // where dimensions are drawn have no native effect. Feature names remain
         // part of the key for mesh and STEP labels; validation and inspection use
         // the complete document.
-        const features = document.features.map(feature => feature.kind === 'sketch' ? {
+        const features = storedCadDocument(document).features.map(feature => feature.kind === 'sketch' ? {
           ...feature, profiles: feature.profiles.map(({ name: _name, constraints: _constraints, ...profile }) => profile),
           ...(feature.graph ? { graph: cadSketchGraphWithoutPlacement(feature.graph) } : {}),
         } : feature);

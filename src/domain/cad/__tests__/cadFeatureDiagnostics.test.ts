@@ -30,6 +30,7 @@ const BODY_ISSUE = 'A body issue. The body lineage, which the parse and the rebu
 /** Codes the walk finds that are no refusal of a feature, and why. */
 const NOT_REFUSALS: Readonly<Record<string, string>> = {
   STALE_BUILD: 'A topology snapshot refuses use once disposed. A rebuild selects edges and faces on the snapshot of its own build, before disposing it.',
+  'invalid-sketch-profile-copy': 'A profile copy\'s refusal, an edit rather than a feature. The walk runs every relation copy\'s callbacks, so a generator\'s copy of its relations reaches the profile copy\'s renaming.',
   'relation-residual': GRAPH_ISSUE, 'invalid-coordinate': GRAPH_ISSUE, 'degenerate-entity': GRAPH_ISSUE, 'arc-radius-mismatch': GRAPH_ISSUE,
   overlap: ARRANGEMENT_ISSUE, 'ambiguous-tangency': ARRANGEMENT_ISSUE, precision: ARRANGEMENT_ISSUE, 'non-simple-boundary': ARRANGEMENT_ISSUE,
   'ambiguous-body-parts': BODY_ISSUE, 'lost-body-parts': BODY_ISSUE, 'untracked-body-parts': BODY_ISSUE, 'more-body-issues': BODY_ISSUE
@@ -37,11 +38,13 @@ const NOT_REFUSALS: Readonly<Record<string, string>> = {
 
 /**
  * Where the walk takes a caught `CadError`'s code, which the `CadError` its `try` block raised gave: a loft section's inspection and a
- * section pair's pass it on as their refusal, and the rebuild reports it. A new site is read by hand before it is listed here.
+ * section pair's pass it on as their refusal, a linked offset names the reason its chain cannot be offset for itself, and the rebuild
+ * reports it. A new site is read by hand before it is listed here.
  */
 const TAKEN = [
   'src/domain/cad/cadLoft.ts: error.code',
   'src/domain/cad/cadLoftPlacement.ts: error.code',
+  'src/domain/cad/sketch-generators/cadSketchGeneratorKinds.ts: error.code',
   `${KERNEL}: error.code`
 ];
 

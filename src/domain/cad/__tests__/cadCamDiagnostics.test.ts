@@ -11,21 +11,32 @@ const KERNEL = 'src/features/cad/kernel/cadKernelModel.ts', CONTROLLER = 'src/fe
  * Where a CAM or export step's walk stops, and why what lies beyond raises no refusal of the step:
  * - the document check, which the step runs again on the document the session accepted, so it refuses nothing there; a check that did
  *   refuse records the feature or input slot it was reading before the step records itself;
- * - the body lineage, which the rebuild kept; a section only looks a built body up.
+ * - the body lineage, which the rebuild kept; a section only looks a built body up;
+ * - the plugin packages whose notes a step's output keeps, which it reads off the sketches' saved profiles and generator records, naming
+ *   each shape by its kind's label and evaluating none, so it refuses nothing. The walk, which cannot tell the kind, would take the label
+ *   for every kind's evaluation; a section, which has no sketch, would reach them all.
  */
-const STOPS = ['src/domain/cad/cadSchema.ts:parseCadDocument', `${KERNEL}:lineage`];
+const STOPS = ['src/domain/cad/cadSchema.ts:parseCadDocument', `${KERNEL}:lineage`,
+  'src/domain/cad/sketch-generators/cadSketchProfileViews.ts:cadSketchPluginPackages'];
 
 const PATH_DIAGNOSTIC = 'A diagnostic the path planner records on the CAM document it returns. A document with an error diagnostic or an open contour is refused as cam-geometry.';
 const GRAPH_ISSUE = 'A sketch graph issue, refused with the code of the check that finds it.';
 const ARRANGEMENT_ISSUE = 'A sketch arrangement issue. Cells refuse an arrangement with issues as unsupported-sketch-cells.';
+const PROFILE_COPY = 'A profile copy\'s refusal, an edit rather than a step. The walk runs every relation copy\'s callbacks, so a generator\'s copy of its relations reaches the profile copy\'s renaming.';
 /** Codes the walk finds that are no refusal of a CAM or export step, and why. */
 const NOT_REFUSALS: Readonly<Record<string, string>> = {
   ...Object.fromEntries(['ambiguous-endpoint-cluster', 'branching-topology', 'closed-chain-gap', 'degenerate-contour', 'duplicate-segment', 'dxf-import-warning',
     'endpoint-cluster-snap', 'intersecting-topology', 'invalid-arc', 'invalid-polyline', 'layer-filtered', 'non-finite-geometry', 'open-chain',
     'overlapping-segment', 'route-dependency-cycle', 'units-assumed-millimeters', 'zero-length-segment'].map(code => [code, PATH_DIAGNOSTIC])),
   'relation-residual': GRAPH_ISSUE, 'invalid-coordinate': GRAPH_ISSUE, 'degenerate-entity': GRAPH_ISSUE, 'arc-radius-mismatch': GRAPH_ISSUE,
-  overlap: ARRANGEMENT_ISSUE, 'ambiguous-tangency': ARRANGEMENT_ISSUE, precision: ARRANGEMENT_ISSUE, 'non-simple-boundary': ARRANGEMENT_ISSUE
+  overlap: ARRANGEMENT_ISSUE, 'ambiguous-tangency': ARRANGEMENT_ISSUE, precision: ARRANGEMENT_ISSUE, 'non-simple-boundary': ARRANGEMENT_ISSUE,
+  'invalid-sketch-profile-copy': PROFILE_COPY
 };
+/**
+ * Where a step takes a caught `CadError`'s code, which the `CadError` its `try` block raised gave: a linked offset in the sketch names the
+ * reason its chain cannot be offset for itself. A new site is read by hand before it is listed here.
+ */
+const TAKEN = ['src/domain/cad/sketch-generators/cadSketchGeneratorKinds.ts: error.code'];
 /** Codes the walk cannot read, and why none is a refusal. */
 const UNREAD: Readonly<Record<string, string>> = {
   'src/domain/dxf/parseDxf.ts: code, from src/domain/cad/cadCam.ts: 4': 'A DXF unit record\'s code is its INSUNITS number: the handoff declares millimetres (4).'
@@ -103,7 +114,7 @@ describe('CAM and export step diagnostics', () => {
     }
   }, 60_000);
 
-  it('take no caught error\'s code', () => {
-    expect(operations.flatMap(operation => reach(operation).taken)).toEqual([]);
+  it('take a caught error\'s code only where it is listed', () => {
+    expect(sorted(new Set(operations.flatMap(operation => reach(operation).taken)))).toEqual(TAKEN);
   });
 });

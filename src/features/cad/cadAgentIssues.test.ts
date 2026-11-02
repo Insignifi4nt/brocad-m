@@ -31,7 +31,7 @@ describe('CAD issues in agent replies', () => {
   it('gives each failure, its stop and every body issue with subject and cause, summarizing the features blocked behind them', () => {
     const document = chain(30);
     const issues = cadBuildIssues(document, { diagnostics: [failed('pad'), { code: 'rebuild-stopped', featureId: 'pad', message: 'Rebuild stopped here.' }],
-      bodyIssues: [{ code: 'lost-body-parts', featureId: 'move3', body: 'pad' as CadBodyKey, pieces: ['pad/split(1)' as CadBodyKey], message: '1 piece is gone.' }] }, 'v1', true);
+      bodyIssues: [{ code: 'lost-body-parts', featureId: 'move3', body: 'pad' as CadBodyKey, pieces: ['pad/split(1)' as CadBodyKey], message: '1 piece is gone.' }] }, 'v1');
     const digest = cadAgentIssueDigest(issues.items);
     expect(digest.items.map(item => [item.code, item.state, item.subject, item.causes])).toEqual([
       ['kernel-operation-failed', 'failed', { kind: 'feature', featureId: 'pad' }, []],
@@ -53,9 +53,9 @@ describe('CAD issues in agent replies', () => {
 
   it('stays within its bounds however many issues and however long their messages', () => {
     const document = chain(400);
-    const reply = (count: number) => jsonByteLength(cadAgentIssueDigest(cadBuildIssues(chain(count), { diagnostics: [failed('pad')] }, 'v1', true).items));
+    const reply = (count: number) => jsonByteLength(cadAgentIssueDigest(cadBuildIssues(chain(count), { diagnostics: [failed('pad')] }, 'v1').items));
     const many = Array.from({ length: 300 }, (_, index) => failed(`move${index}`, `Move ${index} failed: ${'孔'.repeat(2000)}`));
-    const digest = cadAgentIssueDigest(cadBuildIssues(document, { diagnostics: many }, 'v1', true).items);
+    const digest = cadAgentIssueDigest(cadBuildIssues(document, { diagnostics: many }, 'v1').items);
     expect(digest.items.length).toBeLessThanOrEqual(CAD_AGENT_ISSUE_COUNT);
     expect(jsonByteLength(digest.items)).toBeLessThanOrEqual(CAD_AGENT_ISSUE_BYTES);
     expect(digest.items.length + digest.omitted).toBe(300);
@@ -71,7 +71,7 @@ describe('CAD issues in agent replies', () => {
     const session = new CadSession(parseCadDocument({ ...createCadDocument('Part', 'cad_agent'), features: [sketch, pad] }));
     const version = session.getSnapshot().version, document = session.getSnapshot().document;
     const build: CadBuildResult = { buildId: 'failed', meshes: [], durationMs: 1, diagnostics: [{ ...failed('pad'), details: { operation: 'extrude', input: null, kernelMessage: words } }] };
-    const issues = cadBuildIssues(document, build, version, true);
+    const issues = cadBuildIssues(document, build, version);
     const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build, buildIssues: issues,
       buildIssuesOf: () => issues, inspectBuild: vi.fn(async () => build) } as unknown as CadController;
     const tools = cadSiteTools(() => controller), run = async (name: string, input: unknown) => (await tools.find(tool => tool.name === name)!.execute(input) as { data: AgentProblems }).data;
@@ -90,7 +90,7 @@ describe('CAD issues in agent replies', () => {
     const document = chain(3), long = 'x'.repeat(1000);
     const build: CadBuildResult = { buildId: 'failed', meshes: [], durationMs: 1, diagnostics: ['move0', 'move1', 'move2'].map(featureId =>
       ({ ...failed(featureId, `${featureId} failed: ${long}`), details: { operation: 'transform' as const, input: null, kernelMessage: `${featureId}: ${'孔'.repeat(2048)}` } })) };
-    const session = new CadSession(document), version = session.getSnapshot().version, issues = cadBuildIssues(document, build, version, true);
+    const session = new CadSession(document), version = session.getSnapshot().version, issues = cadBuildIssues(document, build, version);
     const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build, buildIssues: issues,
       buildIssuesOf: () => issues, inspectBuild: vi.fn(async () => build) } as unknown as CadController;
     const tool = cadSiteTools(() => controller).find(candidate => candidate.name === 'cad_build')!;
@@ -109,7 +109,7 @@ describe('CAD issues in agent replies', () => {
     const session = new CadSession(parseCadDocument({ ...createCadDocument('Part', 'cad_agent'), features: [sketch, pad] }));
     const version = session.getSnapshot().version, document = session.getSnapshot().document;
     const build: CadBuildResult = { buildId: 'failed', meshes: [], diagnostics: [failed('pad')], durationMs: 1 };
-    const issues = cadBuildIssues(document, build, version, true);
+    const issues = cadBuildIssues(document, build, version);
     const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build, buildIssues: issues,
       buildIssuesOf: (result: CadBuildResult) => result === build ? issues : NO_CAD_BUILD_ISSUES, inspectBuild: vi.fn(async () => build),
       edit: (edits: Parameters<CadSession['edit']>[0], expected?: string) => session.edit(edits, expected) } as unknown as CadController;

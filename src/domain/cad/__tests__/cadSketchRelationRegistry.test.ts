@@ -32,14 +32,16 @@ const examples: { readonly [K in CadSketchRelationKind]: CadSketchRelationOf<K> 
   'point-line-distance': { id: 'r22', kind: 'point-line-distance', pointId: 'p3', lineId: 'l1', side: 'left', value: 2 },
   'axis-distance': { id: 'r23', kind: 'axis-distance', pointIds: ['p1', 'p2'], axis: 'y', value: -3 },
   'fillet-corner': { id: 'r24', kind: 'fillet-corner', pointId: 'p2', lineIds: ['l1', 'l2'], arcId: 'a9', value: 1 },
-  'chamfer-corner': { id: 'r25', kind: 'chamfer-corner', pointId: 'p2', lineIds: ['l1', 'l2'], chamferId: 'l8', values: [1, '2 * t'] }
+  'chamfer-corner': { id: 'r25', kind: 'chamfer-corner', pointId: 'p2', lineIds: ['l1', 'l2'], chamferId: 'l8', values: [1, '2 * t'] },
+  generator: { id: 'r27', kind: 'generator', idPrefix: 'g1', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 'cy', radius: 5, sides: 'n', directionId: 'l1' } }
 };
 // A reference dimension's operands depend on what it measures, and a symmetric's on whether it mirrors points or curves.
 const references: readonly CadSketchGraphRelation[] = [
   { id: 'q1', kind: 'reference-dimension', measurement: { kind: 'line-length', entityId: 'l1' } },
   { id: 'q2', kind: 'reference-dimension', measurement: { kind: 'point-line-distance', pointId: 'p1', lineId: 'l1' }, annotation: { kind: 'linear', offset: 2, along: 0.5 } },
   { id: 'q3', kind: 'reference-dimension', measurement: { kind: 'radial-size', entityId: 'c1', quantity: 'radius' } },
-  { id: 'q4', kind: 'symmetric', curveIds: ['a1', 'a2'], lineId: 'l3' }
+  { id: 'q4', kind: 'symmetric', curveIds: ['a1', 'a2'], lineId: 'l3' },
+  { id: 'q5', kind: 'generator', idPrefix: 'g2', construction: true, geometry: { kind: 'rectangle', x: 0, y: 0, width: 'w', height: 4, cornerRadius: 0 } }
 ];
 const all = [...Object.values(examples) as CadSketchGraphRelation[], ...references];
 // A kind with several stored shapes, such as Symmetric, appears once for each.
@@ -69,7 +71,8 @@ describe('sketch relation definitions', () => {
       expect(definition.name).toMatch(/^[A-Z][a-z ]+$/);
       expect(definition.agent.summary).toMatch(/^[A-Z].+\.$/);
     }
-    expect(CAD_SKETCH_AGENT_RELATION_KINDS).toEqual(schemaKinds);
+    // A generator is made and changed through its own edits, never named as a relation.
+    expect(CAD_SKETCH_AGENT_RELATION_KINDS).toEqual(schemaKinds.filter(kind => kind !== 'generator'));
     expect(Object.isFrozen(CAD_SKETCH_RELATION_DEFINITIONS)).toBe(true);
   });
 
@@ -95,6 +98,13 @@ describe('sketch relation definitions', () => {
     const valued = new Set<string>();
     for (const relation of all) {
       const scalars = cadSketchRelationDefinition(relation).scalars;
+      if (relation.kind === 'generator') {
+        // Its inputs are its geometry's, by the geometry's own paths.
+        const mapped = mapCadSketchRelationScalars(relation, (value, key) => `${key}:${value}`);
+        expect(mapped).toEqual({ ...relation, geometry: Object.fromEntries(Object.entries(relation.geometry).map(([key, value]) =>
+          [key, key === 'kind' || key === 'directionId' ? value : `geometry.${key}:${value}`])) });
+        continue;
+      }
       if (!scalars) { expect(mapCadSketchRelationScalars(relation, () => 'changed')).toBe(relation); continue; }
       valued.add(relation.kind);
       const values = scalars.read(relation);

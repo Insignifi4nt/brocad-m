@@ -3,7 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, RouterProvider } from 'react-router';
 
 import App from './App';
+import { setCadDevelopmentChecks } from './domain/cad/cadDevelopmentChecks';
 import './index.css';
+
+setCadDevelopmentChecks(import.meta.env.DEV);
 
 const root = document.getElementById('root');
 
