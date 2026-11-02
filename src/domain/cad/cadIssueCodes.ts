@@ -136,3 +136,5 @@ export type CadSketchCode = CadSketchRefusalCode | CadSketchRelationCode | CadSk
 export const CAD_CAM_CODES = Object.freeze(['missing-sketch', 'suppressed-sketch', 'empty-sketch', 'cam-geometry', 'invalid-section', 'empty-section',
   'degenerate-section', 'tangent-section', 'unsupported-section-curve', 'section-failed', 'kernel-operation-failed'] as const);
 export type CadCamCode = (typeof CAD_CAM_CODES)[number];
+const CAM_CODES: ReadonlySet<unknown> = new Set(CAD_CAM_CODES);
+export function isCadCamCode(code: unknown): code is CadCamCode { return CAM_CODES.has(code); }

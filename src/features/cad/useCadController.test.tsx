@@ -31,6 +31,8 @@ import type { CadSketchEndTrimPreparation } from '@/domain/cad/cadSketchTrimExte
 import { extendPart, lineExtend } from '@/domain/cad/__tests__/cadSketchExtendFixtures';
 import type { CadSketchLineExtendPreparation } from '@/domain/cad/cadSketchTrimExtend';
 import { graphCellSelectionAt, intersectingCircleSketch, lensAreaMm2 } from '@/domain/cad/__tests__/cadIntersectingCellFixtures';
+import { CadError } from '@/domain/cad/cadError';
+import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
 
 const kernel = vi.hoisted(() => ({ build: vi.fn(), section: vi.fn(), export: vi.fn(), importSolid: vi.fn(), importDxf: vi.fn(), importDxfCurve: vi.fn(), inspectTopology: vi.fn(), resolveTopologyPicks: vi.fn(), dispose: vi.fn() }));
 const createClient = vi.hoisted(() => vi.fn());
@@ -1849,6 +1851,26 @@ describe('CAD controller asynchronous guards', () => {
     expect(h.workbench().manifest.projects).toHaveLength(0);
     await expect(loadCadDocument(h.workbench().adapter, before.document.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(h.cad().isBusy()).toBe(false); expect(h.cad().isOpen()).toBe(true);
+  });
+  it('names the CAM step and its source in a refusal of a Section for CAM or a sketch handoff, and no CAM step in the section of a DXF export', async () => {
+    const h = await harness(true, true), version = h.session.getSnapshot().version;
+    const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
+    kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
+    const exported = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, undefined, 'dxf-export'));
+    expect([(exported as CadError).code, cadRefusalIssue(exported)]).toEqual(['empty-section', null]);
+    await act(async () => h.session.setWorkflowOpen(true, 'section'));
+    kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
+    const inspected = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, undefined, 'section'));
+    expect(cadRefusalIssue(inspected)).toMatchObject({ namespace: 'cam', code: 'empty-section', message: 'The section plane misses the body.',
+      subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
+    kernel.section.mockRejectedValueOnce(new CadError('tangent-section', 'The plane only touches the body.'));
+    const sent = await refusal(() => h.cad().sendSectionToCam({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, undefined, 'section'));
+    expect(cadRefusalIssue(sent)).toMatchObject({ namespace: 'cam', code: 'tangent-section', subject: { operation: 'section', sourceId: 'pad' } });
+    await act(async () => h.session.setWorkflowOpen(false, 'section'));
+    const sketch = await refusal(() => h.cad().sendToCam('missing', version));
+    expect(cadRefusalIssue(sketch)).toMatchObject({ namespace: 'cam', code: 'missing-sketch', message: (sketch as CadError).message,
+      subject: { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'missing' } });
+    expect(h.workbench().manifest.projects).toHaveLength(0);
   });
   it('hands a reviewed final-solid section through the ordinary saved CAD and portable CAM operations', async () => {
     const h = await harness(true, true); kernel.section.mockResolvedValue(section);

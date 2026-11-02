@@ -27,6 +27,14 @@ export function cadFeatureInputs(feature: CadFeature): CadFeatureInputs {
   }
   return inputs;
 }
+/** The input slot of `feature` that names feature `id` as giving `trait`, by its stored field, or null when none does. */
+export function cadFeatureInputField(feature: CadFeature, id: string, trait: CadFeatureTrait): string | null {
+  for (const { name, meaning: slot } of cadFeatureLayout(feature).slots) {
+    const value = (feature as unknown as Readonly<Record<string, unknown>>)[name];
+    if (slot.accepts[0] === trait && value !== undefined && value !== null && slot.ids(value).includes(id)) return name;
+  }
+  return null;
+}
 export function cadFeatureDependencies(feature: CadFeature): string[] {
   const inputs = cadFeatureInputs(feature);
   return [...inputs.sketchIds, ...inputs.curveIds, ...inputs.bodyIds, ...inputs.datumIds];

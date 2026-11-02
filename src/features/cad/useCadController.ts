@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import type { useWorkbenchAppController } from '@/app/useWorkbenchAppController';
 import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { cadFeatureProducesBody, createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
 import { archiveCadDocument, listCadDocuments, loadCadDocument, renameCadDocument, restoreCadDocument, saveCadDocument, type CadLibraryEntry } from '@/domain/cad/cadStorage';
 import { readExactUtf8Blob } from '@/domain/storage/exactTextStream';
 import { applyCadEdits, validateCadEditBatch, type CadEdit } from '@/domain/cad/cadOperations';
@@ -729,18 +730,26 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     signal?.throwIfAborted();
     const section = { ...parseCadSectionRequest(request) };
     const document = session.getSnapshot().document;
-    const result = await (await getKernel()).section(document, section, signal);
+    // A Section for CAM names its body as the source of a refusal; a DXF export's section is no CAM step.
+    const result = await (await getKernel()).section(document, section, signal)
+      .catch((error: unknown) => { throw scope === 'section' ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }) : error; });
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     return matchingSectionResult(result, section, document.parameters);
   }
   type CamSource = { kind: 'sketch'; sketchId: string } | { kind: 'section'; section: CadSectionRequest };
   async function prepareHandoffGeometry(source: CamSource, document: CadDocument, signal?: AbortSignal) {
     const { cadSketchToCam, cadEntitiesToCam } = await import('@/domain/cad/cadCam');
-    if (source.kind === 'sketch') return { path: cadSketchToCam(document, source.sketchId), sourceReceipt: { sketchId: source.sketchId } };
-    const section = matchingSectionResult(await (await getKernel()).section(document, source.section, signal), source.section, document.parameters);
-    return { path: cadEntitiesToCam(section.entities, document), sourceReceipt: { section: {
-      bodyId: section.bodyId, plane: section.plane, offset: section.offset, contourCount: section.contourCount
-    } } };
+    // Each refusal names the CAM step and its source: the sketch sent, or the body a section cuts.
+    try {
+      if (source.kind === 'sketch') return { path: cadSketchToCam(document, source.sketchId), sourceReceipt: { sketchId: source.sketchId } };
+      const section = matchingSectionResult(await (await getKernel()).section(document, source.section, signal), source.section, document.parameters);
+      return { path: cadEntitiesToCam(section.entities, document), sourceReceipt: { section: {
+        bodyId: section.bodyId, plane: section.plane, offset: section.offset, contourCount: section.contourCount
+      } } };
+    } catch (error) {
+      throw cadRefusalAt(error, source.kind === 'sketch' ? { kind: 'cam-operation', operation: 'send-sketch', sourceId: source.sketchId }
+        : { kind: 'cam-operation', operation: 'section', sourceId: source.section.bodyId });
+    }
   }
   async function handoffToCam(source: CamSource, expectedVersion: string, signal?: AbortSignal, scope?: 'section') {
     editable(expectedVersion); session.assertWorkflowClosed(scope); assertCanSwitch();
