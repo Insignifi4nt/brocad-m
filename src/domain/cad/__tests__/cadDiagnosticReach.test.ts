@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { CadSourceIndex, cadDiagnosticReach, type CadDiagnosticReachOptions } from './cadDiagnosticReach';
+import { cadSkippedMemberReads } from './cadMemberReads';
 
 const FILE = 'src/check.ts';
-/** What the walk finds from `check`, the export of one source file. */
+/** What the walk finds from `check`, the export of one source file, having checked that it followed or reported every member read. */
 const walk = (source: string, options?: CadDiagnosticReachOptions) => {
   const index = new CadSourceIndex({ [FILE]: source });
-  return cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()), options);
+  const found = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()), options);
+  expect(cadSkippedMemberReads(index, found), 'member reads skipped silently').toEqual([]);
+  return found;
 };
 /** The codes and unread sites it finds. */
 const reach = (source: string, options?: CadDiagnosticReachOptions) => {
@@ -154,5 +157,108 @@ describe('CAD diagnostic reach', () => {
       .toEqual([`${FILE}: inspection.code, from ${FILE}: result.code`]);
     expect(reach(`function inspect(sketch: { name: string }) { return new Inspection(sketch); }\n${check}`).unexpanded)
       .toEqual([`${FILE}: inspection.code, from ${FILE}: new Inspection(sketch).code`]);
+  });
+});
+
+// Each walk builds a TypeScript program of its own.
+describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () => {
+  const steps = `class Steps {
+      first() { throw new CadError('first-code', ''); }
+      second() { throw new CadError('second-code', ''); }
+      third() { throw new CadError('third-code', ''); }
+    }`;
+
+  it('runs a getter on every read, a presence test or a destructuring included, and a setter on every write', () => {
+    const shape = `class Shape {
+        get area() { throw new CadError('area-code', ''); }
+        set area(value: number) { throw new CadError('set-area-code', String(value)); }
+        get name() { return 'shape'; }
+      }`;
+    expect(reach(`${shape} export function check(shape: Shape) { if (shape.area) {} }`)).toEqual({ codes: ['area-code'], unexpanded: [] });
+    expect(reach(`${shape} export function check(shape: Shape) { return typeof shape.area === 'number'; }`).codes).toEqual(['area-code']);
+    expect(reach(`${shape} export function check(shape: Shape) { const value = shape.area; return value; }`).codes).toEqual(['area-code']);
+    expect(reach(`${shape} export function check(shape: Shape) { shape.area = 1; }`).codes).toEqual(['set-area-code']);
+    // A compound assignment reads and writes.
+    expect(reach(`${shape} export function check(shape: Shape) { shape.area += 1; }`).codes).toEqual(['area-code', 'set-area-code']);
+    expect(reach(`${shape} export function check(shape: Shape) { const { area } = shape; return area; }`).codes).toEqual(['area-code']);
+    expect(reach(`${shape} export function check({ area }: Shape) { return area; }`).codes).toEqual(['area-code']);
+    expect(reach(`${shape} export function check(shape: Shape) { const { name } = shape; return name; }`).codes).toEqual([]);
+    // An object's getters are a class's: one read runs it, a rest element or a spread takes every own getter.
+    const held = `const SHAPE = { get area(): number { throw new CadError('object-area-code', ''); }, size: 1 };`;
+    expect(reach(`${held} export function check() { return SHAPE.area ? 1 : 0; }`)).toEqual({ codes: ['object-area-code'], unexpanded: [] });
+    expect(reach(`${held} export function check() { return SHAPE.size; }`)).toEqual({ codes: [], unexpanded: [] });
+    expect(reach(`${held} export function check() { const { ...rest } = SHAPE; return rest; }`).codes).toEqual(['object-area-code']);
+    expect(reach(`${held} export function check() { return { ...SHAPE }; }`).codes).toEqual(['object-area-code']);
+  });
+
+  it('runs an object\'s method as a class\'s: when called or given on, not when tested, and reports any other use', () => {
+    const held = `const STEPS = { run() { throw new CadError('run-code', ''); }, name: 'steps' };`;
+    expect(reach(`${held} export function check() { if (STEPS.run) {} return STEPS.name; }`)).toEqual({ codes: [], unexpanded: [] });
+    expect(reach(`${held} export function check() { STEPS.run(); }`)).toEqual({ codes: ['run-code'], unexpanded: [] });
+    expect(reach(`${held} export function check() { [1].forEach(STEPS.run); }`)).toEqual({ codes: ['run-code'], unexpanded: [] });
+    expect(reach(`${held} export function check() { return { later: STEPS.run }; }`))
+      .toEqual({ codes: [], unexpanded: [`${FILE}: STEPS.run, a method used as a value the walk does not follow`] });
+    // Given on whole, any of its methods may be called.
+    expect(reach(`${held} function use(value: object) { return value; } export function check() { use(STEPS); }`).codes).toEqual(['run-code']);
+    // Its method's `this` is the object, whose other methods it calls.
+    expect(reach(`const PAIR = { start() { this.finish(); }, finish() { throw new CadError('finish-code', ''); }, idle() { throw new CadError('idle-code', ''); } };
+      export function check() { PAIR.start(); }`)).toEqual({ codes: ['finish-code'], unexpanded: [] });
+  });
+
+  it('follows a call on `this` to the method and to every override below its class', () => {
+    const classes = `class Base { run() { this.step(); } step() { throw new CadError('base-step', ''); } }
+      class Child extends Base { override step() { throw new CadError('child-step', ''); } }
+      class Other { step() { throw new CadError('other-step', ''); } }`;
+    expect(reach(`${classes} export function check(value: Base) { value.run(); }`)).toEqual({ codes: ['base-step', 'child-step'], unexpanded: [] });
+    // An inherited method is walked once, for every receiver its class's `this` can be.
+    expect(reach(`${classes} export function check(value: Child) { value.run(); }`)).toEqual({ codes: ['base-step', 'child-step'], unexpanded: [] });
+    expect(reach(`class Base { run() { this.step(); } step() {} }
+      class Child extends Base { override step() { super.step(); throw new CadError('child-step', ''); } }
+      export function check(value: Base) { value.run(); }`)).toEqual({ codes: ['child-step'], unexpanded: [] });
+  });
+
+  it('reads an element by a literal key, a constant naming one or a key whose type allows only literals, and reports one it cannot tell', () => {
+    expect(reach(`${steps} export function check(steps: Steps) { steps['first'](); }`)).toEqual({ codes: ['first-code'], unexpanded: [] });
+    expect(reach(`${steps} const KEY = 'second'; export function check(steps: Steps) { steps[KEY](); }`)).toEqual({ codes: ['second-code'], unexpanded: [] });
+    expect(reach(`${steps} export function check(steps: Steps, key: 'first' | 'third') { steps[key](); }`)).toEqual({ codes: ['first-code', 'third-code'], unexpanded: [] });
+    expect(reach(`const TABLE = { cut: () => { throw new CadError('cut-code', ''); }, pocket: () => { throw new CadError('pocket-code', ''); } };
+      export function check(kind: 'cut' | 'pocket') { TABLE[kind](); }`)).toEqual({ codes: ['cut-code', 'pocket-code'], unexpanded: [] });
+    expect(reach(`${steps} export function check(steps: Steps, key: string) { (steps as unknown as Record<string, () => void>)[key](); }`))
+      .toEqual({ codes: [], unexpanded: [`${FILE}: (steps as unknown as Record<string, () => void>)[key], an element read by a key the walk cannot tell`] });
+    // Read by such a key, a record of values that are no functions and have no getters runs nothing, but one with a getter may.
+    expect(reach(`export function check(table: Record<string, number>, key: string) { table[key] = (table[key] ?? 0) + 1; }`)).toEqual({ codes: [], unexpanded: [] });
+    expect(reach(`class Shape { get area() { throw new CadError('area-code', ''); } }
+      export function check(shape: Shape, key: string) { return (shape as unknown as Shape & Record<string, number>)[key]; }`).unexpanded)
+      .toEqual([`${FILE}: (shape as unknown as Shape & Record<string, number>)[key], an element read by a key the walk cannot tell`]);
+  });
+
+  it('runs no method that is written over, and reports one written into a variable', () => {
+    expect(reach(`${steps} export function check(steps: Steps) { steps.first = () => {}; }`)).toEqual({ codes: [], unexpanded: [] });
+    expect(reach(`${steps} export function check(steps: Steps) { let run = steps.first; run = steps.second; run(); }`).unexpanded)
+      .toEqual([`${FILE}: steps.first, a method used as a value the walk does not follow`, `${FILE}: steps.second, a method used as a value the walk does not follow`]);
+  });
+
+  it('follows a method returned to the caller or bound', () => {
+    expect(reach(`${steps} function pick(steps: Steps) { return steps.first; } export function check(steps: Steps) { pick(steps)(); }`))
+      .toEqual({ codes: ['first-code'], unexpanded: [] });
+    expect(reach(`${steps} const pick = (steps: Steps) => steps.second; export function check(steps: Steps) { pick(steps)(); }`))
+      .toEqual({ codes: ['second-code'], unexpanded: [] });
+    expect(reach(`${steps} export function check(steps: Steps) { const run = steps.third.bind(steps); run(); }`)).toEqual({ codes: ['third-code'], unexpanded: [] });
+  });
+
+  it('reads the code of each way a CadError is raised: checked, received, and the super call of a subclass, through its constructor', () => {
+    expect(reach(`const CODE = 'checked-code';
+      export function check(facts: unknown) { if (facts) throw CadError.checked(CODE, '', facts); throw CadError.received('received-code', '', {}); }`))
+      .toEqual({ codes: ['checked-code', 'received-code'], unexpanded: [] });
+    const refusal = `class Refusal extends CadError { constructor(code: string, message = '') { super(code, message); } }`;
+    expect(reach(`${refusal} export function check() { throw new Refusal('refusal-code'); }`)).toEqual({ codes: ['refusal-code'], unexpanded: [] });
+    // A subclass without a constructor passes its own arguments on; one with a constructor gives its own.
+    expect(reach(`${refusal} class Deeper extends Refusal {} class Named extends Refusal { constructor() { super('named-code'); } }
+      export function check(named: boolean) { throw named ? new Named() : new Deeper('deeper-code'); }`)).toEqual({ codes: ['deeper-code', 'named-code'], unexpanded: [] });
+    // Testing an instance's class constructs nothing; any other use of the class is reported, since what constructs it is unseen.
+    expect(reach(`${refusal} export function check(error: unknown) { if (error instanceof Refusal) return; throw new Refusal('refusal-code'); }`).unexpanded).toEqual([]);
+    expect(reach(`${refusal} export function check() { const make = Refusal; throw new make('hidden'); }`).unexpanded).toEqual([`${FILE}: Refusal passed on`]);
+    // A class that extends something else raises no CadError by its super call.
+    expect(reach(`class Other extends Error { constructor(code: string) { super(code); } } export function check() { throw new Other('not-a-code'); }`).codes).toEqual([]);
   });
 });

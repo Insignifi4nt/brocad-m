@@ -7,7 +7,7 @@ import type { CadDiagnostic, CadKernelFailureDetails, CadKernelOperation } from 
  * refuse with these codes, and the issue model types each one's details.
  */
 export const CAD_REFUSAL_CODES = Object.freeze([
-  'already-driven-sketch-radius', 'changed-sketch-reference', 'closed-curve', 'cut-erased', 'cut-invalid', 'cut-no-material', 'cut-open',
+  'already-driven-sketch-radius', 'already-driven-sketch-tangent', 'changed-sketch-reference', 'closed-curve', 'cut-erased', 'cut-invalid', 'cut-no-material', 'cut-open',
   'cut-tool', 'disconnected-curve', 'division-by-zero', 'duplicate-id', 'duplicate-loft-section', 'duplicate-sketch-constraint',
   'duplicate-sketch-id', 'empty-profile', 'empty-reference', 'empty-sketch', 'empty-solid', 'expression-limit', 'feature-limit',
   'fixed-sketch-relation', 'import-bounds', 'import-empty', 'import-invalid', 'import-not-solid', 'import-open', 'import-size',
@@ -31,7 +31,7 @@ export const CAD_REFUSAL_CODES = Object.freeze([
   'stale-sketch-region', 'step-read', 'step-roots', 'step-transfer', 'step-units', 'step-units-unsupported', 'stl-coordinate', 'stl-facets',
   'stl-incomplete', 'stl-open', 'stl-orientation', 'stl-read', 'stl-shells', 'suppressed-curve', 'suppressed-sketch', 'sweep-curve',
   'sweep-empty', 'sweep-failed', 'sweep-invalid', 'sweep-open', 'sweep-section', 'sweep-volume', 'sweep-work-limit', 'topology-mapping',
-  'unavailable-body', 'unavailable-datum-plane', 'unavailable-sketch-reference', 'unknown-parameter', 'unsupported-cut-precision',
+  'unavailable-body', 'unavailable-datum-plane', 'unavailable-sketch-reference', 'unknown-parameter', 'unlowerable-sketch-operand', 'unsupported-cut-precision',
   'unsupported-cut-removal', 'unsupported-cut-target', 'unsupported-datum-frame', 'unsupported-datum-operation',
   'unsupported-datum-precision', 'unsupported-loft-planes', 'unsupported-loft-section', 'unsupported-pocket-precision',
   'unsupported-pocket-removal', 'unsupported-pocket-span', 'unsupported-pocket-target', 'unsupported-selection', 'unsupported-sketch-cells',

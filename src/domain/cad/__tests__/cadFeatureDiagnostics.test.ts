@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 // TypeScript 7 ships no compiler API yet; AST tooling uses the TypeScript 6 package.
 import ts from '@typescript/typescript6';
 import { CadSourceIndex, cadDiagnosticReach, type CadDiagnosticReach, type CadDiagnosticReachOptions, type CadDiagnosticRoot } from './cadDiagnosticReach';
+import { cadSkippedMemberReads } from './cadMemberReads';
 import type { CadFeatureKind } from '../features/cadFeatureDefinitionTypes';
 import { CAD_FEATURE_SHARED_DIAGNOSTICS, cadFeatureDefinition, cadFeatureKinds } from '../features/cadFeatureRegistry';
 
@@ -124,6 +125,15 @@ describe('CAD feature diagnostics', () => {
     // An input's own kind walks the evaluations other kinds stop at, so their codes are listed there.
     for (const [name, owners] of Object.entries(INPUT_EVALUATIONS)) if (owners.includes(kind)) expect(reach.declarations, name).toContain(name);
   }, 30_000);
+
+  it('follow or report every member read in the code they walk', () => {
+    const groups = Object.keys(CAD_FEATURE_SHARED_DIAGNOSTICS) as (keyof typeof CAD_FEATURE_SHARED_DIAGNOSTICS)[];
+    const walks = [...groups.map(group => [group, sharedReach(group)] as const), ...cadFeatureKinds().map(kind => [kind, kindReach(kind)] as const)];
+    for (const [name, reach] of walks) {
+      expect(reach.accesses.size, name).toBeGreaterThan(0);
+      expect(cadSkippedMemberReads(index, reach), name).toEqual([]);
+    }
+  }, 120_000);
 
   it('take a caught error\'s code only at the sites read by hand', () => {
     const groups = Object.keys(CAD_FEATURE_SHARED_DIAGNOSTICS) as (keyof typeof CAD_FEATURE_SHARED_DIAGNOSTICS)[];
