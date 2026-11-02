@@ -435,7 +435,7 @@ describe('sketch context header', () => {
     expect(container.querySelector<HTMLButtonElement>('ul[aria-label="Constraint issues"] button')!.disabled).toBe(true);
   });
 
-  it('counts a refusal that names no item, as a solver that failed gives, as one issue whose list shows its message', async () => {
+  it('counts a refusal that names no item, as a solver that failed gives, as one issue whose list shows its message and the solver\'s words closed under it', async () => {
     const source = graph(), unjudged = { status: null, degreesOfFreedom: null, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] };
     const failure = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Sketch 1', graph: source, unavailable: { kernelMessage: 'Uncaught RangeError: out of memory' },
       rejection: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_SOLVER_STOPPED, diagnostics: unjudged } });
@@ -443,11 +443,29 @@ describe('sketch context header', () => {
     await h.render(issues);
     const count = container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!;
     expect([count.getAttribute('aria-label'), count.disabled]).toEqual(['1 constraint issue', false]);
-    await act(async () => count.click());
-    expect(container.querySelector('.cad-sketch-header-issue-message')?.textContent).toBe(`Sketch 1: ${CAD_SKETCH_SOLVER_STOPPED}`);
-    expect(container.querySelectorAll('ul[aria-label="Constraint issues"] > li')).toHaveLength(0);
-    // The header shows the message only: the solver's own words stay for agents.
+    // Closed, the header shows neither the words nor their disclosure.
     expect(container.querySelector('[data-cad-sketch-header]')!.textContent).not.toContain('out of memory');
+    expect(container.querySelector('details')).toBeNull();
+    await act(async () => count.click());
+    const message = container.querySelector('.cad-sketch-header-issue-message'), disclosure = container.querySelector<HTMLDetailsElement>('.cad-sketch-header-issue-list details');
+    expect(message?.textContent).toBe(`Sketch 1: ${CAD_SKETCH_SOLVER_STOPPED}`);
+    expect(container.querySelectorAll('ul[aria-label="Constraint issues"] > li')).toHaveLength(0);
+    // The solver's own words are under a closed disclosure after the message, which never repeats them, and the count's title neither.
+    expect([disclosure?.open, disclosure?.querySelector('summary')?.textContent, disclosure?.querySelector('p')?.textContent]).toEqual([false, 'Kernel message', 'Uncaught RangeError: out of memory']);
+    expect(message?.nextElementSibling).toBe(disclosure);
+    expect(message?.textContent).not.toContain('out of memory');
+    await act(async () => count.focus());
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(`Sketch 1: ${CAD_SKETCH_SOLVER_STOPPED}`);
+  });
+
+  it('shows no disclosure for a refusal that carries no words of a solver', async () => {
+    const source = graph(), issues = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1', analysis: { kind: 'rejected', reason: 'conflicting',
+      diagnostics: { conflictingIds: ['level'], redundantIds: [], partiallyRedundantIds: [], issues: [] } } });
+    const h = mount(issues);
+    await h.render(issues);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!.click());
+    expect(container.querySelector('.cad-sketch-header-issue-message')).not.toBeNull();
+    expect(container.querySelector('details')).toBeNull();
   });
 
   it('keeps focus as an edit fixes the issues: on the row taking the fixed one\'s place, then the count, then the sketch canvas', async () => {

@@ -5,6 +5,7 @@ import type { CadSketchHighlight, CadSketchHighlightStore } from './cadSketchDim
 import type { CadIssueRepair } from '@/domain/cad/cadIssues';
 import type { CadSketchIssue, CadSketchIssues } from './cadSketchIssues';
 import { cadSketchCanvasOf, restoreFocus } from './cadFocus';
+import { CadKernelMessage, cadIssueKernelMessage } from './CadKernelMessage';
 import './cad-sketch-context-header.css';
 
 export interface CadSketchContextHeaderProps {
@@ -85,6 +86,8 @@ export function CadSketchContextHeader({ name, status, issues, inspectedIssue, i
         onClick={() => setOpen(value => !value)}><WarningIcon size={13} /><span>{count}</span></Button>
       {open && count > 0 && <div id={listId} className="cad-sketch-header-issue-list" onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); close(); } }}>
         {issues.message && <p className="cad-sketch-header-issue-message">{issues.message}</p>}
+        {/* The words of a solver that failed, closed under the message, which never repeats them. */}
+        {issues.refusal && <CadKernelMessage text={cadIssueKernelMessage(issues.refusal)} />}
         <ul aria-label="Constraint issues">{issues.list.map(issue => <li key={issue.key}>
           <Button type="button" data-cad-issue-row="" data-cad-diagnostic-source={issue.source.id} data-cad-issue-category={issue.category} aria-pressed={inspectedIssue === issue.key} disabled={issuesLocked}
             title={issuesLocked ? 'Finish or cancel this edit before opening the affected sketch.' : issue.detail}
