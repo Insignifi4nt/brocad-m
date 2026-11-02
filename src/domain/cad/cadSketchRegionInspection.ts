@@ -20,8 +20,6 @@ import { CadSketchOffsetRequestSchema, prepareCadSketchOffset, type CadSketchOff
 import { CadSketchMirrorRequestSchema, prepareCadSketchMirror, type CadSketchMirrorRequest } from './cadSketchMirror';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { CadSketchGeneratorSchema, type CadSketchGenerator } from './cadSketchGraph';
-import { setCadSketchGenerator, settleCadDocumentGenerators } from './sketch-generators/cadSketchGeneratorEdits';
-import { assertCadSketchGeneratorRemovals, cadSketchGeneratorRemovals } from './sketch-generators/cadSketchGenerators';
 
 export interface CadPreparedSketchCell {
   readonly id: CadSketchCellId;
@@ -195,10 +193,9 @@ function activeSketch(document: CadDocument, sketchId: string, proposal?: CadSke
     } else if (proposal.mirror !== undefined) {
       source = prepareCadSketchMirror({ sketch, parameters, ...proposal.mirror }).sketch;
     } else if (proposal.generator !== undefined) {
-      // The set-sketch-generator edit's own steps, refusing the relations its regeneration removes unless the proposal confirms them.
-      const removals = cadSketchGeneratorRemovals(proposal.generator.removedRelationIds);
-      [source] = settleCadDocumentGenerators([sketch], [setCadSketchGenerator(sketch, proposal.generator.generator)], parameters, removals) as [CadSketchFeature];
-      assertCadSketchGeneratorRemovals(removals);
+      // Free geometry related to the members moves only when the edit is solved, so a generator proposal is read after its edit is
+      // prepared, as a complete same-ID sketch (`prepareCadSketchRegionProposal`).
+      throw new CadError('invalid-region-proposal', 'Prepare a generator proposal as its set-sketch-generator edit before reading its cells.');
     }
     const sourcePlane = source.plane;
     const requiredDatums = typeof sourcePlane === 'string' ? [] : validated.features.slice(0, index)

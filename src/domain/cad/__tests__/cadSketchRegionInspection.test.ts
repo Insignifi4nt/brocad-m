@@ -5,7 +5,7 @@ import { pad } from './cadSketchRegionFixtures';
 import { CadSession } from '@/features/cad/cadSession';
 import type { CadSketchFeature } from '../cadDocument';
 import { createCadDocument, parseCadDocument } from '../cadSchema';
-import { applyCadEdits, reduceCadEditIntents } from '../cadOperations';
+import { reduceCadEditIntents } from '../cadOperations';
 import type { CadSketchRegionProposal } from '../cadSketchRegionInspection';
 import { endTrim, trimPart, middleTrim, middleTrimPart } from './cadSketchTrimFixtures';
 import { extendPart, lineExtend } from './cadSketchExtendFixtures';
@@ -135,35 +135,6 @@ describe('prepared closed-cell inspection and physical selection', () => {
     session.undo(); expect(session.getSnapshot().document).toBe(document); session.redo(); expect(session.getSnapshot().document).toBe(accepted.document);
   });
 
-  it('previews a generator\'s set-sketch-generator fields as the edit makes them, asking for the relations its regeneration removes', () => {
-    const corners = [[0, 0], [10, 0], [10, 10], [0, 10]] as const;
-    const offset = { id: 'off', kind: 'generator', idPrefix: 'off', construction: false,
-      geometry: { kind: 'offset', chain: [0, 1, 2, 3].map(index => ({ entityId: `l${index}`, reversed: false })), distance: 'gap' } } as const;
-    const pattern = { id: 'pat', kind: 'generator', idPrefix: 'pat', construction: true, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 } } as const;
-    const document = parseCadDocument({ ...createCadDocument('Generated', 'generated-proposals'), schemaVersion: 2, parameters: { gap: 2 }, features: [{
-      id: 'sketch', kind: 'sketch', name: 'Plate', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
-        points: [...corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] })),
-          { id: 'a', position: [20, 0] }, { id: 'b', position: [25, 0] }, { id: 'u', position: [0, -25] }],
-        entities: [...corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })),
-          { id: 's', kind: 'line', construction: true, startPointId: 'a', endPointId: 'b' }],
-        relations: [offset, pattern, { id: 'tie', kind: 'coincident', pointIds: ['u', 'pat_i3_b'] }] } }] });
-    const areas = (proposal?: CadSketchRegionProposal) => inspectCadSketchRegions(document, 'sketch', { mode: 'graph-cells', ...proposal ? { proposal } : {} }).items.map(item => item.areaMm2).sort((x, y) => x - y);
-    expect(areas()).toEqual([196 - 100, 100]);
-    // A parameter value and a changed distance are read as the edit reads them.
-    const wider = { generator: { generator: { ...offset, geometry: { ...offset.geometry, distance: 'gap + 1' } } }, parameterValues: { gap: 3 } };
-    expect(inspectCadSketchRegions(document, 'sketch', { mode: 'graph-cells', proposal: wider }).proposed).toBe(true);
-    expect(areas(wider)).toEqual([100, 324 - 100]);
-    // Three occurrences leave the fourth, which the free point is tied to: the proposal asks first, as the edit does.
-    const fewer = { generator: { ...pattern, geometry: { ...pattern.geometry, count: 3 } } };
-    expect(() => areas({ generator: fewer })).toThrowError(expect.objectContaining({ code: 'unconfirmed-sketch-generator-removals', relationIds: ['tie'] }));
-    const confirmed = { generator: { ...fewer, removedRelationIds: ['tie'] } };
-    expect(areas(confirmed)).toEqual([96, 100]);
-    expect(() => areas({ generator: { ...fewer, removedRelationIds: ['other'] } } as never)).toThrowError(expect.objectContaining({ code: 'unconfirmed-sketch-generator-removals' }));
-    expect(() => areas({ ...confirmed, offset: {} } as never)).toThrowError(expect.objectContaining({ code: 'invalid-region-proposal' }));
-    // The edit with the same fields gives the cells the proposal showed.
-    const accepted = applyCadEdits(document, [{ kind: 'set-sketch-generator', sketchId: 'sketch', ...confirmed.generator }]);
-    expect(inspectCadSketchRegions(accepted, 'sketch', { mode: 'graph-cells' }).items).toEqual(inspectCadSketchRegions(document, 'sketch', { mode: 'graph-cells', proposal: confirmed }).items);
-  });
   it('preflights the same detached offset request before an atomic explicit-consumer repair', () => {
     const source = offsetCirclePart(), sketch = source.features[0]; if (sketch.kind !== 'sketch') throw new Error('Missing circle.');
     const acceptedReference = prepareCadSketchCells(sketch, source.parameters).cells[0].reference;

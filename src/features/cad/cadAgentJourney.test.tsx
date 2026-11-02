@@ -147,6 +147,17 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(sketch.graph.relations.find(relation => relation.id === 'spokes')).toEqual({ ...pattern, geometry: { ...pattern.geometry, count: 3 } });
     await h.success('cad_history', { expectedVersion: h.session.getSnapshot().version, direction: 'undo' });
     expect(h.session.getSnapshot().document).toEqual(applied.document);
+    // A proposed cell's reference is read as the edit makes it: the same text as the reference read after that edit is applied.
+    const restored = h.session.getSnapshot(), wider = { ...offset, geometry: { ...offset.geometry, distance: 'gap + 1' } };
+    const cells = await h.success('cad_inspect_sketch_regions', { ...query, expectedVersion: restored.version, proposal: { generator: { generator: wider } } });
+    const outer = (cells.items as { cellId: number; areaMm2: number }[]).reduce((x, y) => y.areaMm2 > x.areaMm2 ? y : x).cellId;
+    const read = async (version: string, proposal?: unknown) => {
+      const chunk = await h.success('cad_read_sketch_region_reference', { expectedVersion: version, sketchId: 'plate', cellIds: [outer], ...proposal ? { proposal } : {} });
+      return { text: chunk.text, totalLength: chunk.totalLength };
+    };
+    const proposed = await read(restored.version, { generator: { generator: wider } });
+    await h.success('cad_edit_document', { expectedVersion: restored.version, edits: [{ kind: 'set-sketch-generator', sketchId: 'plate', generator: wider }] });
+    expect(await read(h.session.getSnapshot().version)).toEqual(proposed);
   });
 
   it('lists the generator edits and every shape a generator makes in the context inventory, each edit one the catalog describes', async () => {

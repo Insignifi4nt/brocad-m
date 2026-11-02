@@ -569,9 +569,16 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     editable(expectedVersion); session.assertWorkflowClosed(); signal?.throwIfAborted();
     if (!isCadImportData(page)) throw new ToolError('INVALID_ARGUMENT', 'Malformed sketch region query.');
     const captured = structuredClone(page);
-    const { inspectCadSketchRegions } = await import('@/domain/cad/cadSketchRegionInspection');
+    const [{ inspectCadSketchRegions }, { prepareCadSketchRegionProposal }] = await Promise.all([import('@/domain/cad/cadSketchRegionInspection'), import('./cadSketchRegionProposalPreparation')]);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
-    const result = inspectCadSketchRegions(session.getSnapshot().document, sketchId, captured);
+    const document = session.getSnapshot().document;
+    // A generator proposal is read as its edit is prepared, through the solver; a Trim or Extend query beside it is refused unprepared.
+    let query = captured;
+    if (captured.proposal?.generator !== undefined && captured.trimAt === undefined && captured.extendAt === undefined) {
+      query = { ...captured, proposal: await prepareCadSketchRegionProposal(document, sketchId, captured.proposal, await getSketchSolver(), signal) };
+      signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
+    }
+    const result = inspectCadSketchRegions(document, sketchId, query);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(); return result;
   }
   async function readSketchRegionReference(sketchId: string, target: CadSketchRegionReadTarget, expectedVersion = session.getSnapshot().version, signal?: AbortSignal, proposal?: CadSketchRegionProposal) {
@@ -581,7 +588,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const capturedTarget = structuredClone(target), capturedProposal = proposal === undefined ? undefined : structuredClone(proposal);
     const document = session.getSnapshot().document, targetKey = JSON.stringify(capturedTarget), key = JSON.stringify([sketchId, capturedTarget]);
     if (capturedProposal !== undefined) {
-      const { readCadSketchRegionReference, validateCadSketchRegionProposal } = await import('@/domain/cad/cadSketchRegionInspection');
+      const [{ readCadSketchRegionReference, validateCadSketchRegionProposal }, { prepareCadSketchRegionProposal }] = await Promise.all([
+        import('@/domain/cad/cadSketchRegionInspection'), import('./cadSketchRegionProposalPreparation')]);
       signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
       validateCadSketchRegionProposal(capturedProposal);
       const proposalKey = JSON.stringify(capturedProposal), previous = proposedRegionReferenceTexts.current;
@@ -589,7 +597,13 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
         ? previous : { document, sketchId, proposalKey, texts: new Map<string, string>() };
       let text = cache.texts.get(targetKey);
       if (text === undefined) {
-        text = JSON.stringify(readCadSketchRegionReference(document, sketchId, capturedTarget, capturedProposal));
+        // A generator proposal is read as its edit is prepared, through the solver.
+        let prepared = capturedProposal;
+        if (capturedProposal.generator !== undefined) {
+          prepared = await prepareCadSketchRegionProposal(document, sketchId, capturedProposal, await getSketchSolver(), signal);
+          signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
+        }
+        text = JSON.stringify(readCadSketchRegionReference(document, sketchId, capturedTarget, prepared));
         signal?.throwIfAborted(); cache.texts.set(targetKey, text);
         proposedRegionReferenceTexts.current = cache;
       }
