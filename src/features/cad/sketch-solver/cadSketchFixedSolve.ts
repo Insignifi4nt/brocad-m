@@ -14,7 +14,7 @@ export function solveFixedCadSketch(input: CadSketchSolveInput): Extract<CadSket
   const { graph } = input, fixed = cadSketchFixedComponents(graph);
   for (const point of graph.points) if (!fixed.pointIds.has(point.id)) return null;
   for (const entity of graph.entities) if (entity.kind === 'circle' && !fixed.circleIds.has(entity.id)) return null;
-  if (checkCadSketchGraph(graph, input.parameters).length) return null;
+  if (checkCadSketchGraph(graph, input.parameters, 'solve').length) return null;
   const diagnostics: CadSketchSolveDiagnostics = { status: 'success', degreesOfFreedom: 0, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [],
     ...(input.analyseDefinition ? { definition: { definedPointIds: graph.points.map(point => point.id), underDefinedPointIds: [],
       definedEntityIds: graph.entities.map(entity => entity.id), underDefinedEntityIds: [] } } : {}) };

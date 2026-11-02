@@ -17,6 +17,9 @@ import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTe
 import { circleRow, circleRowPart, rowSketch } from '@/domain/cad/__tests__/cadSketchLinearPatternFixtures';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { createCadSketchSolverClient } from './sketch-solver/cadSketchSolverClient';
+import { cadSketchSolverWireResult, parseCadSketchSolveInput, parseCadSketchSolverReply } from './sketch-solver/cadSketchSolverProtocol';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { applyCadEdits } from '@/domain/cad/cadOperations';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { length: 20 }, features: [{
@@ -488,5 +491,60 @@ describe('sketch generators in edit preparation', () => {
     const renamed = (await prepareCadEdits(resized, [{ kind: 'rename-document', name: 'Renamed' }], client)).document;
     for (const id of ['lower', 'upper']) expect(renamed.features.find(feature => feature.id === id)).toBe(resized.features.find(feature => feature.id === id));
     client.dispose();
+  });
+
+  describe('a regular polygon directed by a line the solve moves', () => {
+    const polygon = { id: 'poly', kind: 'generator' as const, idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon' as const, x: 0, y: 0, radius: 10, sides: 6, directionId: 'dir' } };
+    const direction = { points: [{ id: 'o', position: [0, 0] as const }, { id: 'e', position: [5, 0] as const }],
+      entities: [{ id: 'dir', kind: 'line' as const, construction: true, startPointId: 'o', endPointId: 'e' }] };
+    const corner = expandCadSketchGenerators({ ...direction, relations: [polygon] }, {}).points.find(point => point.id === 'poly_v2')!.position;
+    // A free point held on a generated corner, which must follow it when the polygon turns.
+    const part = () => parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false,
+      plane: 'XY', offset: 0, profiles: [], graph: { points: [...direction.points, { id: 'u', position: corner }], entities: direction.entities,
+        relations: [{ id: 'pin', kind: 'fixed-point', pointId: 'o', position: [0, 0] }, polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v2'] }] } }] });
+    // Each solution crosses the worker boundary, whose check is a solve's too.
+    const wire = { solve: async (input: Parameters<typeof solver.solve>[0]) => {
+      const reply = parseCadSketchSolverReply(structuredClone({ id: 1, kind: 'result', result: cadSketchSolverWireResult(await solver.solve(input)) }), parseCadSketchSolveInput(structuredClone(input)));
+      if (reply.kind !== 'result') throw new Error(reply.message);
+      return reply.result;
+    } };
+    const graphOf = (document: CadDocument) => { const sketch = document.features[0]; if (sketch.kind !== 'sketch' || !sketch.graph) throw new Error('Expected a sketch graph'); return sketch.graph; };
+    const at = (document: CadDocument, id: string) => graphOf(document).points.find(point => point.id === id)!.position as readonly [number, number];
+    /** The polygon turned to `degrees`, with the free point solved again onto its third corner. */
+    const expectTurnedTo = (document: CadDocument, degrees: number) => {
+      const turn = (index: number) => [10 * Math.cos((degrees + 60 * index) * Math.PI / 180), 10 * Math.sin((degrees + 60 * index) * Math.PI / 180)];
+      for (const [id, index] of [['poly_v0', 0], ['poly_v2', 2], ['u', 2]] as const) at(document, id).forEach((value, axis) => expect(value).toBeCloseTo(turn(index)[axis], 9));
+      expect(checkCadSketchGraph(graphOf(document), document.parameters)).toEqual([]);
+    };
+
+    it('regenerates it when a drag turns the line, and solves the geometry on its corners again', async () => {
+      const dragged = (await prepareCadEdits(part(), [{ kind: 'move-sketch-point', sketchId: 'sketch', pointId: 'e', translation: [0, 5] }], wire)).document;
+      expect(at(dragged, 'e')).toEqual([5, 5]);
+      expectTurnedTo(dragged, 45);
+    });
+
+    it('regenerates it when a driving relation turns the line', async () => {
+      const angle = { id: 'angle', kind: 'line-angle' as const, rays: [{ lineId: '@h', towardPointId: '@h' }, { lineId: 'dir', towardPointId: 'e' }] as const, sense: 'ccw' as const, value: 30 };
+      expectTurnedTo((await prepareCadEdits(part(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: angle }], wire)).document, 30);
+    });
+
+    it('refuses a line held on a corner it turns, since each turn moves the corner again', async () => {
+      await expect(prepareCadEdits(part(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'chase', kind: 'coincident', pointIds: ['e', 'poly_v1'] } }], wire))
+        .rejects.toMatchObject({ code: 'invalid-sketch-generator', message: expect.stringContaining('keep moving with the geometry it generates') });
+    });
+
+    it('deletes the line only with the polygon, which the refusal names, and a cascade takes its corners and the relations on them', async () => {
+      const remove = (cascade: boolean): CadEdit => ({ kind: 'delete-sketch-elements', sketchId: 'sketch', pointIds: [], entityIds: ['dir'], relationIds: [], cascade });
+      await expect(prepareCadEdits(part(), [remove(false)], wire)).rejects.toMatchObject({ code: 'dependent-sketch-element',
+        message: 'Regular polygon "poly" is generated from the selected geometry. Select it too, detach it first to keep its geometry, or use cascade deletion.' });
+      const deleted = graphOf((await prepareCadEdits(part(), [remove(true)], wire)).document);
+      expect({ points: deleted.points.map(point => point.id), entities: deleted.entities, relations: deleted.relations.map(relation => relation.id) })
+        .toEqual({ points: ['o', 'e', 'u'], entities: [], relations: ['pin'] });
+      // Detached first, the polygon's edges stay as plain geometry when the line goes.
+      const kept = graphOf(applyCadEdits(part(), [{ kind: 'detach-sketch-generator', sketchId: 'sketch', generatorId: 'poly' }, remove(false)]));
+      expect(kept.entities.map(entity => entity.id)).toEqual(expect.arrayContaining(['poly_e0', 'poly_e5']));
+      expect(kept.relations.map(relation => relation.id)).toContain('tie');
+    });
   });
 });

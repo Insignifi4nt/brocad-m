@@ -358,8 +358,12 @@ export function cadSketchGraphWithSolvedValues(source: CadSketchGraph, values: r
   return solved;
 }
 
-/** Nonrepairing acceptance check. Empty issues means current numeric geometry and relations agree. */
-export function checkCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>): readonly CadSketchGraphIssue[] {
+/**
+ * Nonrepairing acceptance check. Empty issues means current numeric geometry and relations agree. A solve's check (`scope` 'solve')
+ * leaves out whether each generator still carries what its inputs generate: a solve holds the members fixed while it may move the lines
+ * they are generated from, so its caller settles the generators and solves again before it accepts the sketch, as `prepareCadEdits` does.
+ */
+export function checkCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>, scope: 'graph' | 'solve' = 'graph'): readonly CadSketchGraphIssue[] {
   const issues: CadSketchGraphIssue[] = [], points = new CadSketchPositions();
   const scalar = (value: number | string) => evaluateCadScalar(value, parameters);
   const report = (source: CadSketchGraphIssue['source'], code: CadSketchGraphIssue['code'], message: string, residualMm?: number) => {
@@ -397,6 +401,7 @@ export function checkCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<
   }
   // Each relation's definition checks it. Cross-feature authority, such as a linked reference's source, is checked by the document parser.
   for (const relation of graph.relations) {
+    if (scope === 'solve' && relation.kind === 'generator') continue;
     const source = { kind: 'relation', id: relation.id } as const;
     try {
       issues.push(...cadSketchRelationDefinition(relation).check(graph, relation, points, parameters));

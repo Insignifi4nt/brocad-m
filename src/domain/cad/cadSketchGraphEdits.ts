@@ -1,9 +1,10 @@
 import type { CadSketchFeature } from './cadDocument';
 import { CadError } from './cadError';
-import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
+import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGenerator, type CadSketchGraph } from './cadSketchGraph';
 import { cadSketchEntityPointIds, cadSketchRelationEntityIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
 import { cadSketchLinearPatternForSelection } from './cadSketchLinearPattern';
 import { cadSketchGeneratorDeletion } from './sketch-generators/cadSketchGeneratorEdits';
+import { cadSketchGeneratorName } from './sketch-generators/cadSketchGenerators';
 import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRelationCopy } from './sketch-relations/cadSketchRelationRemap';
 
 /** Structural intent only. The shared preparation stage solves before complete-part acceptance. */
@@ -64,8 +65,10 @@ export function deleteCadSketchElements({ sketch, pointIds, entityIds, relationI
     || pointIds.some(id => cadSketchLinearPatternForSelection(graph, { kind: 'point', id }))
     || graph.relations.some(relation => relation.kind === 'linear-pattern' && relations.has(relation.id)))
     throw new CadError('owned-sketch-pattern', 'Omit the complete occurrence through its pattern, or detach the pattern before deleting its geometry.');
-  const remove = (id: string, selected: Set<string>) => {
-    if (!cascade && !selected.has(id)) throw new CadError('dependent-sketch-element', `Sketch element "${id}" depends on selected geometry. Select it explicitly or use cascade deletion.`);
+  const remove = (id: string, selected: Set<string>, generator?: CadSketchGenerator) => {
+    if (!cascade && !selected.has(id)) throw new CadError('dependent-sketch-element', generator
+      ? `${cadSketchGeneratorName(generator)} is generated from the selected geometry. Select it too, detach it first to keep its geometry, or use cascade deletion.`
+      : `Sketch element "${id}" depends on selected geometry. Select it explicitly or use cascade deletion.`);
     selected.add(id);
   };
   // A generator goes with its members, and a cascade that removes a generator's input removes the generator: until nothing more goes.
@@ -74,7 +77,7 @@ export function deleteCadSketchElements({ sketch, pointIds, entityIds, relationI
     cadSketchGeneratorDeletion(graph, { pointIds: points, entityIds: entities, relationIds: relations });
     for (const entity of graph.entities) if (!entities.has(entity.id) && cadSketchEntityPointIds(entity).some(id => points.has(id))) remove(entity.id, entities);
     for (const relation of graph.relations) if (!relations.has(relation.id) && (cadSketchRelationPointIds(graph, relation).some(id => points.has(id))
-        || cadSketchRelationEntityIds(relation).some(id => entities.has(id)))) remove(relation.id, relations);
+        || cadSketchRelationEntityIds(relation).some(id => entities.has(id)))) remove(relation.id, relations, relation.kind === 'generator' ? relation : undefined);
   }
   return { ...sketch, graph: parseCadSketchGraph({
     points: graph.points.filter(point => !points.has(point.id)),

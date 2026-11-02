@@ -116,6 +116,6 @@ export function parseCadSketchSolverReply(value: unknown, input: CadSketchSolveI
   if (!graph || (diagnostics.status !== 'success' && diagnostics.status !== 'converged') || diagnostics.degreesOfFreedom !== null && diagnostics.degreesOfFreedom < 0
     || diagnostics.conflictingIds.length || diagnostics.redundantIds.length || diagnostics.partiallyRedundantIds.length || diagnostics.issues.length
     || !definitionMatchesInput(input, diagnostics.definition)
-    || checkCadSketchGraph(graph, input.parameters).length) throw new Error('Sketch worker solution does not match its request or constraints.');
+    || checkCadSketchGraph(graph, input.parameters, 'solve').length) throw new Error('Sketch worker solution does not match its request or constraints.');
   return { id: value.id, kind: 'result', result: { kind: 'solved', graph, diagnostics } };
 }
