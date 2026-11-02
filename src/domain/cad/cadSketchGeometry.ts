@@ -296,6 +296,12 @@ export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: R
   const prepared = profiles.map(({ profile, geometry }) => {
     let path: AnalyticPath | null = null;
     let edges: Boundary[] | null = null;
+    // A generator's whole outline is the shape its kind already checked as a profile is checked here.
+    if ('generatorId' in profile && profile.generatorId !== undefined) {
+      if (geometry.kind === 'path') { path = analyticPath(geometry); edges = analyticPathToEntities(path, 'CAD'); }
+      edges ??= boundary(cadProfileToEntities(geometry));
+      return { profile, geometry, path, edges, bounds: contourBounds(edges) };
+    }
     switch (geometry.kind) {
       case 'circle': if (!cadSupportedLength(geometry.radius)) throw new CadError('invalid-profile', `Circle "${profile.name}" needs a positive radius.`); break;
       case 'rectangle': if (!cadSupportedLength(geometry.width) || !cadSupportedLength(geometry.height) || geometry.cornerRadius < 0 || geometry.cornerRadius > Math.min(geometry.width, geometry.height) / 2) throw new CadError('invalid-profile', `Rectangle "${profile.name}" has invalid dimensions or corner radius.`); break;

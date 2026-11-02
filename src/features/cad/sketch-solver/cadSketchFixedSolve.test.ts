@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import type { CadSketchFeature } from '@/domain/cad/cadDocument';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
-import type { CadSketchGraph, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
+import { checkCadSketchGraph, type CadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CAD_GEAR_PLUGIN } from '@/domain/cad/plugins/cadPlugins';
 import { solveFixedCadSketch } from './cadSketchFixedSolve';
 import { createCadSketchSolverClient, type CadSketchSolverTransport } from './cadSketchSolverClient';
@@ -41,17 +42,28 @@ describe('sketches with nothing free to move', () => {
     }
   });
 
-  it('leave free geometry, drags and failing relations to the native solver', () => {
+  it('leave free geometry and drags to the native solver', () => {
     const line = { points: [{ id: 'p', position: [1, 1] }, { id: 'q', position: [4, 1] }], entities: [{ id: 'l', kind: 'line', startPointId: 'p', endPointId: 'q', construction: false }] };
     const bore = generator('bore', { kind: 'circle', x: 0, y: 0, radius: 2 });
     expect(solveFixedCadSketch({ graph: graphOf([bore], line), parameters: {} })).toBeNull();
     const plate = graphOf([generator('plate', { kind: 'rectangle', x: 0, y: 0, width: 10, height: 10, cornerRadius: 0 })]);
     expect(solveFixedCadSketch({ graph: plate, parameters: {}, drag: { pointId: 'plate_p0', position: [1, 1] } })).toBeNull();
-    // A relation the generated geometry does not satisfy is a conflict, which only the native solver diagnoses.
-    const unequal = graphOf([bore, generator('pin', { kind: 'circle', x: 9, y: 0, radius: 2 })]);
-    const failing: CadSketchGraphRelation = { id: 'same', kind: 'equal-radius', curveIds: ['bore_c0', 'pin_c0'] };
-    const pin = unequal.entities.find(entity => entity.id === 'pin_c0')!;
-    expect(solveFixedCadSketch({ graph: { ...unequal, entities: unequal.entities.map(entity => entity === pin ? { ...pin, radius: 3 } : entity), relations: [...unequal.relations, failing] }, parameters: {} })).toBeNull();
+  });
+
+  it('leave a held relation that the generated geometry breaks to the native solver, which refuses it', async () => {
+    // Two generated circles whose inputs give radii 2 and 3, held equal: nothing is free to move, and the relation fails.
+    const graph = expandCadSketchGenerators({ points: [], entities: [], relations: [generator('bore', { kind: 'circle', x: 0, y: 0, radius: 2 }),
+      generator('pin', { kind: 'circle', x: 9, y: 0, radius: 'r' }), { id: 'same', kind: 'equal-radius', curveIds: ['bore_c0', 'pin_c0'] }] }, { r: 3 });
+    const input = { graph, parameters: { r: 3 }, analyseDefinition: true };
+    expect(checkCadSketchGraph(graph, input.parameters).map(issue => issue.source)).toContainEqual({ kind: 'relation', id: 'same' });
+    expect(solveFixedCadSketch(input)).toBeNull();
+    await expect(createCadSketchTestSolver().solve(input)).resolves.toMatchObject({ kind: 'rejected', reason: 'conflicting', diagnostics: { conflictingIds: ['same'] } });
+    // The client hands it to the worker, as it does any sketch the fast path leaves.
+    const started: unknown[] = [];
+    const client = createCadSketchSolverClient(() => { const transport: CadSketchSolverTransport = { onmessage: null, onerror: null, onmessageerror: null, postMessage() {}, terminate() {} }; started.push(transport); return transport; });
+    void client.solve(input).catch(() => undefined);
+    expect(started).toHaveLength(1);
+    client.dispose();
   });
 
   it('never start the solver worker, which a sketch with free geometry starts', async () => {

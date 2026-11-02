@@ -8,6 +8,7 @@ import { CAD_GEAR_V3_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugin
 import {
   cadSketchGeneratedComponents, cadSketchGeneratorOwner, expandCadSketchGenerators, regenerateCadSketchGenerators, storedCadSketchGraph
 } from '../sketch-generators/cadSketchGenerators';
+import { CAD_SKETCH_GENERATOR_KINDS } from '../sketch-generators/cadSketchGeneratorKinds';
 import { compileCadSketchEquations } from '../sketch-solver/compileCadSketchEquations';
 
 const graphOf = (relations: readonly unknown[], points: readonly unknown[] = [], entities: readonly unknown[] = []) => ({ points, entities, relations });
@@ -138,6 +139,33 @@ describe('sketch generators', () => {
       expect(resolve).toHaveBeenCalledTimes(2);
       expect(() => expandCadSketchGenerators(graphOf([gear('a')]), { teeth: 400 })).toThrow(/"a"/);
     } finally { resolve.mockRestore(); }
+  });
+
+  it('are evaluated once for each check of a graph, however many generators it holds', () => {
+    const hexagons = Array.from({ length: 200 }, (_, at): CadSketchGenerator => ({ id: `h${at}`, kind: 'generator', idPrefix: `g-h${at}`, construction: false,
+      geometry: { kind: 'regular-polygon', x: (at % 20) * 30, y: Math.floor(at / 20) * 30, radius: 'r', sides: 6, directionId: '@h' } }));
+    const graph = expandCadSketchGenerators(graphOf(hexagons), { r: 10 });
+    const evaluate = vi.spyOn(CAD_SKETCH_GENERATOR_KINDS['regular-polygon'], 'evaluate');
+    try {
+      // The graph its generators settled with those parameters needs no generation at all.
+      expect(checkCadSketchGraph(graph, { r: 10 })).toEqual([]);
+      expect(evaluate).not.toHaveBeenCalled();
+      // Another value regenerates nothing here, and the check reports every polygon its inputs no longer make, still evaluating each once.
+      evaluate.mockClear();
+      expect(checkCadSketchGraph(graph, { r: 11 })).toHaveLength(200);
+      expect(evaluate.mock.calls.length).toBeLessThanOrEqual(400);
+      // A copy that is not the settled graph is checked through one generation of all its generators.
+      const copy = parseCadSketchGraph(JSON.parse(JSON.stringify(graph)));
+      evaluate.mockClear();
+      expect(checkCadSketchGraph(copy, { r: 10 })).toEqual([]);
+      expect(evaluate.mock.calls.length).toBeLessThanOrEqual(200);
+      // A generator that cannot generate is reported on itself and on those after it, which read what it would make, as before.
+      evaluate.mockClear();
+      const refused = checkCadSketchGraph(graph, { r: -1 });
+      expect(refused).toHaveLength(200);
+      expect(refused.every(issue => issue.code === 'invalid-expression' && issue.message.includes('"h0"'))).toBe(true);
+      expect(evaluate.mock.calls.length).toBeLessThanOrEqual(2);
+    } finally { evaluate.mockRestore(); }
   });
 
   it('own their members: an edit of one is refused naming the generator, and other geometry is free', () => {

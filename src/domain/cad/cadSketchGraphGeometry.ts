@@ -3,10 +3,10 @@ import { evaluateCadScalar } from './cadExpression';
 import { cadAnalyticSegments, cadPathClosureTolerance, type ResolvedCadPathSegment } from './cadAnalyticSegments';
 import { checkCadSketchGraph, type CadSketchGraph, type CadSketchGraphEntity } from './cadSketchGraph';
 import { resolveCadSketchGraphJoints } from './cadSketchGraphJoints';
-import { createArcSegment, createCircleSegment, createLineSegment } from '@/domain/path-intel/segments';
+import { createArcSegment, createCircleSegment, createLineSegment, mergeBounds } from '@/domain/path-intel/segments';
 import { classifyPathSegmentIntersection, expandBounds, spatialCellSizeForSegments } from '@/domain/path-intel/intersections';
 import { SpatialHash } from '@/domain/path-intel/spatialIndex';
-import type { PathSegment, Point2 } from '@/domain/path-intel/types';
+import type { Bounds2, PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
 
 export interface CadSketchGraphSourceRef { readonly entityId: string; readonly reversed: boolean }
@@ -49,6 +49,38 @@ function checkCycleEncoding(path: readonly ResolvedCadPathSegment[]): void {
       throw new CadError('sketch-graph-precision', 'These edges no longer meet exactly at their joints. Move the geometry nearer the origin or redraw the joint.');
     }
   }
+}
+
+/**
+ * The generators among the prepared edges, for the crossing check. A generator's members draw outlines that its kind checked as a legacy
+ * profile is checked, closed and free of self-intersection, so they meet one another only at their own joints: only edges of different
+ * generators, or a generator's and a drawn edge, can cross. Each generator is found among the others by the bounds of everything it made,
+ * and only the edges of a generator that comes near another generator or a drawn edge are compared one by one. Null without generators.
+ */
+function generatedUnits(graph: CadSketchGraph, prepared: readonly Prepared[], tolerance: number) {
+  const prefixes = new Set<string>();
+  for (const relation of graph.relations) if (relation.kind === 'generator') prefixes.add(relation.idPrefix);
+  if (!prefixes.size) return null;
+  const units = new Map<Prepared, string>(), bounds = new Map<string, Bounds2>(), blocks: { readonly unit?: string; readonly bounds: Bounds2 }[] = [];
+  for (const item of prepared) {
+    const at = item.entity.id.indexOf('_'), prefix = at > 0 ? item.entity.id.slice(0, at) : undefined;
+    if (prefix === undefined || !prefixes.has(prefix)) { blocks.push({ bounds: item.segment.bounds }); continue; }
+    units.set(item, prefix);
+    const had = bounds.get(prefix);
+    bounds.set(prefix, had ? mergeBounds(had, item.segment.bounds) : item.segment.bounds);
+  }
+  for (const [unit, extent] of bounds) blocks.push({ unit, bounds: extent });
+  const spans = blocks.map(block => Math.max(block.bounds.maxX - block.bounds.minX, block.bounds.maxY - block.bounds.minY)).filter(span => span > 0).sort((a, b) => a - b);
+  const index = new SpatialHash<(typeof blocks)[number]>({ cellSize: Math.max(tolerance, spans[Math.floor(Math.max(0, spans.length - 1) * 0.1)] ?? 1) });
+  const near = new Set<string>();
+  for (const block of blocks) {
+    for (const other of index.queryBounds(expandBounds(block.bounds, tolerance))) {
+      if (block.unit !== undefined) near.add(block.unit);
+      if (other.unit !== undefined) near.add(other.unit);
+    }
+    index.insertBounds(block.bounds, block);
+  }
+  return { unitOf: (item: Prepared) => units.get(item), compared: (item: Prepared) => { const unit = units.get(item); return unit === undefined || near.has(unit); } };
 }
 
 /** Simple declared-joint cycles only. No endpoint healing, coordinate merging or implicit graph edits. */
@@ -120,10 +152,13 @@ export function compileCadSketchGraph(graph: CadSketchGraph, parameters: Readonl
   }
   const arrangement = new Set<string>();
   const broadTolerance = cadPathClosureTolerance(segments.flatMap(extentPoints));
-  const spatial = new SpatialHash<Prepared>({ cellSize: spatialCellSizeForSegments(segments, broadTolerance) });
-  for (const item of prepared) {
+  const generated = generatedUnits(graph, prepared, broadTolerance), compared = generated ? prepared.filter(item => generated.compared(item)) : prepared;
+  const spatial = new SpatialHash<Prepared>({ cellSize: spatialCellSizeForSegments(compared.map(item => item.segment), broadTolerance) });
+  for (const item of compared) {
+    const unit = generated?.unitOf(item);
     for (const other of spatial.queryBounds(expandBounds(item.segment.bounds, broadTolerance))) {
       if (item.entity.construction !== other.entity.construction) continue;
+      if (unit !== undefined && unit === generated?.unitOf(other)) continue;
       const epsilon = cadPathClosureTolerance([...extentPoints(item.segment), ...extentPoints(other.segment)]);
       const intersection = classifyPathSegmentIntersection(item.segment, other.segment, epsilon);
       if (intersection.kind === 'none') continue;

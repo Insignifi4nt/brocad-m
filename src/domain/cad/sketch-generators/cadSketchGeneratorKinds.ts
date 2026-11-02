@@ -30,6 +30,11 @@ export interface CadSketchGeneratorContext {
 export interface CadSketchGeneratorEvaluation {
   readonly key: string;
   readonly build: (id: (key: string) => string, construction: boolean) => CadSketchGeneratedGeometry;
+  /**
+   * The closed outline its edges draw, as the legacy profile shape it was checked as: closed, of positive area and free of
+   * self-intersection. Its region reads as that shape does.
+   */
+  readonly shape: () => ResolvedCadProfile;
 }
 export interface CadSketchGeneratorKind<G extends CadSketchGeneratorGeometry> {
   /** Sentence-case name of what it generates, as people and agents are told: a plugin's package name. */
@@ -186,7 +191,7 @@ function checkedShape(key: string, resolve: () => ResolvedCadProfile, name: stri
   return shape;
 }
 function shapeEvaluation(key: string, resolve: () => ResolvedCadProfile, name: string): CadSketchGeneratorEvaluation {
-  return { key, build: (id, construction) => {
+  return { key, shape: () => checkedShape(key, resolve, name), build: (id, construction) => {
     const output = new Output(id, construction);
     profileOutput(output, checkedShape(key, resolve, name));
     return output.result();
@@ -253,8 +258,9 @@ const regularPolygon: CadSketchGeneratorKind<Of<'regular-polygon'>> = {
       return [x + radius * Math.cos(turn), y + radius * Math.sin(turn)];
     });
     const key = `regular-polygon\u0000${JSON.stringify([x, y, radius, sides, angle])}`;
-    return { key, build: (id, construction) => {
-      checkedShape(key, () => ({ kind: 'polygon', points }), name);
+    const shape = () => checkedShape(key, () => ({ kind: 'polygon', points }), name);
+    return { key, shape, build: (id, construction) => {
+      shape();
       const output = new Output(id, construction), edges = polygonOutput(output, points);
       for (let index = 1; index < edges.length; index++) output.relation(`q${index}`, { kind: 'equal-length', lineIds: [edges[0], edges[index]] });
       return output.result();
