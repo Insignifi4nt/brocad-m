@@ -5,6 +5,7 @@ import { CadError } from '../cadError';
 import { createCadIssueList } from '../cadIssues';
 import { cadRefusalIssue } from '../cadRefusalIssues';
 import { cadRefusalAt } from '../cadRefusalSubjects';
+import { evaluateCadScalar } from '../cadExpression';
 import { createCadDocument, parseCadDocument } from '../cadSchema';
 
 const sketch: CadSketchFeature = { id: 'sketch1', name: 'Profile', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
@@ -56,8 +57,35 @@ describe('refusals in the CAD issue model', () => {
     expect(cadRefusalIssue(empty)?.subject).toMatchObject({ operation: 'send-sketch' });
     const section = cadRefusalAt(new CadError('empty-section', 'The plane misses the body.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
     expect(cadRefusalIssue(section)).toMatchObject({ namespace: 'cam', code: 'empty-section', subject: { operation: 'section', sourceId: 'body' } });
-    // A CAM step reports only CAM codes.
+    // A CAM step reports the codes it can raise, and only those.
     expect(cadRefusalIssue(cadRefusalAt(new CadError('invalid-reference', 'No.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' }))).toBeNull();
+    expect(cadRefusalIssue(cadRefusalAt(new CadError('missing-sketch', 'No.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' }))).toBeNull();
+    expect(cadRefusalIssue(cadRefusalAt(new CadError('missing-body', 'No.'), { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' }))).toBeNull();
+  });
+
+  it('gives a Section for CAM of an unavailable body, or with an offset its parameters cannot evaluate, as the step\'s issue with its own code', () => {
+    const offset = (() => { try { evaluateCadScalar('depth / 2', {}); } catch (error) { return error; } throw new Error('The offset evaluated.'); })();
+    const zero = (() => { try { evaluateCadScalar('depth / gap', { depth: 4, gap: 0 }); } catch (error) { return error; } throw new Error('The offset evaluated.'); })();
+    const body = new CadError('missing-body', 'Body box is unavailable or has already been consumed. Choose a current body from the feature tree.');
+    for (const error of [offset, zero, body]) {
+      const { code, message } = error as CadError;
+      expect(cadRefusalIssue(cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: 'box' }))).toEqual({ key: 'refusal', namespace: 'cam', code,
+        severity: 'error', state: 'failed', subject: { kind: 'cam-operation', operation: 'section', sourceId: 'box' }, message, causes: [], repairs: [], details: {} });
+    }
+    expect([offset, zero].map(error => (error as CadError).code)).toEqual(['unknown-parameter', 'division-by-zero']);
+  });
+
+  it('gives no issue for a CAM step\'s failures that are no problem of the step or its source', () => {
+    const subject = { kind: 'cam-operation', operation: 'section', sourceId: 'box' } as const;
+    const failures: unknown[] = [
+      CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', { kernelMessage: 'CompileError' }),
+      new CadError('unsupported-operation', 'Unsupported CAD worker operation.'),
+      new DOMException('The operation was aborted.', 'AbortError'),
+      new Error('CAD model has been disposed.')
+    ];
+    for (const failure of failures) expect(cadRefusalIssue(cadRefusalAt(failure, subject)), String(failure)).toBeNull();
+    // A malformed request is refused before the step names its source, and read on its own it is no feature's refusal either.
+    expect(cadRefusalIssue(new CadError('invalid-section', 'Choose a body, plane and offset.'))).toBeNull();
   });
 
   it('leaves to their own producers refusals that are no problem of a feature or a CAM step', () => {

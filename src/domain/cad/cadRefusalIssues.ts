@@ -8,17 +8,26 @@ export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf;
 
 /**
  * The issue of refusal `error`, the one adapter for refusals raised outside a build:
- * - a CAM step's refusal (sending a sketch to CAM, a Section for CAM), about the operation and its source, as that step recorded it;
+ * - a CAM step's refusal (sending a sketch to CAM, a Section for CAM), about the operation and its source, as that step recorded it, with
+ *   any code the step can raise (`CAD_CAM_STEP_CODES`);
  * - the document check's refusal with a code a feature can be refused with, about the feature or input slot it was checking, or the
  *   document when it was checking none, with the facts its code carries.
  * Its message is the refusal's own. It has no repairs, since a refused edit was never applied and leaves nothing to repair, and no causes.
- * Null for any other refusal, which its own producer reports (a sketch refusal) or which is no problem of the part (a stale version).
+ * Null for any other refusal, which its own producer reports (a sketch refusal) or which is no problem of the part (a stale version). A CAM
+ * step's other failures are no problem of the step or its source either, so they give null too:
+ * - `kernel-unavailable`: the kernel could not be loaded;
+ * - a cancelled request, a stale version or workflow, or a kernel result that does not match the request, which are no `CadError`;
+ * - a request the controller refuses before the step names its source, such as a malformed section request;
+ * - a disposed model or kernel client, or a full request queue, which are no `CadError` either.
  */
 export function cadRefusalIssue(error: unknown, key = 'refusal'): CadRefusalIssue | null {
   if (!(error instanceof CadError)) return null;
   const { code, message } = error, subject = cadRefusalSubject(error);
   const common = { key, severity: 'error', state: 'failed', message, causes: [], repairs: [] } as const;
-  if (subject?.kind === 'cam-operation') return isCadCamCode(code) ? createCadIssue({ ...common, namespace: 'cam', code, subject, details: {} }) : null;
+  if (subject?.kind === 'cam-operation') {
+    if (subject.operation === 'section') return isCadCamCode('section', code) ? createCadIssue({ ...common, namespace: 'cam', code, subject: { ...subject, operation: 'section' }, details: {} }) : null;
+    return isCadCamCode('send-sketch', code) ? createCadIssue({ ...common, namespace: 'cam', code, subject: { ...subject, operation: 'send-sketch' }, details: {} }) : null;
+  }
   if (!isCadRefusalCode(code) || code === 'rebuild-stopped') return null;
   const at = subject ?? { kind: 'document' } as const;
   /** The facts code `fact` carries; raising a refusal checks them, so a fact code without them is a programming error. */

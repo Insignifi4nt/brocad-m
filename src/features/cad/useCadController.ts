@@ -741,10 +741,11 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     signal?.throwIfAborted();
     const section = { ...parseCadSectionRequest(request) };
     const document = session.getSnapshot().document;
-    const result = await (await getKernel()).section(document, section, signal)
-      .catch((error: unknown) => { throw intent === 'section' ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }) : error; });
+    const refused = (error: unknown) => intent === 'section' ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }) : error;
+    const result = await (await getKernel()).section(document, section, signal).catch((error: unknown) => { throw refused(error); });
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
-    return matchingSectionResult(result, section, document.parameters);
+    // Reading the result evaluates the offset again, so a refusal there is the step's too.
+    try { return matchingSectionResult(result, section, document.parameters); } catch (error) { throw refused(error); }
   }
   type CamSource = { kind: 'sketch'; sketchId: string } | { kind: 'section'; section: CadSectionRequest };
   async function prepareHandoffGeometry(source: CamSource, document: CadDocument, signal?: AbortSignal) {

@@ -132,9 +132,37 @@ export type CadSketchGraphCode = 'invalid-expression' | 'invalid-coordinate' | '
 /** Every sketch code: its refusals, the items they and the analysis list, and the warning of an accepted edit that shrank mirrored curves. */
 export type CadSketchCode = CadSketchRefusalCode | CadSketchRelationCode | CadSketchGraphCode | 'mirror-shrank';
 
-/** The codes of sending a sketch to CAM and of a Section for CAM. */
-export const CAD_CAM_CODES = Object.freeze(['missing-sketch', 'suppressed-sketch', 'empty-sketch', 'cam-geometry', 'invalid-section', 'empty-section',
-  'degenerate-section', 'tangent-section', 'unsupported-section-curve', 'section-failed', 'kernel-operation-failed'] as const);
-export type CadCamCode = (typeof CAD_CAM_CODES)[number];
-const CAM_CODES: ReadonlySet<unknown> = new Set(CAD_CAM_CODES);
-export function isCadCamCode(code: unknown): code is CadCamCode { return CAM_CODES.has(code); }
+/**
+ * Every refusal each CAM step can raise, which keeps its own code. `cadCamDiagnostics.test.ts` holds each list to exactly the codes the step
+ * reaches, and to none that carries facts.
+ * - `send-sketch`: the sketch it names is missing, suppressed or empty; its geometry, evaluated again from the data its own check accepted,
+ *   or its parameters refuse it; or the path planner cannot close its contours without changing them.
+ * - `section`: the request, the body it names, its offset expression, a model with diagnostics, the plane's cut of the body, or contours
+ *   the path planner cannot close; a kernel failure without a code of its own is `kernel-operation-failed`.
+ * A step's other failures are no problem of the step or its source and give no issue (`cadRefusalIssue`).
+ */
+export const CAD_CAM_STEP_CODES = Object.freeze({
+  'send-sketch': Object.freeze(['already-driven-sketch-radius', 'already-driven-sketch-tangent', 'cam-geometry', 'division-by-zero', 'duplicate-sketch-id',
+    'empty-sketch', 'expression-limit', 'fixed-sketch-relation', 'invalid-corner-geometry', 'invalid-corner-topology', 'invalid-distance',
+    'invalid-expression', 'invalid-gear', 'invalid-plugin', 'invalid-plugin-inputs', 'invalid-plugin-rules', 'invalid-profile', 'invalid-profile-role',
+    'invalid-radius', 'invalid-region-selection', 'invalid-scalar', 'invalid-sketch-angle', 'invalid-sketch-angle-ray', 'invalid-sketch-cell-id',
+    'invalid-sketch-cells', 'invalid-sketch-cycle', 'invalid-sketch-graph-geometry', 'invalid-sketch-line-pair', 'invalid-sketch-midpoint',
+    'invalid-sketch-operand', 'invalid-sketch-pattern', 'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve',
+    'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair', 'invalid-sketch-reference',
+    'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry', 'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'missing-sketch',
+    'missing-sketch-entity', 'missing-sketch-point', 'open-profile', 'owned-sketch-pattern', 'plugin-limit', 'plugin-size', 'profile-intersection',
+    'self-intersection', 'sketch-graph-precision', 'stale-sketch-region', 'suppressed-sketch', 'unknown-parameter', 'unlowerable-sketch-operand',
+    'unsupported-sketch-cells', 'unsupported-sketch-operand'] as const),
+  section: Object.freeze(['cam-geometry', 'degenerate-section', 'division-by-zero', 'empty-section', 'expression-limit', 'invalid-expression',
+    'invalid-plane', 'invalid-scalar', 'invalid-section', 'kernel-operation-failed', 'missing-body', 'open-section', 'section-failed', 'tangent-section',
+    'unknown-parameter', 'unsupported-section-curve'] as const)
+});
+/** The CAM steps: sending a sketch to CAM, and a Section for CAM. */
+export type CadCamOperation = keyof typeof CAD_CAM_STEP_CODES;
+export type CadCamCodeOf<O extends CadCamOperation> = (typeof CAD_CAM_STEP_CODES)[O][number];
+export type CadCamCode = CadCamCodeOf<CadCamOperation>;
+const CAM_CODES: { readonly [O in CadCamOperation]: ReadonlySet<unknown> } = {
+  'send-sketch': new Set(CAD_CAM_STEP_CODES['send-sketch']), section: new Set(CAD_CAM_STEP_CODES.section)
+};
+/** Whether CAM step `operation` can raise `code`. */
+export function isCadCamCode<O extends CadCamOperation>(operation: O, code: unknown): code is CadCamCodeOf<O> { return CAM_CODES[operation].has(code); }

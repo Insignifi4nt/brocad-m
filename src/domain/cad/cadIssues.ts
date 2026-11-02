@@ -2,7 +2,7 @@ import type { CadBodyKey, CadBodyUntrackedReason } from './cadBodies';
 import type { CadDocument, CadKernelFailureDetails } from './cadDocument';
 import { CadError } from './cadError';
 import { cadFeatureDependencies } from './cadFeatureInputs';
-import type { CadCamCode, CadRefusalCode, CadRefusalFactCode, CadRefusalFacts, CadSketchGraphCode, CadSketchRefusalCode, CadSketchRelationCode } from './cadIssueCodes';
+import type { CadCamCodeOf, CadCamOperation, CadRefusalCode, CadRefusalFactCode, CadRefusalFacts, CadSketchGraphCode, CadSketchRefusalCode, CadSketchRelationCode } from './cadIssueCodes';
 import type { CadEdit } from './cadOperations';
 import { cadFeatureActive } from './features/cadFeatureActivity';
 
@@ -42,7 +42,7 @@ type SubjectOf<K extends CadIssueSubject['kind']> = Extract<CadIssueSubject, { r
 
 /** The cause a sketch refusal names beyond its code, when one is known. */
 export type CadSketchRefusalCause = 'mirror-collapse' | 'solver-unavailable';
-export type CadCamOperation = 'section' | 'send-sketch';
+export type { CadCamOperation };
 
 /** An issue of namespace `N` with code `C`, whose details are `D`, about a subject `S`, in state `T`. */
 interface CadIssueOf<N extends string, C extends string, D, S extends CadIssueSubject, T extends CadIssueState> {
@@ -115,7 +115,9 @@ export type CadBodyIssueOf =
   /** How many body issues, from the subject's feature on, did not fit in the list. */
   | CadIssueOf<'body', 'more-body-issues', { readonly omittedCount: number }, BodySubject, 'failed'>;
 
-export type CadCamIssueOf = CadIssueOf<'cam', CadCamCode, CadNoIssueDetails, SubjectOf<'cam-operation'>, 'failed'>;
+/** A CAM step refused: its operation and the source it was given, and a code that step can raise (`CAD_CAM_STEP_CODES`). */
+export type CadCamIssueOf = { readonly [O in CadCamOperation]: CadIssueOf<'cam', CadCamCodeOf<O>, CadNoIssueDetails,
+  { readonly kind: 'cam-operation'; readonly operation: O; readonly sourceId: string }, 'failed'> }[CadCamOperation];
 
 /**
  * An existing action that resolves an issue, prepared against document version `preparedAt`:

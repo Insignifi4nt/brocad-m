@@ -1899,6 +1899,10 @@ describe('CAD controller asynchronous guards', () => {
     { code: 'empty-section', exported: null, refuse: () => new CadError('empty-section', 'The section plane misses the body.') },
     { code: 'kernel-operation-failed', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.',
       { kernelMessage: 'BRepAlgoAPI_Section failed' }) },
+    // The body the request names was consumed, and the offset names no parameter: refusals of the step as the worker replies them.
+    { code: 'missing-body', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('missing-body',
+      'Body pad is unavailable or has already been consumed. Choose a current body from the feature tree.', {}) },
+    { code: 'unknown-parameter', exported: { namespace: 'feature', subject: { kind: 'document' } }, refuse: () => CadError.received('unknown-parameter', 'Unknown parameter "depth".', {}) },
   ])('gives the Section for CAM dialog and the agent the same $code issue, and a DXF export the same refusal through either', async ({ code, exported: exportedIssue, refuse }) => {
     const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
     const tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
@@ -1923,6 +1927,16 @@ describe('CAD controller asynchronous guards', () => {
     if (!exportIssue) expect(exportReply).not.toHaveProperty('error.details.issue');
     expect(kernel.section).toHaveBeenCalledTimes(4);
     expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
+  });
+  it('reads the section back as part of the step, so an offset naming no parameter is the step\'s refusal there too', async () => {
+    const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 'depth / 2' } as const;
+    kernel.section.mockResolvedValue(section);
+    let shown: unknown;
+    await act(async () => { shown = await h.cad().inspectSection(request, version, 'section').then(() => undefined, (error: unknown) => error); });
+    expect(cadRefusalIssue(shown)).toMatchObject({ namespace: 'cam', code: 'unknown-parameter', message: 'Unknown parameter "depth".',
+      subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
+    const reply = await cadSiteTools(h.cad).find(entry => entry.name === 'cad_inspect_section')!.execute({ expectedVersion: version, section: request });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'unknown-parameter', details: { issue: { namespace: 'cam', code: 'unknown-parameter' } } } });
   });
   it('hands a reviewed final-solid section through the ordinary saved CAD and portable CAM operations', async () => {
     const h = await harness(true, true); kernel.section.mockResolvedValue(section);
