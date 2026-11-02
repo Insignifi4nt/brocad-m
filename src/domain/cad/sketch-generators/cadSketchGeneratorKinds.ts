@@ -3,7 +3,7 @@ import { CadError } from '../cadError';
 import { evaluateCadScalar } from '../cadExpression';
 import { cadOrderedCurveEntities, type ResolvedCadPathSegment } from '../cadAnalyticSegments';
 import type { CadSketchGeneratorGeometry, CadSketchGraphEntity, CadSketchGraphPoint, CadSketchGraphRelation } from '../cadSketchGraph';
-import { resolveCadProfile, validateCadSketchGeometry, type ResolvedCadProfile } from '../cadSketchGeometry';
+import { checkCadSketchGeneratorShape, resolveCadProfile, type ResolvedCadProfile } from '../cadSketchGeometry';
 import { resolveCadPluginOutline, type CadPluginOutlineParts, type CadPluginProfile } from '../plugins/cadPlugins';
 import type { CadSketchOperandSignature, CadSketchRelationIntent } from '../sketch-relations/cadSketchRelationTypes';
 import { CAD_PRECISION, cadSupportedLength } from '@/domain/precision/cadPrecision';
@@ -95,12 +95,6 @@ class Output {
     this.relation(key, { kind: 'tangent-joint', endpoints: [{ entityId: lineId, pointId }, { entityId: arcId, pointId }] });
   }
   result(): CadSketchGeneratedGeometry { return { points: this.points, entities: this.entities, relations: this.relations }; }
-}
-
-/** The legacy checks of one profile: sizes, closure, zero area and self-intersection, refused with the reasons a profile gives. */
-function validateProfile(geometry: ResolvedCadProfile, name: string): void {
-  validateCadSketchGeometry({ id: 'generator', name, kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
-    profiles: [{ id: 'generator', name, construction: false, geometry: geometry as CadProfile }] }, {});
 }
 
 function circleOutput(output: Output, center: readonly [number, number], radius: number): void {
@@ -312,14 +306,20 @@ function checked(key: string, resolve: () => Checked, name: string): Checked {
   const kept = shapes.get(key);
   if (kept) { shapes.delete(key); shapes.set(key, kept); return kept; }
   const result = resolve();
-  validateProfile(result.shape, name);
+  checkCadSketchGeneratorShape(result.shape, name);
   shapes.set(key, result);
   if (shapes.size > SHAPE_LIMIT) shapes.delete(shapes.keys().next().value!);
   return result;
 }
+/** An evaluation's shape, found or checked when first read and then the same shape for its outline and its members. */
+function checkedOnce(key: string, resolve: () => Checked, name: string): () => Checked {
+  let kept: Checked | undefined;
+  return () => kept ??= checked(key, resolve, name);
+}
 function shapeEvaluation(key: string, resolve: () => Checked, name: string): CadSketchGeneratorEvaluation {
-  return { key, shape: () => checked(key, resolve, name).shape, build: (id, construction) => {
-    const output = new Output(id, construction), { shape, parts } = checked(key, resolve, name);
+  const get = checkedOnce(key, resolve, name);
+  return { key, shape: () => get().shape, build: (id, construction) => {
+    const output = new Output(id, construction), { shape, parts } = get();
     if (parts) partsOutput(output, shape, parts); else profileOutput(output, shape);
     return output.result();
   } };
@@ -327,9 +327,10 @@ function shapeEvaluation(key: string, resolve: () => Checked, name: string): Cad
 function profileEvaluation(geometry: ResolvedCadProfile, name: string, ids?: readonly number[]): CadSketchGeneratorEvaluation {
   const key = JSON.stringify(geometry), resolve = () => ({ shape: geometry });
   if (!ids) return shapeEvaluation(key, resolve, name);
-  return { key: `${key}\u0000${JSON.stringify(ids)}`, shape: () => checked(key, resolve, name).shape, build: (id, construction) => {
+  const get = checkedOnce(key, resolve, name);
+  return { key: `${key}\u0000${JSON.stringify(ids)}`, shape: () => get().shape, build: (id, construction) => {
     const output = new Output(id, construction);
-    profileOutput(output, checked(key, resolve, name).shape, ids);
+    profileOutput(output, get().shape, ids);
     return output.result();
   } };
 }
@@ -408,7 +409,7 @@ const regularPolygon: CadSketchGeneratorKind<Of<'regular-polygon'>> = {
       return [x + radius * Math.cos(turn), y + radius * Math.sin(turn)];
     });
     const key = `regular-polygon\u0000${JSON.stringify([x, y, radius, sides, angle])}`;
-    const shape = () => checked(key, () => ({ shape: { kind: 'polygon', points } }), name).shape;
+    const get = checkedOnce(key, () => ({ shape: { kind: 'polygon', points } }), name), shape = () => get().shape;
     return { key, shape, build: (id, construction) => {
       shape();
       const output = new Output(id, construction), edges = polygonOutput(output, points);

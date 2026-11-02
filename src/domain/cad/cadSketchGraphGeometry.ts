@@ -8,6 +8,7 @@ import { classifyPathSegmentIntersection, expandBounds, spatialCellSizeForSegmen
 import { SpatialHash } from '@/domain/path-intel/spatialIndex';
 import type { Bounds2, PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
+import { cadDevelopmentChecks } from './cadDevelopmentChecks';
 
 export interface CadSketchGraphSourceRef { readonly entityId: string; readonly reversed: boolean }
 export interface CadSketchGraphCycle {
@@ -176,6 +177,16 @@ export function compileCadSketchGraph(graph: CadSketchGraph, parameters: Readonl
     .sort((a, b) => a.sourceRefs[0].entityId < b.sourceRefs[0].entityId ? -1 : a.sourceRefs[0].entityId > b.sourceRefs[0].entityId ? 1 : 0),
     openEntityIds: open.sort(), branchedEntityIds: branched.sort(), arrangementEntityIds: [...arrangement].sort() };
   for (const cycle of result.cycles) checkCycleEncoding(cycle.path);
-  deepFreezeCadData(result);
-  return result;
+  return cadDevelopmentChecks() ? deepFreezeCadData(result) : freezeContainers(result);
+}
+
+/**
+ * The result, its lists and its cycles, frozen: a consumer cannot sort, fill or reassign them in place. Development checks freeze every
+ * segment and point as well; production leaves those to the readonly types, as freezing each one costs more than compiling it.
+ */
+function freezeContainers(result: CadSketchGraphGeometry): CadSketchGraphGeometry {
+  Object.freeze(result.segments); Object.freeze(result.openEntityIds); Object.freeze(result.branchedEntityIds); Object.freeze(result.arrangementEntityIds);
+  for (const cycle of result.cycles) { Object.freeze(cycle.sourceRefs); Object.freeze(cycle.path); Object.freeze(cycle); }
+  Object.freeze(result.cycles);
+  return Object.freeze(result);
 }

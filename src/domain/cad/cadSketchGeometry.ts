@@ -300,12 +300,37 @@ export function cadProfileContainsPoint(profile: ResolvedCadProfile, point: DxfP
   }
 }
 
+/** A profile's exact curves, its edges and their bounds, as one resolution prepares them. */
+interface PreparedOutline { readonly geometry: ResolvedCadProfile; readonly path: AnalyticPath | null; readonly edges: readonly Boundary[]; readonly bounds: BoundaryBounds }
+// The preparation of each generator shape that passed the legacy checks, kept with the shape its kind made and checked.
+const checkedShapes = new WeakMap<ResolvedCadProfile, PreparedOutline>();
+
+/**
+ * The legacy checks of a generator's shape as one profile: sizes, closure, zero area and self-intersection, refused with the reasons a
+ * profile gives. The shape's preparation is kept with it, so a sketch contour that is the generator's whole outline reads it again.
+ */
+export function checkCadSketchGeneratorShape(shape: ResolvedCadProfile, name: string): void {
+  let kept: PreparedOutline | undefined;
+  const sketch: CadSketchFeature = { id: 'generator', name, kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: [{ id: 'generator', name, construction: false, geometry: shape as CadProfile }] };
+  selectCadSketchRegions(contoursOf(sketch, {}, prepared => { kept = prepared; }));
+  if (kept) checkedShapes.set(shape, kept);
+}
+
 /** Infer regions from exact analytic contours, independent of authored orientation or CAM. */
 export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: Readonly<Record<string, number>>): readonly CadResolvedSketchContour[] {
-  const profiles = compileCadSketchGeometry(sketch, parameters).profiles.map(profile => ({ profile, geometry: resolveCadProfile(profile.geometry, parameters) }));
-  // Preparation belongs to this resolution only: parameter edits always rebuild
-  // the exact curves, but containment comparisons reuse them within this call.
-  const prepared = profiles.map(({ profile, geometry }) => {
+  return contoursOf(sketch, parameters);
+}
+
+function contoursOf(sketch: CadSketchFeature, parameters: Readonly<Record<string, number>>, keep?: (prepared: PreparedOutline) => void): readonly CadResolvedSketchContour[] {
+  const profiles = compileCadSketchGeometry(sketch, parameters).profiles.map(profile => {
+    const kept = 'generatorId' in profile && profile.generatorId !== undefined ? checkedShapes.get(profile.geometry as ResolvedCadProfile) : undefined;
+    return { profile, kept, geometry: kept?.geometry ?? resolveCadProfile(profile.geometry, parameters) };
+  });
+  // Preparation belongs to this resolution only: parameter edits always rebuild the exact curves, but containment comparisons reuse them
+  // within this call. A generator's whole outline is the shape its kind checked, and reads the preparation that check kept.
+  const prepared = profiles.map(({ profile, geometry, kept }) => {
+    if (kept) return { profile, ...kept };
     let path: AnalyticPath | null = null;
     let edges: Boundary[] | null = null;
     // A generator's whole outline is the shape its kind already checked as a profile is checked here.
@@ -354,7 +379,9 @@ export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: R
       default: { const exhaustive: never = geometry; throw exhaustive; }
     }
     edges ??= boundary(cadProfileToEntities(geometry));
-    return { profile, geometry, path, edges, bounds: contourBounds(edges) };
+    const outline: PreparedOutline = { geometry, path, edges, bounds: contourBounds(edges) };
+    keep?.(outline);
+    return { profile, ...outline };
   });
   const contours = prepared.filter(item => !item.profile.construction);
   // An edge's bounds lie inside its contour's, so only contours whose bounds meet another's have edges in the pairs below, in the same order.

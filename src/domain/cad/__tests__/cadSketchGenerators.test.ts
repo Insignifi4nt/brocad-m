@@ -4,7 +4,10 @@ import { cadSketchFixedComponents } from '../cadSketchFixedComponents';
 import { cadSketchOwnedGeometryLockReason } from '../cadSketchOwnedGeometry';
 import { mapCadSketchGraphScalars } from '../features/cadFeatureScalarMaps';
 import * as plugins from '../plugins/cadPlugins';
-import { CAD_GEAR_V3_PLUGIN, CAD_STAR_PLUGIN, createCadPluginProfile, type CadPluginPackage } from '../plugins/cadPlugins';
+import { CAD_GEAR_PLUGIN, CAD_GEAR_V3_PLUGIN, CAD_STAR_PLUGIN, createCadPluginProfile, type CadPluginPackage } from '../plugins/cadPlugins';
+import * as analyticSegments from '../cadAnalyticSegments';
+import type { CadSketchFeature } from '../cadDocument';
+import { resolveCadSketchContours } from '../cadSketchGeometry';
 import {
   cadSketchGeneratedComponents, cadSketchGeneratorOwner, expandCadSketchGenerators, regenerateCadSketchGenerators, storedCadSketchGraph
 } from '../sketch-generators/cadSketchGenerators';
@@ -247,6 +250,30 @@ describe('sketch generators', () => {
       expect(compileCadSketchGeometry(sketch, document.parameters).profiles.map(profile => profile.generatorId).sort()).toEqual(hexagons.map(hexagon => hexagon.id).sort());
       expect(evaluate).not.toHaveBeenCalled();
     } finally { evaluate.mockRestore(); }
+  });
+
+  it('prepare each outline once, when its kind checks the shape, and the sketch contours read that preparation', () => {
+    const gears = Array.from({ length: 3 }, (_, at): CadSketchGenerator => {
+      const gear = createCadPluginProfile(CAD_GEAR_PLUGIN);
+      return { id: `gear${at}`, kind: 'generator', idPrefix: `g-gear${at}`, construction: false, geometry: { ...gear, inputs: { ...gear.inputs, x: at * 100 } } };
+    });
+    const document = parseCadDocument({ ...createCadDocument('Gears', 'gears'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch',
+      name: 'Sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: graphOf(gears) }] }), sketch = document.features[0] as CadSketchFeature;
+    const first = resolveCadSketchContours(sketch, document.parameters), prepare = vi.spyOn(analyticSegments, 'cadAnalyticSegments');
+    try {
+      const again = resolveCadSketchContours(sketch, document.parameters);
+      expect(again.map(contour => contour.profile.generatorId)).toEqual(['gear0', 'gear1', 'gear2']);
+      expect(prepare).not.toHaveBeenCalled();
+      again.forEach((contour, at) => expect(contour.geometry).toBe(first[at].geometry));
+    } finally { prepare.mockRestore(); }
+  });
+
+  it('keep the shape each evaluation checked for its outline and its members, after many other shapes were checked', () => {
+    const kind = CAD_SKETCH_GENERATOR_KINDS['regular-polygon'], context = { parameters: {}, line: () => ({ start: { x: 0, y: 0 }, end: { x: 1, y: 0 } }) };
+    const hexagon = (x: number) => ({ kind: 'regular-polygon' as const, x, y: 0, radius: 10, sides: 6, directionId: '@h' });
+    const evaluation = kind.evaluate(hexagon(0), context, 'Hexagon'), shape = evaluation.shape();
+    for (let at = 1; at <= 300; at++) kind.evaluate(hexagon(at * 30), context, 'Other').shape();
+    expect(evaluation.shape()).toBe(shape);
   });
 
   it('own their members: an edit of one is refused naming the generator, and other geometry is free', () => {
