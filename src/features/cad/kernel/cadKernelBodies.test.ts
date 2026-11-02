@@ -151,7 +151,8 @@ function inEveryOrder(features: readonly CadFeature[]): Bodies[] {
 /**
  * Checks every part key the builds of `inEveryOrder` list, or formed from one by changing the indices of its split steps, against what
  * the builds show: missing when no build has it as a piece, resolved when every build has it as the same solid, and otherwise ambiguous
- * among exactly the solids it is a piece as in some build, or among more only when they share a provenance group with one of them.
+ * among exactly the solids it is a piece as in some build, or among more only when they are the pieces of a provenance group holding the
+ * key, or holding a key some build has as a piece that is one of those solids.
  */
 function exactInEveryOrder(results: readonly Bodies[], label: string): void {
   const wholes = new Set<string>(results.flatMap(result => result.bodies.map(body => body.key)));
@@ -170,7 +171,10 @@ function exactInEveryOrder(results: readonly Bodies[], label: string): void {
       if (truth.length === 1 && named.every(shape => shape !== undefined)) return expect(resolution, `${where} is the same piece in every order`).toMatchObject({ status: 'resolved', part: key });
       expect(resolution.status, `${where} names other solids in other orders`).toBe('ambiguous');
       if (resolution.status !== 'ambiguous') return;
-      const found = distinct(shapesFor(result, resolution)), grouped = resolution.body.ambiguous?.flat().filter(part => resolution.body.pieces?.includes(part)) ?? [];
+      const reached = new Set([key, ...results.flatMap(other => other.bodies.flatMap(body =>
+        (body.pieces ?? []).filter((_, solid) => truth.some(shape => sameShape(shape, other.shapes.get(body.key)!.get(solid)!)))))]);
+      const found = distinct(shapesFor(result, resolution));
+      const grouped = resolution.body.ambiguous?.filter(group => group.some(part => reached.has(part))).flat().filter(part => resolution.body.pieces?.includes(part)) ?? [];
       expect(within(truth, found), `${where} leaves out a solid it names in some order`).toBe(true);
       const extra = found.filter(shape => !truth.some(other => sameShape(shape, other)));
       expect(within(extra, shapesFor(result, { status: 'ambiguous', body: resolution.body, candidates: grouped })), `${where} adds a solid it names in no order`).toBe(true);
@@ -356,7 +360,7 @@ describe('kernel body parts are inherited only when continuity is certain', () =
       expect(model.result.meshes[0].solidCount).toBe(2);
       expect([pieceAt(model, 62), pieceAt(model, 30)]).toEqual(['bridge/split(0)', 'bridge/split(1)']);
       expect(model.result.bodies?.[0].ambiguous).toBeUndefined();
-      expect(model.result.bodyIssues).toEqual([expect.objectContaining({ code: 'lost-body-parts', featureId: 'bridge', body: 'box', pieces: ['box/split(1)', 'box/split(0)'] })]);
+      expect(model.result.bodyIssues).toEqual([expect.objectContaining({ code: 'lost-body-parts', featureId: 'bridge', body: 'box', pieces: ['box/split(0)', 'box/split(1)'] })]);
       expect([resolve(model, 'box/split(0)'), resolve(model, 'box/split(1)')]).toEqual([{ status: 'missing' }, { status: 'missing' }]);
     });
   });
@@ -507,6 +511,28 @@ describe('kernel body parts are inherited only when continuity is certain', () =
     for (const result of results) expect(resolveIn(result, 'box/split(0)/split(0)')).toEqual({ status: 'missing' });
     exactInEveryOrder(results, 'island');
   }, 240_000);
+
+  it('reports the same lost keys whichever order each result lists its solids in, keys this build never gave among them', () => {
+    // The box joined to the island is slotted at x = 18, then at x = 8 and x = 30 at once, which splits both of the box's pieces, and a
+    // bridge at x = 5–15 merges the two pieces at x = 0–18. The island may come before both of the box's pieces, which gives the keys under
+    // box/split(2) the merged pieces in that order; after the bridge they name no piece in any order.
+    const features = [...box, sketch('island_sketch', rect(50, 0, 10, 20)), pad('island', 'island_sketch', 10, 'join', 'box'), ...slot('split', 18, 'island'),
+      sketches('more_sketch', [rect(8, -5, 2, 30), rect(30, -5, 2, 30)]), pad('more', 'more_sketch', 10, 'cut', 'split'),
+      sketch('bridge_sketch', rect(5, 5, 10, 10)), pad('bridge', 'bridge_sketch', 10, 'join', 'more')];
+    const lost = ['box/split(2)/split(0)', 'box/split(2)/split(1)'], results = multiSolidResults(features);
+    expect(results).toBe(6);
+    // Before the bridge, each of them names a piece at x = 0–18 in some order.
+    for (const order of [inOrder, reversed]) {
+      const before = reorderingSolids((result, solids) => result ? inOrder(solids) : order(solids), () => built(features.slice(0, -2), bodiesOf));
+      for (const key of lost) expect(resolveIn(before, key).status, key).toBe('ambiguous');
+    }
+    for (let reversals = 0; reversals < 2 ** results; reversals++) {
+      const reordered = reorderingSolids((result, solids) => reversals & 1 << result ? reversed(solids) : inOrder(solids), () => built(features, bodiesOf));
+      const label = `results reversed ${reversals.toString(2).padStart(results, '0')}`;
+      expect(reordered.issues.filter(issue => issue.code === 'lost-body-parts'), label).toEqual([expect.objectContaining({ featureId: 'bridge', body: 'box', pieces: lost })]);
+      for (const key of lost) expect(resolveIn(reordered, key), `${label}: ${key}`).toEqual({ status: 'missing' });
+    }
+  }, 120_000);
 
   it('substitutes a mirror image\'s split index only as some order of its source\'s solids gives it', () => {
     // The box split at x = 18 and mirrored across XZ is a body of two solids in either order. Slots at x = 30 and x = 24 split the image's

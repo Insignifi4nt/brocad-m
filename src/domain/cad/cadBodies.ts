@@ -122,13 +122,18 @@ export interface CadBodyOrder {
  * `MAX_CAD_BODY_ORDER_WORK`, the order is recorded without `by`, so each of its pieces may take any of its indices, a stated superset.
  */
 export const MAX_CAD_BODY_SHARED_SOLIDS = 10;
-/** The most work finding an order's places may take, in steps over its shared solids and its pieces. */
+/**
+ * The most work finding an order's places may take, in steps over its shared solids and its pieces, and the most reading of keys finding
+ * the keys one feature leaves lost. Past either, the order is recorded without `by`, or the body's parts are untracked.
+ */
 export const MAX_CAD_BODY_ORDER_WORK = 2 ** 22;
 
 /**
  * The most distinct part keys a body tracks: its pieces, the keys its groups keep and the keys its orders number, together. Past it the
  * body's parts are untracked from then on, never a rejected build. A group keeps every former member's key while a solid descends from it,
- * so each feature that splits or removes an ambiguous piece adds keys, however few solids are left.
+ * so each feature that splits or removes an ambiguous piece adds keys, however few solids are left. It also bounds the keys one feature
+ * leaves lost, which nested reordered splits multiply: past it the body's parts are untracked, since a shorter list would depend on the
+ * kernel order.
  */
 export const MAX_CAD_BODY_LIST = 4096;
 
@@ -230,8 +235,9 @@ export function cadBodyFeatureId(state: Pick<CadBodyState, 'createdBy' | 'modifi
  *   resolve as ambiguous. Each ambiguous key is listed by the issue of the feature that made it ambiguous: a later key that is ambiguous
  *   only because it descends from one extends that issue, so the same uncertainty is reported once, until the issue lists
  *   `MAX_CAD_BODY_LIST` keys; past that, the later feature lists the rest in an issue of its own.
- * - `lost-body-parts`: `featureId` removed the solids `pieces` of `body` named, in every kernel order, or merged them into another solid.
- *   References to them resolve as missing.
+ * - `lost-body-parts`: `pieces` of `body` named a solid before `featureId` in some kernel order and name none after it in any, since it
+ *   removed or merged their solids. It lists every such key, whether or not this build gave it, digits by value, so every kernel order
+ *   reports the same. References to them resolve as missing.
  * - `untracked-body-parts`: after `featureId`, `body` has more parts than the lineage tracks, so it keeps none from then on.
  * - `more-body-issues`: the issues from `featureId` on did not fit in the list; the message gives how many were left out.
  */
@@ -351,7 +357,10 @@ export interface CadBodyParts {
   readonly ambiguousNow: readonly CadBodyKey[];
   /** Keys that are ambiguous because they descend from a key that was ambiguous before the feature, each with that key, whose issue lists them too. */
   readonly inherited: readonly (readonly [CadBodyKey, CadBodyKey])[];
-  /** Keys of the body before the feature that it left naming no solid in any kernel order, for a `lost-body-parts` issue. */
+  /**
+   * Every key that named a solid of the body before the feature, in some kernel order, and that it left naming none in any, for a
+   * `lost-body-parts` issue, sorted so that every kernel order gives the same list.
+   */
   readonly lost: readonly CadBodyKey[];
   /** The feature gave the body more parts than the lineage tracks, for an `untracked-body-parts` issue. */
   readonly overflowed?: true;
@@ -632,7 +641,10 @@ function unsettled(index: OrderIndex, key: string): boolean {
  * solids keeping none. Fresh keys are `feature/split(k)`: solids continuing the tool by rank, merges by rank, then solids keeping no face.
  * Where the kernel's order decides those indices, the split is recorded as an order (`orderRuns`) with what places each piece; a piece
  * that some order places otherwise is ambiguous, and so is every key continuing it. A key that named a piece before, in some order, and
- * names none now is lost, unless a solid it could name continues, as an old key does once its solid split or was copied.
+ * names none now is lost, unless a solid it could name continues, as an old key does once its solid split or was copied. Every key naming
+ * a removed or merged piece in some order is checked, including those neither this build's pieces nor its orders list, so the keys lost
+ * are the same in every kernel order; past `MAX_CAD_BODY_LIST` of them, or `MAX_CAD_BODY_ORDER_WORK` steps of reading, the body's parts
+ * are untracked.
  *
  * Uncertain provenance carries in groups: the keys that descend from one group through one source form a group, so the copies of one
  * pattern occurrence are never confused with another's. A group's earlier keys that are no longer pieces stay in it, as keys that can't
@@ -806,12 +818,14 @@ export function cadBodyParts(input: {
   // solid split or was copied, and the key is an old one. So a piece's key is not lost while another order gives it a solid that is left.
   const after: CadBodyPartsView = { pieces, ambiguous: ambiguous.length ? ambiguous : undefined, orders: kept };
   partsOf(after, leads);
-  const namedNow = piecesNamer(after, () => true), namedBefore = piecesNamer(previous, () => true);
-  const continues = piecesNamer(previous, piece => continuedFrom.has(piece));
-  // The members of a group a solid descends from through the target are all in a group with that solid now, so none of them is lost.
-  const homeless = previous.ambiguous?.filter((_, g) => !descent.has(`${g} 0`)).flat() ?? [];
-  const lost = [...new Set<CadBodyKey>([...before ?? [], ...homeless, ...(previous.orders ?? []).flatMap(order => order.keys)])]
-    .filter(part => !namedNow(part) && !continues(part) && namedBefore(part));
+  // Only a key naming a piece no solid continues, or a member of a group no solid descends from through the target, can be lost: the
+  // members of a group a solid descends from that way are all in a group with that solid now. Every key naming one of those in some kernel
+  // order is checked, whether or not this build gave it, so the keys lost are the same in every order. A key naming one that is still a
+  // piece or a group's key names it now too, since the orders that let it are kept: the search would find none of their keys lost, at far
+  // greater cost, so they are skipped.
+  const homeless = previous.ambiguous?.filter((_, g) => !descent.has(`${g} 0`)).flat() ?? [], stays = passer(after, () => true);
+  const lost = lostKeys(previous, after, [...(before ?? []).filter(piece => !continuedFrom.has(piece)), ...homeless].filter(part => !stays(part)), continuedFrom);
+  if (!lost) return OVERFLOWED;
   // The keys this feature made ambiguous: its groups' keys and the pieces its orders may place otherwise, unless they were ambiguous before
   // or are ambiguous through a key that was.
   const descended = new Set(inherited.map(([piece]) => piece));
@@ -1080,12 +1094,12 @@ function namedPieces(body: CadBodyPartsView, key: CadBodyKey): readonly CadBodyK
 }
 
 /**
- * Tells whether a key names, in some kernel order, a piece of `body` that passes `test`, as `namedPieces` finds them: its own piece and
- * group first, then its twins', looking through each group once.
+ * Tells whether a piece or group key of `body` stands, as `namedPieces` reads them, for a piece that passes `test`: it is one, or its group
+ * has one, looking through each group once.
  */
-function piecesNamer(body: CadBodyPartsView, test: (piece: CadBodyKey) => boolean): (key: CadBodyKey) => boolean {
+function passer(body: CadBodyPartsView, test: (piece: string) => boolean): (part: string) => boolean {
   const { pieces, groupOf } = partsOf(body), passing = new Map<readonly CadBodyKey[], boolean>();
-  const passes = (part: CadBodyKey) => {
+  return part => {
     if (pieces.has(part) && test(part)) return true;
     const group = groupOf.get(part);
     if (!group) return false;
@@ -1093,7 +1107,6 @@ function piecesNamer(body: CadBodyPartsView, test: (piece: CadBodyKey) => boolea
     if (found === undefined) passing.set(group, found = group.some(member => pieces.has(member) && test(member)));
     return found;
   };
-  return key => passes(key) || cadBodyKeyTwins(body, key).some(passes);
 }
 
 /**
@@ -1147,6 +1160,137 @@ function cadBodyKeyTwins(body: CadBodyPartsView, key: CadBodyKey): readonly CadB
     twins = [...next];
   }
   return twins.filter(twin => pieces.has(twin) || groupOf.has(twin)) as CadBodyKey[];
+}
+
+/** How far reading a key has got in a body: the keys it may name so far, as shared lists, which `key` numbers. */
+interface KeyReading { readonly key: string; readonly lists: readonly (readonly string[])[]; keys?: readonly string[] }
+
+/**
+ * Reads keys against `body` a step at a time, as `cadBodyKeyTwins` does: each key reached passes on the key the step leads it to, or the
+ * siblings its split's order may place at the step's index. Those come as lists found once, so two readings that reach the same lists have
+ * the same `key` without listing their keys.
+ */
+function keyReader(body: CadBodyPartsView) {
+  const { leads } = partsOf(body), index = orderIndex(body.orders);
+  const numbers = new Map<readonly string[], number>(), singles = new Map<string, readonly string[]>(), placed = new Map<CadBodyOrder, Map<number, readonly string[]>>();
+  const reading = (lists: readonly (readonly string[])[]): KeyReading => {
+    const unique = [...new Set(lists)].filter(list => list.length);
+    const ids = unique.map(list => { let n = numbers.get(list); if (n === undefined) numbers.set(list, n = numbers.size); return n; });
+    return { key: ids.sort((a, b) => a - b).join(','), lists: unique };
+  };
+  const single = (part: string) => { let list = singles.get(part); if (!list) singles.set(part, list = [part]); return list; };
+  const siblings = (order: CadBodyOrder, at: number) => {
+    let byAt = placed.get(order);
+    if (!byAt) placed.set(order, byAt = new Map());
+    const slot = order.by ? at : -1;
+    let list = byAt.get(slot);
+    if (!list) { const places = placesOf(order); byAt.set(slot, list = order.keys.filter((part, i) => leads.has(part) && (slot < 0 || hasPlace(places[i], at)))); }
+    return list;
+  };
+  const keysOf = (state: KeyReading) => state.keys ??= state.lists.length === 1 ? state.lists[0] : [...new Set(state.lists.flat())];
+  return {
+    start: (root: string) => reading(leads.has(root) ? [single(root)] : []),
+    keysOf,
+    step(state: KeyReading, step: string): KeyReading {
+      const split = /^split\((\d+)\)$/.exec(step), at = split ? Number(split[1]) : -1, lists: (readonly string[])[] = [];
+      for (const twin of keysOf(state)) {
+        const next = `${twin}/${step}`;
+        let listed = false;
+        if (split) for (const order of index.under.get(twin) ?? []) {
+          const start = splitIndexOf(order.keys[0])!;
+          if (at < start || at >= start + order.keys.length) continue;
+          lists.push(siblings(order, at - start));
+          if (order.keys[at - start] === next) listed = true;
+        }
+        if (!listed && leads.has(next)) lists.push(single(next));
+      }
+      return reading(lists);
+    }
+  };
+}
+
+/**
+ * The keys that named one of `parts` of `previous` in some kernel order and name no piece of `after` in any, none naming a piece before
+ * that `continued` holds, digits by value; `undefined` past `MAX_CAD_BODY_LIST` of them, or past `MAX_CAD_BODY_ORDER_WORK` steps of
+ * reading. A part's keys are read a step at a time, before and after together: a split step one of `previous`'s orders numbers may be any
+ * index that order may place the part at, and every other step stays. Keys whose readings reach the same lists at a step are lost or not
+ * alike whatever follows, so each pair of readings is followed once, and the work grows with the keys lost, not with every key naming a part.
+ */
+function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: readonly CadBodyKey[], continued: ReadonlySet<string>): CadBodyKey[] | undefined {
+  if (!parts.length) return [];
+  const before = keyReader(previous), now = keyReader(after), index = orderIndex(previous.orders);
+  const namedBefore = passer(previous, () => true), continues = passer(previous, piece => continued.has(piece)), namedNow = passer(after, () => true);
+  const indices = new Map<Places, readonly string[]>(), numbers = new Map<Places, number>(), read = new Set<string>(), lost = new Set<CadBodyKey>();
+  let work = 0;
+  for (const part of parts) {
+    // What each step of a key naming the part may be, and those choices as text, the same for parts named by the same keys' steps.
+    const steps = part.split('/'), choices: (readonly string[])[] = [];
+    let prefix = steps[0], signature = steps[0];
+    for (const step of steps.slice(1)) {
+      prefix += `/${step}`;
+      const found = index.at.get(prefix);
+      if (!found) { choices.push([step]); signature += `/${step}`; continue; }
+      const [order, i] = found, places = placesOf(order)[i];
+      let list = indices.get(places);
+      if (!list) {
+        const start = splitIndexOf(order.keys[0])!, made: string[] = [];
+        for (let at = 0; at < order.keys.length; at++) if (hasPlace(places, at)) made.push(`split(${start + at})`);
+        indices.set(places, list = made);
+        numbers.set(places, numbers.size);
+      }
+      choices.push(list);
+      signature += `/#${numbers.get(places)}`;
+    }
+    if (read.has(signature)) continue;
+    read.add(signature);
+    // The ends of the lost keys from each step on, for the readings reached there.
+    const known = new Map<string, readonly string[] | undefined>();
+    const follow = (at: number, nowRead: KeyReading, beforeRead: KeyReading): readonly string[] | undefined => {
+      const key = `${at} ${nowRead.key} ${beforeRead.key}`;
+      if (known.has(key)) return known.get(key);
+      let ends: readonly string[] | undefined;
+      if (at === choices.length) {
+        const was = before.keysOf(beforeRead);
+        ends = !now.keysOf(nowRead).some(namedNow) && !was.some(continues) && was.some(namedBefore) ? [''] : NONE;
+      } else {
+        const found: string[] = [];
+        for (const choice of choices[at]) {
+          work += now.keysOf(nowRead).length + before.keysOf(beforeRead).length + 1;
+          if (work > MAX_CAD_BODY_ORDER_WORK) return undefined;
+          const rest = follow(at + 1, now.step(nowRead, choice), before.step(beforeRead, choice));
+          if (!rest) return undefined;
+          for (const end of rest) found.push(`/${choice}${end}`);
+          if (found.length > MAX_CAD_BODY_LIST) return undefined;
+        }
+        ends = found;
+      }
+      known.set(key, ends);
+      return ends;
+    };
+    const ends = follow(0, now.start(steps[0]), before.start(steps[0]));
+    if (!ends) return undefined;
+    for (const end of ends) if (steps[0].length + end.length <= MAX_CAD_BODY_KEY_LENGTH) lost.add(`${steps[0]}${end}` as CadBodyKey);
+    if (lost.size > MAX_CAD_BODY_LIST) return undefined;
+  }
+  return [...lost].sort(compareCadBodyKeys);
+}
+
+/** Orders keys whatever order they were found in: character by character, runs of digits by their value, and a key before those it leads to. */
+function compareCadBodyKeys(a: string, b: string): number {
+  const digit = (code: number) => code >= 48 && code <= 57;
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    const x = a.charCodeAt(i), y = b.charCodeAt(j);
+    if (digit(x) && digit(y)) {
+      let to = i, end = j;
+      while (to < a.length && digit(a.charCodeAt(to))) to++;
+      while (end < b.length && digit(b.charCodeAt(end))) end++;
+      if (to - i !== end - j) return to - i - (end - j);
+      for (; i < to; i++, j++) if (a.charCodeAt(i) !== b.charCodeAt(j)) return a.charCodeAt(i) - b.charCodeAt(j);
+    } else if (x !== y) return x - y;
+    else { i++; j++; }
+  }
+  return a.length - i - (b.length - j);
 }
 
 /** What a body is for in a setup: the part made, the stock it is cut from, a fixture holding it, or reference geometry. */

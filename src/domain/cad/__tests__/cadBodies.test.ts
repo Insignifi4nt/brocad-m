@@ -297,14 +297,47 @@ describe('body parts', () => {
     expect(parts({ before: [A, B, C], ambiguous: [[A, B]], facts: facts(1, [[[0, 2, 1]]]) })).toEqual(changed([C], { lost: [A, B] }));
     // So is a former member's key the group kept after its own solid split or went, since it could have named either.
     expect(parts({ before: [A, B, C], ambiguous: [[A, B, 'gone/split(0)']], facts: facts(1, [[[0, 2, 1]]]) }))
-      .toEqual(changed([C], { lost: [A, B, 'gone/split(0)'] }));
+      .toEqual(changed([C], { lost: ['gone/split(0)', A, B] }));
     // A solid keeping no face may be any of them.
     expect(parts({ before: [A, B], ambiguous: [[A, B]], facts: facts(2, [[], []]) })).toEqual(changed(['cut/split(0)', 'cut/split(1)'],
       { ambiguous: [['cut/split(0)', 'cut/split(1)', A, B]], orders: [['cut/split(0)', 'cut/split(1)']], ambiguousNow: ['cut/split(0)', 'cut/split(1)'] }));
     // Nor while another order gives its key the solid left: which of A and B the cut removed is the kernel's order.
     expect(parts({ before: [A, B], orders: [[A, B]], facts: facts(1, [[[0, 1, 1]]]) })).toEqual(changed([B], { orders: [[A, B]], ambiguousNow: [] }));
     // Once that solid goes too, neither key names a piece in any order, and both are lost.
-    expect(parts({ before: [B, C], orders: [[A, B]], facts: facts(1, [[[0, 1, 1]]]) })).toEqual(changed([C], { lost: [B, A] }));
+    expect(parts({ before: [B, C], orders: [[A, B]], facts: facts(1, [[[0, 1, 1]]]) })).toEqual(changed([C], { lost: [A, B] }));
+  });
+
+  it('reports every key that named a removed or merged solid in some order, listed or not, the same in every order', () => {
+    // A and B traded places, and the piece under A split in two by its faces. Merging A's halves loses them, and the keys under B that name
+    // them in the other order, though this build never gave those keys; the other order gives the same report.
+    const halves = (under: string, other: string) => ({ before: [`${under}/split(0)`, `${under}/split(1)`, other], orders: [[A, B]],
+      facts: facts(2, [[[0, 0, 1], [0, 1, 1]], [[0, 2, 1]]]) });
+    const lost = [`${A}/split(0)`, `${A}/split(1)`, `${B}/split(0)`, `${B}/split(1)`];
+    expect(parts(halves(A, B))).toEqual(changed(['cut/split(0)', B], { orders: [[A, B]], ambiguousNow: [], lost }));
+    expect(parts(halves(B, A))).toEqual(changed(['cut/split(0)', A], { orders: [[A, B]], ambiguousNow: [], lost }));
+    // Removing one half loses its key and the key under B that names it in the other order; the other half's keys name the half left.
+    expect(parts({ before: [`${A}/split(0)`, `${A}/split(1)`, B], orders: [[A, B]], facts: facts(2, [[[0, 1, 1]], [[0, 2, 1]]]) }))
+      .toEqual(changed([`${A}/split(1)`, B], { orders: [[A, B]], ambiguousNow: [], lost: [`${A}/split(0)`, `${B}/split(0)`] }));
+    // Numbers sort by value.
+    const many = Array.from({ length: 12 }, (_, k) => `pad/split(${k})`);
+    expect(parts({ before: many, facts: facts(1, [[[0, 11, 1]]]) }).lost).toEqual(many.slice(0, 11));
+  });
+
+  it('stops tracking a body once the keys a feature leaves lost pass the list limit, however many keys name what it removed', () => {
+    // Nested splits, each traded with its sibling: 2 ** depth keys name each of the two deepest pieces in some order.
+    const chain = (depth: number) => {
+      const levels = Array.from({ length: depth }, (_, level) => `pad${'/split(1)'.repeat(level)}`);
+      return { before: [...levels.map(prefix => `${prefix}/split(0)`), `${levels[depth - 1]}/split(1)`], orders: levels.map(prefix => [`${prefix}/split(0)`, `${prefix}/split(1)`]) };
+    };
+    const keeping = (count: number, removed: number) => facts(count - removed, Array.from({ length: count - removed }, (_, solid) => [[0, solid, 1]]));
+    // Removing the deepest piece loses nothing: each of its keys names its sibling, which is left, in another order.
+    const deep = chain(13);
+    expect(parts({ ...deep, facts: keeping(14, 1) })).toMatchObject({ pieces: deep.before.slice(0, 13), lost: [] });
+    // Removing both loses every key: past the limit at thirteen levels, and exactly at it at twelve.
+    expect(parts({ ...deep, facts: keeping(14, 2) })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: true });
+    const shallow = parts({ ...chain(12), facts: keeping(13, 2) });
+    expect([shallow.untracked, shallow.lost.length, shallow.lost[0], shallow.lost.at(-1)])
+      .toEqual([undefined, 2 ** 12, `pad${'/split(0)'.repeat(12)}`, `pad${'/split(1)'.repeat(12)}`]);
   });
 
   it('records an order only for siblings the kernel ordered at their own split, and keeps it while a key it numbers leads to one the body keeps', () => {
@@ -572,6 +605,14 @@ describe('body references, metadata and selection', () => {
     // Every sibling an order may place at the key's index counts.
     const apart: CadBodyState = { ...halves, pieces: [a, `${b}/split(0)`, `${c}/split(0)`, `${c}/split(1)`].map(key), orders: [{ keys: [a, b, c].map(key) }] };
     expect(resolved(`${a}/split(0)`, apart)).toMatchObject({ status: 'ambiguous', candidates: [`${b}/split(0)`, `${c}/split(0)`] });
+    // A provenance group elsewhere in the body adds nothing to keys that can't reach it: a key no order gives stays missing, and a key an
+    // order trades names only what that order gives. The group's own former key still resolves among its pieces.
+    const fresh = ['cut/split(0)', 'cut/split(1)', 'cut/split(2)'];
+    const grouped: CadBodyState = { ...halves, pieces: [...halves.pieces!, ...fresh.slice(0, 2).map(key)], ambiguous: [fresh.map(key)] };
+    for (const part of [`${a}/split(2)`, `${c}/split(0)`, 'cut/split(0)/split(0)', 'cut/split(3)']) expect(resolved(part, grouped), part).toEqual({ status: 'missing' });
+    expect(resolved(`${a}/split(0)`, grouped)).toMatchObject({ status: 'ambiguous', candidates: [`${b}/split(0)`] });
+    expect(resolved(c, grouped)).toMatchObject({ status: 'resolved', part: c });
+    expect(resolved(fresh[2], grouped)).toMatchObject({ status: 'ambiguous', candidates: fresh.slice(0, 2) });
   });
 
   it('takes a twin only from the split that gave the key\'s own step, never from a later key with the same steps', () => {

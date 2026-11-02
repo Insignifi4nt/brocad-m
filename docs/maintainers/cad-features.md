@@ -120,16 +120,25 @@ every build (`CadBuildResult.bodies`, `CadMesh.bodyKey`). A kind's `body` behavi
   target. Orders never join groups.
 - A key that named a piece before a feature, in some order, and names none after it is lost, and references to it resolve as missing,
   unless a solid it could name continues: then that solid split or was copied, and the key is an old one. So a piece the feature removed
-  is not lost while another order gives its key a solid that is left.
+  is not lost while another order gives its key a solid that is left. Every such key is reported, including keys that neither this
+  build's pieces nor its orders list but that another order gives a removed or merged solid, sorted with runs of digits by value, so
+  every order reports the same lost keys. They are found by reading each removed or merged solid's keys step by step, before the feature
+  and after it together, over the indices each order may give it, and the work grows with the keys found. Past `MAX_CAD_BODY_LIST`
+  (4,096) lost keys, or `MAX_CAD_BODY_ORDER_WORK` steps of that search, the body's parts are untracked, since any shorter list would
+  depend on the order.
 - `cadBodyOrders.test.ts` checks the rule over generated histories. It builds each history under every combination of the orders the
   kernel may choose, the body's first solids', each Boolean's result's and each tool's, while there are at most 2,000, and checks every
   key listed, or formed by changing split indices, against what the builds show: missing when no build has it as a piece, resolved when
   every build has it as the same piece, and otherwise ambiguous among exactly the solids it is a piece as in some build, plus only the
-  pieces of provenance groups. Larger histories are built in a sample of combinations, where each key must resolve the same way in all
-  of them and stand for every solid the sample shows. Kernel cases check the same on real builds in every order of their Booleans.
+  pieces of the provenance groups it can reach: a group holding it, or holding a key that some build had as the same solid as it at that
+  feature or before. Larger histories are built in a sample of combinations, where each key must resolve the same way in all of them
+  and stand for every solid the sample shows. Every build must report the same lost keys, each resolving before its feature and missing
+  after it, and where every combination is built and none has groups, exactly the keys some build had as a piece before and none has after, whose solids no solid
+  of the result continues. Kernel cases check the same on real builds in every order of their Booleans.
 - Each feature reports these in `CadBuildResult.bodyIssues` for D1 to adopt: `ambiguous-body-parts` for keys it makes ambiguous,
   `lost-body-parts` for keys it leaves naming nothing, by removing or merging their solids, and `untracked-body-parts` when a body tracks
-  more than `MAX_CAD_BODY_LIST` (4,096) distinct part keys: its pieces, the keys its groups keep and the keys its orders keep, together, and the worker check holds a reply to the same count. The body's parts are then untracked for the rest of the history, and
+  more than `MAX_CAD_BODY_LIST` (4,096) distinct part keys: its pieces, the keys its groups keep and the keys its orders keep, together, and the worker check holds a reply to the same count, or
+  when a feature leaves more lost keys than that, or its search for them passes the work bound. The body's parts are then untracked for the rest of the history, and
   references to them resolve as missing. Since groups keep every former member's key while a solid descends from them,
   the keys grow with the history, not the solid count: a body of 100 ambiguous solids that loses one piece and splits another at each
   feature adds two keys a feature and passes the limit at the 1,999th such feature. That limit is separate from an issue's 4,096 keys

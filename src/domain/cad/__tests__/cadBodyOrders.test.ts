@@ -13,11 +13,17 @@ import { cadBodyKeyVariants } from './cadBodyKeyVariants';
  * tool in any order, and a face's rank is its place in its source's face order, so faces of different solids rank in the order the source
  * lists them, as the kernel's do. Building a history in every combination of those orders shows what each key truly names after each
  * feature: nothing when no combination has it as a piece, one solid when every combination has it as that solid, and otherwise the solids
- * it is a piece as in some combination. The resolver must give exactly that, but for one stated superset: a provenance group may add its
- * pieces, since a solid keeping no face of the body may continue any member, which no order shows. Keys are those any combination lists
- * after the feature or before it, and every key formed from one by changing the indices of any of its split steps. A history with too
- * many combinations is built in a sample of them, where every key must resolve the same way in each and stand for every solid the sample
- * shows it is a piece as.
+ * it is a piece as in some combination. The resolver must give exactly that, but for one stated superset: a provenance group the key can
+ * reach may add its pieces, since a solid keeping no face of the body may continue any member, which no order shows. A key reaches a group
+ * holding it, or holding a key that was a piece as the same solid as it in some combination after some feature so far. Keys are those any
+ * combination lists after the feature or before it, and every key formed from one by changing the indices of any of its split steps. A
+ * history with too many combinations is built in a sample of them, where every key must resolve the same way in each and stand for every
+ * solid the sample shows it is a piece as.
+ *
+ * Every combination must report the same lost keys, each one naming a solid before the feature and none after it. Built in every
+ * combination, with no group before the feature or after it, the keys reported lost are exactly those some combination had as a piece
+ * before, none has as a piece after, and whose solids no solid of the result continues: keeps traced faces of that solid alone among the
+ * target's, or keeps no traced face at all, when the target had one solid and nothing was added.
  */
 
 interface Solid { readonly id: number; readonly faces: readonly number[] }
@@ -254,11 +260,56 @@ function pieceSolid(state: Run['states'][number], key: string): number | undefin
   const at = state.bodies[0]?.pieces?.indexOf(key as CadBodyKey) ?? -1;
   return at >= 0 ? state.solids[at] : undefined;
 }
-/** The solids of the pieces in the body's provenance groups after one step of one run. */
-function groupedSolids(state: Run['states'][number]): ReadonlySet<number> {
+/** The solids of the pieces in the body's provenance groups after one step of one run that hold one of `reached`, or in all of them. */
+function groupedSolids(state: Run['states'][number], reached?: ReadonlySet<string>): ReadonlySet<number> {
   const body = state.bodies[0], grouped = new Set<number>();
-  for (const part of body?.ambiguous?.flat() ?? []) { const at = body.pieces?.indexOf(part) ?? -1; if (at >= 0) grouped.add(state.solids[at]); }
+  for (const group of body?.ambiguous ?? []) {
+    if (reached && !group.some(part => reached.has(part))) continue;
+    for (const part of group) { const at = body.pieces?.indexOf(part) ?? -1; if (at >= 0) grouped.add(state.solids[at]); }
+  }
   return grouped;
+}
+
+/** For each step, every key that is a piece in some run, with the solids it is a piece as, and each solid with those keys. */
+function piecesBySteps(runs: readonly Run[], steps: number) {
+  return Array.from({ length: steps }, (_, at) => {
+    const solidsOf = new Map<string, Set<number>>(), keysOf = new Map<number, Set<string>>();
+    for (const each of runs) each.states[at].bodies[0]?.pieces?.forEach((part, n) => {
+      const solid = each.states[at].solids[n];
+      (solidsOf.get(part) ?? solidsOf.set(part, new Set()).get(part)!).add(solid);
+      (keysOf.get(solid) ?? keysOf.set(solid, new Set()).get(solid)!).add(part);
+    });
+    return { solidsOf, keysOf };
+  });
+}
+/** The keys whose groups `key` reaches after step `at`: itself, and every key that was a piece as the same solid as it after a step so far. */
+function reachedBy(byStep: ReturnType<typeof piecesBySteps>, key: string, at: number): ReadonlySet<string> {
+  const reached = new Set([key]);
+  for (let step = 0; step <= at; step++) for (const solid of byStep[step].solidsOf.get(key) ?? []) for (const part of byStep[step].keysOf.get(solid)!) reached.add(part);
+  return reached;
+}
+
+/**
+ * The solids of the body before `step` that a solid of its result continues, as faces show it: one keeping traced faces of that target solid
+ * alone, or, when the target had one solid and the step added nothing, one keeping no traced face. A face two solids of a source share is
+ * never traced.
+ */
+function continuedSolids(step: Step, before: readonly Solid[]): ReadonlySet<number> {
+  const traced = (solids: readonly Solid[]) => {
+    const seen = new Set<number>(), shared = new Set<number>();
+    for (const face of solids.flatMap(each => each.faces)) if (seen.has(face)) shared.add(face); else seen.add(face);
+    return (face: number) => seen.has(face) && !shared.has(face);
+  };
+  const body = traced(before), tool = traced(step.tool ?? []), continued = new Set<number>();
+  let faceless = false;
+  for (const made of step.made) {
+    const keeps = made.keeps.filter(kept => kept.faces.some(step.sources[kept.source].kind === 'tool' ? tool : body));
+    const targets = new Set(keeps.filter(kept => step.sources[kept.source].kind === 'target').map(kept => kept.from));
+    if (targets.size === 1) continued.add([...targets][0]);
+    if (!keeps.length) faceless = true;
+  }
+  if (faceless && before.length === 1 && step.sources.every(source => source.kind === 'target')) continued.add(before[0].id);
+  return continued;
 }
 
 /** Every key the runs list after a step or before it, and each formed from one by changing the indices of any of its split steps. */
@@ -295,11 +346,11 @@ function combinations(rand: Random, counts: readonly number[], every: number, sa
 
 /**
  * What is wrong with `seen`, if anything, given the solids `truth` a key is a piece as across every combination, whether it is the same
- * piece in all of them, and the solids of the run's provenance groups and whether the key is in one.
+ * piece in all of them, the solids of the run's provenance groups the key reaches, found only when needed, and whether the key is in one.
  */
-function imprecision(seen: Seen, truth: readonly number[], certain: boolean, grouped: ReadonlySet<number>, inGroup: boolean): string | undefined {
+function imprecision(seen: Seen, truth: readonly number[], certain: boolean, reachable: () => ReadonlySet<number>, inGroup: boolean): string | undefined {
   if (truth.some(solid => !seen.solids.includes(solid))) return 'leaves out a solid it is a piece as in some order';
-  if (seen.solids.some(solid => !truth.includes(solid) && !grouped.has(solid))) return 'stands for a solid it is a piece as in no order, outside every group';
+  if (seen.solids.some(solid => !truth.includes(solid) && !reachable().has(solid))) return 'stands for a solid it is a piece as in no order, outside every group it reaches';
   if (seen.status === 'resolved' && !certain) return 'resolves although it is not the same piece in every order';
   if (seen.status !== 'resolved' && certain && !inGroup) return 'is ambiguous although it is the same piece in every order and in no group';
   return undefined;
@@ -314,34 +365,65 @@ function unsoundness(seen: Seen, truth: readonly number[], certain: boolean): st
 interface Disagreement { readonly seed: number; readonly shape: string; readonly step: string; readonly key: string; readonly problem: string; readonly seen: string; readonly truth: string; readonly combo: string }
 interface Checked {
   readonly disagreements: Disagreement[]; readonly combos: number; readonly exhaustive: boolean; readonly renumbered: boolean;
-  /** Keys checked exactly in bodies without groups: ambiguous among several solids, and missing though formed like a listed key. */
-  readonly ambiguous: number; readonly phantoms: number;
+  /**
+   * Keys checked exactly: in bodies without groups, ambiguous among several solids, and missing though formed like a listed key; missing
+   * beside groups it reaches none of; and lost, at the steps whose losses were checked exactly.
+   */
+  readonly ambiguous: number; readonly phantoms: number; readonly besideGroups: number; readonly losses: number; readonly lossSteps: number;
+  /** Lost keys checked exactly that the first combination never had as a piece: keys only another order gave. */
+  readonly unlisted: number;
 }
 
 /** Checks one generated history, returning the first disagreements found. */
 function checkHistory(seed: number, every: number, sample: number): Checked {
   const rand = random(seed), history = generator(rand)(), parsed = featuresOf(history);
   const { combos, exhaustive } = combinations(rand, freedomsOf(history), every, sample);
-  const runs = combos.map(combo => run(history, parsed, combo)), keys = keysBySteps(runs, history.steps.length);
+  const runs = combos.map(combo => run(history, parsed, combo)), keys = keysBySteps(runs, history.steps.length), byStep = piecesBySteps(runs, history.steps.length);
   const disagreements: Disagreement[] = [];
-  const issues = (each: Run) => each.issues.map(issue => `${issue.code} ${issue.featureId} ${issue.pieces.length}`).sort().join('; ');
-  for (const each of runs.slice(1)) if (issues(each) !== issues(runs[0]))
-    disagreements.push({ seed, shape: history.shape, step: 'issues', key: '', problem: 'other issues', seen: issues(each), truth: issues(runs[0]), combo: JSON.stringify(combos[runs.indexOf(each)]) });
-  let renumbered = false, ambiguous = 0, phantoms = 0;
+  const disagree = (step: string, key: string, problem: string, seen: string, truth: string, n: number) =>
+    disagreements.push({ seed, shape: history.shape, step, key, problem, seen, truth, combo: JSON.stringify(combos[n]) });
+  // Lost keys must be the same list in every combination; other issues name keys a combination gives, so only their counts must agree.
+  const issues = (each: Run) => each.issues.map(issue => `${issue.code} ${issue.featureId} ${issue.code === 'lost-body-parts' ? issue.pieces.join(' ') : issue.pieces.length}`).sort().join('; ');
+  for (const [n, each] of runs.entries()) if (issues(each) !== issues(runs[0])) disagree('issues', '', 'other issues', issues(each), issues(runs[0]), n);
+  const lostAt = (each: Run, featureId: string) => each.issues.find(issue => issue.code === 'lost-body-parts' && issue.featureId === featureId)?.pieces ?? [];
+  let renumbered = false, ambiguous = 0, phantoms = 0, besideGroups = 0, losses = 0, lossSteps = 0, unlisted = 0;
   history.steps.forEach((step, at) => {
     const states = runs.map(each => each.states[at]), wholes = new Set(states.flatMap(state => state.bodies.map(body => body.key as string)));
     for (const key of keys[at]) {
       const seen = states.map(state => resolution(state, key));
       const other = seen.findIndex(each => shown(each) !== shown(seen[0]));
-      if (other >= 0) { disagreements.push({ seed, shape: history.shape, step: step.id, key, problem: 'resolves otherwise in another order', seen: shown(seen[other]), truth: shown(seen[0]), combo: JSON.stringify(combos[other]) }); continue; }
+      if (other >= 0) { disagree(step.id, key, 'resolves otherwise in another order', shown(seen[other]), shown(seen[0]), other); continue; }
       if (wholes.has(key)) continue;
       const named = states.map(state => pieceSolid(state, key)), truth = [...new Set(named.filter(solid => solid !== undefined))].sort((a, b) => a - b);
       const certain = truth.length === 1 && named.every(solid => solid !== undefined);
+      let reached: ReadonlySet<string> | undefined;
       for (const [n, state] of states.entries()) {
-        const grouped = groupedSolids(state), inGroup = state.bodies[0]?.ambiguous?.some(group => group.includes(key as CadBodyKey)) ?? false;
-        const problem = exhaustive ? imprecision(seen[n], truth, certain, grouped, inGroup) : unsoundness(seen[n], truth, certain);
-        if (problem) { disagreements.push({ seed, shape: history.shape, step: step.id, key, problem, seen: shown(seen[n]), truth: truth.join(','), combo: JSON.stringify(combos[n]) }); break; }
-        if (exhaustive && n === 0 && !grouped.size) { if (truth.length > 1) ambiguous++; else if (!truth.length) phantoms++; }
+        const inGroup = state.bodies[0]?.ambiguous?.some(group => group.includes(key as CadBodyKey)) ?? false;
+        let reachable: ReadonlySet<number> | undefined;
+        const groupsReached = () => reachable ??= groupedSolids(state, reached ??= reachedBy(byStep, key, at));
+        const problem = exhaustive ? imprecision(seen[n], truth, certain, groupsReached, inGroup) : unsoundness(seen[n], truth, certain);
+        if (problem) { disagree(step.id, key, problem, shown(seen[n]), truth.join(','), n); break; }
+        if (!exhaustive || n) continue;
+        if (!state.bodies[0]?.ambiguous) { if (truth.length > 1) ambiguous++; else if (!truth.length) phantoms++; }
+        else if (!truth.length && !groupsReached().size) besideGroups++;
+      }
+    }
+    // Each reported loss named a solid before the step and names none after it, in its own combination.
+    for (const [n, each] of runs.entries()) for (const key of lostAt(each, step.id)) {
+      const before = at ? resolution(each.states[at - 1], key).status : 'missing', after = resolution(each.states[at], key).status;
+      if (before === 'missing' || after !== 'missing') disagree(step.id, key, 'is reported lost though it did not name a solid before and none after', `${before} then ${after}`, '', n);
+    }
+    // Built in every combination with no groups, the losses are exactly the keys some combination had as a piece before the step, none has
+    // as a piece after it, and whose solids no solid continues.
+    const previous = at ? runs.map(each => each.states[at - 1]) : [];
+    const plain = (state: Run['states'][number]) => !state.bodies[0]?.ambiguous && !state.bodies[0]?.untracked;
+    if (exhaustive && at && previous.every(plain) && states.every(plain)) {
+      lossSteps++;
+      const continued = continuedSolids(step, history.steps[at - 1].made.map(made => made.solid)), reported = lostAt(runs[0], step.id);
+      for (const key of new Set([...keys[at], ...reported])) {
+        const was = previous.flatMap(state => pieceSolid(state, key) ?? []), lost = was.length > 0 && states.every(state => pieceSolid(state, key) === undefined) && !was.some(solid => continued.has(solid));
+        if (lost) { losses++; if (pieceSolid(previous[0], key) === undefined) unlisted++; }
+        if (lost !== reported.includes(key as CadBodyKey)) disagree(step.id, key, lost ? 'is lost but not reported' : 'is reported lost though it is not', reported.join(' '), was.join(','), 0);
       }
     }
     const listed = runs[0].states[at].bodies[0]?.pieces ?? [];
@@ -350,30 +432,35 @@ function checkHistory(seed: number, every: number, sample: number): Checked {
       if (where >= 0 && each.states[at].solids[where] !== runs[0].states[at].solids[listed.indexOf(piece)]) renumbered = true;
     }
   });
-  return { disagreements, combos: combos.length, exhaustive, renumbered, ambiguous, phantoms };
+  return { disagreements, combos: combos.length, exhaustive, renumbered, ambiguous, phantoms, besideGroups, losses, lossSteps, unlisted };
 }
+
+/** Seeds past the default run that once found a disagreement: each reported losses that depended on the order of a join's solids. */
+const REGRESSIONS = [424, 492, 718, 885, 1003];
 
 describe('body identity across kernel solid orders', () => {
   it('resolves every key, listed or formed by changing split indices, to exactly the solids it is a piece as in some combination of orders', () => {
-    const seeds = Number(process.env.CAD_BODY_ORDER_SEEDS ?? 120), every = Number(process.env.CAD_BODY_ORDER_EVERY ?? 2000);
+    const count = Number(process.env.CAD_BODY_ORDER_SEEDS ?? 120), every = Number(process.env.CAD_BODY_ORDER_EVERY ?? 2000);
     const sample = Number(process.env.CAD_BODY_ORDER_COMBOS ?? 81);
+    const seeds = [...new Set([...Array.from({ length: count }, (_, at) => at + 1), ...REGRESSIONS])];
     const found: Disagreement[] = [];
-    let renumbered = 0, exhaustive = 0, ambiguous = 0, phantoms = 0, combos = 0;
-    for (let seed = 1; seed <= seeds; seed++) {
+    let renumbered = 0, exhaustive = 0, ambiguous = 0, phantoms = 0, besideGroups = 0, losses = 0, lossSteps = 0, unlisted = 0, combos = 0;
+    for (const seed of seeds) {
       const checked = checkHistory(seed, every, sample);
       found.push(...checked.disagreements.slice(0, 3));
       if (checked.renumbered) renumbered++;
       if (checked.exhaustive) exhaustive++;
-      ambiguous += checked.ambiguous; phantoms += checked.phantoms; combos += checked.combos;
+      ambiguous += checked.ambiguous; phantoms += checked.phantoms; besideGroups += checked.besideGroups; combos += checked.combos;
+      losses += checked.losses; lossSteps += checked.lossSteps; unlisted += checked.unlisted;
     }
-    if (process.env.CAD_BODY_ORDER_REPORT)
-      console.log(JSON.stringify({ seeds, exhaustive, combos, ambiguous, phantoms, renumbered, failing: new Set(found.map(each => each.seed)).size, found: found.slice(0, 40) }, null, 1));
+    if (process.env.CAD_BODY_ORDER_REPORT) console.log(JSON.stringify({ seeds: seeds.length, exhaustive, combos, ambiguous, phantoms, besideGroups, losses, lossSteps, unlisted, renumbered,
+      failing: [...new Set(found.map(each => each.seed))], found: found.slice(0, 40) }, null, 1));
     expect(found).toEqual([]);
     // The orders must change which solid some key names, and a share of the histories must be built in every combination, with keys
-    // ambiguous among several solids and keys no order lists checked exactly, or the check proves little.
-    expect(renumbered).toBeGreaterThan(seeds / 4);
-    expect(exhaustive).toBeGreaterThan(seeds / 4);
-    expect([ambiguous > seeds / 2, phantoms > seeds]).toEqual([true, true]);
+    // ambiguous among several solids, keys no order lists, beside groups too, and lost keys checked exactly, or the check proves little.
+    expect(renumbered).toBeGreaterThan(seeds.length / 4);
+    expect(exhaustive).toBeGreaterThan(seeds.length / 4);
+    expect([ambiguous > seeds.length / 2, phantoms > seeds.length, besideGroups > seeds.length, losses > seeds.length / 10]).toEqual([true, true, true, true]);
   }, 300_000);
 });
 
