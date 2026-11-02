@@ -227,6 +227,11 @@ describe('section caps in the view', () => {
     expect(drain()).toBeGreaterThan(3);
     expect(shownCaps(made)).toHaveLength(1); expect(zValues(capIn(shownCaps(made)[0]))).toEqual([2]); expect(made.group.visible).toBe(true);
     expect(onChange).toHaveBeenCalledTimes(1);
+    // A build finished in a later slice is kept while hidden, and showing the same plane again draws it, with nothing to build.
+    const finished = shownCaps(made)[0];
+    made.setPlane(null); expect(made.group.visible).toBe(false);
+    made.setPlane(below(2)); expect(queue.size).toBe(0);
+    expect(shownCaps(made)).toHaveLength(1); expect(shownCaps(made)[0]).toBe(finished); expect(made.group.visible).toBe(true);
     // The prepared body is kept for the next plane, which needs only the cut.
     made.setPlane(below(3)); drain(); expect(zValues(capIn(shownCaps(made)[0]))).toEqual([3]);
     // A new upload drops a build in progress for the old bodies.
