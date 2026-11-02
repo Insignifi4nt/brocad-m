@@ -15,7 +15,7 @@ import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 import { cadSketchGeneratorMembers } from './sketch-generators/cadSketchGenerators';
-import { cadSketchProfileGenerator, cadSketchProfileViews } from './sketch-generators/cadSketchProfileViews';
+import { cadSketchOutlineViews, cadSketchProfileViews, cadSketchWholeGenerator } from './sketch-generators/cadSketchProfileViews';
 import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRemapPiece } from './sketch-relations/cadSketchRelationRemap';
 
 export const CadSketchProfileCopyRequestSchema = Type.Object({
@@ -67,14 +67,14 @@ function checkSupport(source: PathSegment, result: PathSegment): void {
 /** A sketch id is at most this long. */
 const ID_LENGTH_MAX = 96;
 /**
- * The members of the generator a profile view stands for, renamed into the copy: `<idPrefix>_<key>` for the generator's `<prefix>_<key>`.
+ * The members of the generator a profile or outline view stands for, renamed into the copy: `<idPrefix>_<key>` for the generator's `<prefix>_<key>`.
  * Every relation among them comes too, the generator's own as `<idPrefix>_<key>` and the user's as `<idPrefix>_u<n>`, so the copy keeps
  * the directions, joints and equal sizes the shape was made with; a relation that reaches other geometry, or generates, stays behind.
  * Undefined for a legacy profile, or a generator whose members the sketch does not hold.
  */
 function generatedCopy(sketch: CadSketchFeature, profileId: string, idPrefix: string): { readonly points: readonly CadSketchGraphPoint[];
   readonly entities: readonly CadSketchGraphEntity[]; readonly relations: readonly CadSketchGraphRelation[] } | undefined {
-  const generator = cadSketchProfileGenerator(sketch, profileId), graph = sketch.graph;
+  const generator = cadSketchWholeGenerator(sketch, profileId), graph = sketch.graph;
   if (!generator || !graph) return undefined;
   const members = cadSketchGeneratorMembers(graph, generator);
   if (!members.entityIds.length) return undefined;
@@ -110,8 +110,9 @@ export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: 
     return invalid('Copy requires a source profile, a new sketch identity and name, and an identifier prefix of at most 64 characters.');
   if (sketch.kind !== 'sketch' || sketch.id !== request.sourceSketchId || !cadFeatureActive(sketch, { parameters }) || request.newSketchId === sketch.id)
     return invalid('Choose an active source sketch and a distinct new sketch identity.');
-  // A generated outline is copied as the shape its generator makes, as a legacy profile is.
-  const profiles = cadSketchProfileViews(sketch).filter(profile => profile.id === request.profileId), profile = profiles[0];
+  // A generated outline is copied as the shape its generator makes, as a legacy profile is: a profile view, or the outline of a generator
+  // with none, such as a regular polygon or a linked offset.
+  const profiles = [...cadSketchProfileViews(sketch), ...cadSketchOutlineViews(sketch, parameters)].filter(profile => profile.id === request.profileId), profile = profiles[0];
   if (profiles.length !== 1 || !profile) return invalid('The selected source profile no longer exists uniquely. Select it again.');
   const offset = evaluateCadScalar(sketch.offset, parameters);
   if (!isCadImportData(sketch.plane) || !Value.Check(CadSketchPlaneSchema, sketch.plane) || !Value.Check(CadNumberSchema, offset))

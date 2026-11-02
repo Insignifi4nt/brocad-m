@@ -38,6 +38,23 @@ describe('independent editable profile copy', () => {
       { id: 'copy_r2', kind: 'horizontal', pointIds: ['copy_p2', 'copy_p3'] }, { id: 'copy_r3', kind: 'vertical', pointIds: ['copy_p3', 'copy_p0'] }]);
   });
 
+  it('copies the outline of a generator with no profile view, a regular polygon or a linked offset, as plain geometry', () => {
+    const corners = [[40, 0], [50, 0], [50, 10], [40, 10]] as const;
+    const graph = expandCadSketchGenerators({ points: corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] })),
+      entities: corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })), relations: [
+        { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 'size', sides: 6, directionId: '@h' } },
+        { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false, geometry: { kind: 'offset', chain: ['l0', 'l1', 'l2', 'l3'].map(entityId => ({ entityId, reversed: false })), distance: 2 } }] },
+      { size: 10 });
+    const sketch: CadSketchFeature = { ...source({ kind: 'circle', x: 0, y: 0, radius: 1 }), profiles: [], graph };
+    const hex = prepareCadSketchProfileCopy({ sketch, parameters: { sourceOffset: 0, size: 10 }, ...request, profileId: 'hex' }).sketch;
+    expect(hex.graph?.relations.some(relation => relation.kind === 'generator')).toBe(false);
+    expect(hex.graph?.entities).toHaveLength(6); expect(measure(hex).areaMm2).toBeCloseTo(3 * Math.sqrt(3) / 2 * 100, 9);
+    const wall = prepareCadSketchProfileCopy({ sketch, parameters: { sourceOffset: 0, size: 10 }, ...request, profileId: 'wall' }).sketch;
+    expect(wall.graph?.relations.some(relation => relation.kind === 'generator')).toBe(false);
+    // The square grown by 2 on each side, its sides extended to meet at sharp corners.
+    expect(measure(wall).areaMm2).toBeCloseTo(14 * 14, 9);
+  });
+
   it('copies a rotated parametric slot as a separate numeric graph with shared authored joints and inherited placement', () => {
     const sketch = source({ kind: 'slot', x: '11.00', y: '-7.00', length: ' slotLength ', width: '10.0000', angle: '30.00' });
     const before = JSON.stringify(sketch), parameters = { slotLength: 30, sourceOffset: 2.5 };

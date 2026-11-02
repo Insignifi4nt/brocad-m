@@ -2,10 +2,10 @@ import type { CadDocument, CadProfile, CadSketchFeature, CadSketchProfile } from
 import { Value } from '@sinclair/typebox/value';
 import { CadError } from '../cadError';
 import type { CadEdit } from '../cadOperations';
-import type { CadSketchGenerator } from '../cadSketchGraph';
+import type { CadSketchGenerator, CadSketchGraph } from '../cadSketchGraph';
 import { deleteCadSketchElements } from '../cadSketchGraphEdits';
 import { cadSketchGeneratorPrefixFor } from './cadSketchGeneratorEdits';
-import { cadSketchGeneratorKind, cadSketchGeneratorOutlines, cadSketchGenerators } from './cadSketchGenerators';
+import { cadSketchGeneratorKind, cadSketchGeneratorName, cadSketchGeneratorOutlines, cadSketchGenerators } from './cadSketchGenerators';
 
 // The shapes people configure as profiles: a sketch's saved legacy profiles, then each generator of a profile's geometry, seen as the
 // profile it replaces. The profile editor, the plugin panel, the parameter bindings and CAM notes read generators through these views,
@@ -63,8 +63,51 @@ export function cadSketchOutlineViews(sketch: CadSketchFeature, parameters: Read
 
 /** The generator the profile view `profileId` of `sketch` stands for; undefined for a legacy profile or an id with no view. */
 export function cadSketchProfileGenerator(sketch: CadSketchFeature, profileId: string): CadSketchProfileGenerator | undefined {
-  const generator = sketch.graph?.relations.find(relation => relation.id === profileId);
-  return generator?.kind === 'generator' && isProfileGenerator(generator) ? generator : undefined;
+  const generator = cadSketchWholeGenerator(sketch, profileId);
+  return generator && isProfileGenerator(generator) ? generator : undefined;
+}
+
+/**
+ * The generator `id` of `sketch`, of any kind: what a selection of a whole shape, by its profile button, its interior or a tree row,
+ * stands for. A command on that selection acts on this record, whether or not the kind has a profile view. Undefined for a legacy
+ * profile or an id that names no generator.
+ */
+export function cadSketchWholeGenerator(sketch: CadSketchFeature, id: string): CadSketchGenerator | undefined {
+  const generator = sketch.graph?.relations.find(relation => relation.id === id);
+  return generator?.kind === 'generator' ? generator : undefined;
+}
+
+/**
+ * Why the shape `generator` makes is not moved as a whole, by the Move contour editor or `translate-sketch-profiles`; null for a kind with
+ * a profile view, whose move writes its inputs.
+ */
+export function cadSketchGeneratorMoveReason(generator: CadSketchGenerator): string | null {
+  const name = cadSketchGeneratorName(generator);
+  switch (generator.geometry.kind) {
+    case 'plugin': return 'Move a generated plugin contour through its placement configuration.';
+    case 'regular-polygon': return `${name} is placed by its centre. Set its Center X and Y inputs to move it.`;
+    case 'circular-pattern': return `${name} follows its seeds and centre. Move those to move it.`;
+    case 'offset': return `${name} follows the loop it offsets. Move that loop to move it.`;
+    default: return null;
+  }
+}
+
+/**
+ * Whether the edges `generator` makes are construction geometry, and why its own flag cannot change that, if it cannot: a circular
+ * pattern copies a construction seed as construction, so a pattern whose seeds are all construction makes construction copies only.
+ */
+export function cadSketchGeneratorConstruction(graph: CadSketchGraph, generator: CadSketchGenerator): { readonly construction: boolean; readonly reason: string | null } {
+  if (generator.geometry.kind === 'circular-pattern') {
+    const seeds = generator.geometry.seedIds.map(id => graph.entities.find(entity => entity.id === id));
+    if (seeds.length && seeds.every(seed => seed?.construction))
+      return { construction: true, reason: `${cadSketchGeneratorName(generator)} copies construction seeds, so its copies stay construction. Change the seeds instead.` };
+  }
+  return { construction: generator.construction, reason: null };
+}
+
+/** The edit that makes the edges `generator` makes construction geometry, or not: its record with the flag, regenerated in one step. */
+export function cadSketchGeneratorConstructionEdit(sketchId: string, generator: CadSketchGenerator, construction: boolean): CadEdit {
+  return { kind: 'set-sketch-generator', sketchId, generator: { ...generator, construction } };
 }
 
 /**
@@ -98,9 +141,12 @@ export function cadSketchProfileEdits(sketch: CadSketchFeature, next: CadSketchP
   return [...set, { kind: 'set-sketch-generator', sketchId: sketch.id, generator: replaced, ...confirmed }];
 }
 
-/** The sketch without the profile view `profileId`: a legacy profile goes alone, a generator with its members and the relations on them. */
+/**
+ * The sketch without the shape `profileId`: a legacy profile goes alone, a generator of any kind with its members and the relations on
+ * them.
+ */
 export function withoutCadSketchProfile(sketch: CadSketchFeature, profileId: string): CadSketchFeature {
-  if (!cadSketchProfileGenerator(sketch, profileId)) return { ...sketch, profiles: sketch.profiles.filter(entry => entry.id !== profileId) };
+  if (!cadSketchWholeGenerator(sketch, profileId)) return { ...sketch, profiles: sketch.profiles.filter(entry => entry.id !== profileId) };
   return deleteCadSketchElements({ sketch, pointIds: [], entityIds: [], relationIds: [profileId], cascade: true });
 }
 

@@ -76,6 +76,23 @@ describe('generators seen as the profiles they replace', () => {
     expect(refusal(() => applyCadEdits(generated(), [{ kind: 'add-sketch-dimension', sketchId: 'sketch', profileId: 'bore', constraint: { id: 'd', kind: 'dimension', quantity: 'diameter' } }])))
       .toMatchObject({ code: 'generator-sketch-dimension', message: expect.stringContaining('Circle "bore"') });
   });
+
+  it('name why a generator with no profile view is not moved, gripped or dimensioned as a profile, and delete it with its members', () => {
+    const hex: CadSketchGenerator = { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: 60, y: 0, radius: 5, sides: 6, directionId: '@h' } };
+    const star: CadSketchGenerator = { id: 'star', kind: 'generator', idPrefix: 'star', construction: false, geometry: createCadPluginProfile(CAD_STAR_PLUGIN) };
+    const document = documentWith({ graph: { points: [], entities: [], relations: [plate, hex, star] } });
+    expect(refusal(() => applyCadEdits(document, [{ kind: 'translate-sketch-profiles', sketchId: 'sketch', profileIds: ['plate', 'hex'], translation: [1, 0] }]))).toEqual(
+      expect.objectContaining({ code: 'unsupported-sketch-translation', message: 'Regular polygon "hex" is placed by its centre. Set its Center X and Y inputs to move it.' }));
+    expect(refusal(() => applyCadEdits(document, [{ kind: 'translate-sketch-profiles', sketchId: 'sketch', profileIds: ['star'], translation: [1, 0] }]))).toEqual(
+      expect.objectContaining({ code: 'unsupported-sketch-translation', message: 'Move a generated plugin contour through its placement configuration.' }));
+    expect(refusal(() => applyCadEdits(document, [{ kind: 'move-sketch-handle', sketchId: 'sketch', profileId: 'hex', handle: { kind: 'vertex', index: 0 }, translation: [1, 0] }]))).toEqual(
+      expect.objectContaining({ code: 'unsupported-sketch-handle', message: 'Regular polygon "hex" has no grips. Change its inputs with set-sketch-generator.' }));
+    expect(refusal(() => applyCadEdits(document, [{ kind: 'add-sketch-dimension', sketchId: 'sketch', profileId: 'hex', constraint: { id: 'd', kind: 'dimension', quantity: 'diameter' } }])))
+      .toMatchObject({ code: 'generator-sketch-dimension', message: expect.stringContaining('Regular polygon "hex"') });
+    const without = withoutCadSketchProfile(sketchOf(document), 'hex');
+    expect(without.graph?.relations.map(relation => relation.id)).toEqual(['plate', 'star']);
+    expect(without.graph?.points.some(point => point.id.startsWith('hex_'))).toBe(false); expect(without.graph?.entities.some(entity => entity.id.startsWith('hex_'))).toBe(false);
+  });
 });
 
 describe('legacy profiles', () => {

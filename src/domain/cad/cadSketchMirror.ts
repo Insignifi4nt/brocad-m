@@ -20,8 +20,10 @@ import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 import { CAD_SKETCH_ELEMENT_ID_PATTERN, CadSketchPositions, cadSketchVirtualAxis } from './sketch-relations/cadSketchVirtualElements';
 
+/** The most edges one Mirror copy takes. */
+export const CAD_SKETCH_MIRROR_ENTITIES_MAX = 64;
 export const CadSketchMirrorRequestSchema = Type.Object({
-  entityIds: Type.Array(CadIdentifierSchema, { minItems: 1, maxItems: 64, uniqueItems: true }),
+  entityIds: Type.Array(CadIdentifierSchema, { minItems: 1, maxItems: CAD_SKETCH_MIRROR_ENTITIES_MAX, uniqueItems: true }),
   /** A graph line, or the H or V axis. */
   axisLineId: Type.String({ pattern: CAD_SKETCH_ELEMENT_ID_PATTERN }),
   idPrefix: Type.String({ pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }),

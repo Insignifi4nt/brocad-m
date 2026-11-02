@@ -29,7 +29,7 @@ import { CadSketchUseEntityRequestSchema, prepareCadSketchUseEntity, cadSketchEx
 import { prepareCadSketchPatternSnapshot, reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
 import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
 import { assertCadSketchGeneratorRemovals, cadSketchGeneratorLockReason, cadSketchGeneratorName, cadSketchGeneratorRemovals } from './sketch-generators/cadSketchGenerators';
-import { cadSketchProfileGenerator, cadSketchProfileViews, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
+import { cadSketchGeneratorMoveReason, cadSketchProfileViews, cadSketchWholeGenerator, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
 import { detachCadSketchGenerator, setCadSketchGenerator, settleCadDocumentGenerators } from './sketch-generators/cadSketchGeneratorEdits';
 import { assertCadSketchGraphGeneratorCounts } from './sketch-generators/cadSketchGeneratorKinds';
 
@@ -334,7 +334,7 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'add-sketch-dimension': case 'set-sketch-dimension': case 'remove-sketch-dimension': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch for the dimension.');
-        const generated = cadSketchProfileGenerator(feature, edit.profileId);
+        const generated = cadSketchWholeGenerator(feature, edit.profileId);
         if (generated) throw new CadError('generator-sketch-dimension', `${cadSketchGeneratorName(generated)} is sized by its inputs, not by profile dimensions. Set its inputs, or bind them to parameters, with a set-sketch-generator edit.`);
         if (!feature.profiles.some(profile => profile.id === edit.profileId)) throw new CadError('missing-profile', 'The selected sketch contour no longer exists.');
         features[index] = { ...feature, profiles: feature.profiles.map(profile => {
@@ -357,7 +357,9 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'move-sketch-handle': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to edit.');
-        const profile = cadSketchProfileViews(feature).find(profile => profile.id === edit.profileId);
+        const profile = cadSketchProfileViews(feature).find(profile => profile.id === edit.profileId), whole = profile ? undefined : cadSketchWholeGenerator(feature, edit.profileId);
+        // A generator with no profile view, such as a regular polygon, exists but is changed through its inputs only.
+        if (whole) throw new CadError('unsupported-sketch-handle', `${cadSketchGeneratorName(whole)} has no grips. Change its inputs with set-sketch-generator.`);
         if (!profile) throw new CadError('missing-profile', 'The selected sketch contour no longer exists.');
         const translation = [evaluateCadScalar(edit.translation[0], parameters), evaluateCadScalar(edit.translation[1], parameters)] satisfies readonly [number, number];
         // A generator's shape moves as its profile did; its record takes the new geometry and its members regenerate.
@@ -479,6 +481,11 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'translate-sketch-profiles': {
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch for translation.');
+        // A shape without a profile view is placed by its inputs or its sources, and says so.
+        for (const id of edit.profileIds) {
+          const generator = cadSketchWholeGenerator(feature, id), reason = generator && cadSketchGeneratorMoveReason(generator);
+          if (reason) throw new CadError('unsupported-sketch-translation', reason);
+        }
         const views = cadSketchProfileViews(feature);
         if (edit.profileIds.some(id => !views.some(profile => profile.id === id))) throw new CadError('missing-profile', 'A selected sketch contour no longer exists.');
         const translation = [evaluateCadScalar(edit.translation[0], parameters), evaluateCadScalar(edit.translation[1], parameters)] satisfies readonly [number, number];
