@@ -161,6 +161,12 @@ describe('sketch generators in a document', () => {
     expect(position(split, 'p_v6')).toEqual([28, 18]);
     expect(graphOf(split).entities.find(entity => entity.id === 'p_e2')).toMatchObject({ startPointId: 'p_v2', endPointId: 'p_v6' });
     expect(graphOf(split).entities.find(entity => entity.id === 'p_e6')).toMatchObject({ startPointId: 'p_v6', endPointId: 'p_v3' });
+    // A vertex moved apart from the insertion, past an unchanged one, is an edit in place: v4 keeps its key, and the relations on it.
+    const alsoMoved = inserted.map((point, i): Point => i === 5 ? [2, 22] : point);
+    expect(refusal(() => set(document, outline(alsoMoved)))).toMatchObject({ relationIds: ['on-e2'] });
+    const both = set(documentWith({ points: [], entities: [], relations: [outline(hexagon)] }), outline(alsoMoved));
+    expect(graphOf(both).relations[0]).toMatchObject({ geometry: { ids: [0, 1, 2, 6, 3, 4, 5] } });
+    expect(position(both, 'p_v4')).toEqual([2, 22]);
     // The stored form keeps the ids, so the document loads with the same keys.
     expect(graphOf(parseCadDocument(JSON.parse(storedCadDocumentText(split))))).toEqual(graphOf(split));
     // The profile editor sees the points alone; a vertex it appends takes the next fresh id from the record it replaces, and splits the
@@ -183,10 +189,11 @@ describe('sketch generators in a document', () => {
     expect(position(set(released, outline(inserted, [0, 1, 2, 9, 3, 4, 5])), 'p_v9')).toEqual([28, 18]);
   });
 
-  it('key a listed path by entry id, so a segment split in two keeps its joints, and only the piece that starts at the new joint is reshaped', () => {
+  it('key a listed path by entry id, so a split the caller identifies keeps its joints, and one it does not asks before removing them', () => {
     type Point = readonly [number, number];
     const line = (start: Point, end: Point) => ({ kind: 'line' as const, start, end });
-    const outline = (segments: ReturnType<typeof line>[]): CadSketchGenerator => ({ id: 'route', kind: 'generator', idPrefix: 'r', construction: false, geometry: { kind: 'path', segments } });
+    const outline = (segments: ReturnType<typeof line>[], ids?: readonly number[]): CadSketchGenerator => ({ id: 'route', kind: 'generator', idPrefix: 'r', construction: false,
+      geometry: { kind: 'path', segments, ...ids ? { ids } : {} } });
     const corners: readonly Point[] = [[0, 0], [20, 0], [20, 10], [0, 10]];
     const square = corners.map((corner, i) => line(corner, corners[(i + 1) % 4]));
     // Each joint at a distance from u, and a free point on each segment's middle.
@@ -194,12 +201,17 @@ describe('sketch generators in a document', () => {
       { id: `on-s${i}`, kind: 'midpoint', pointId: `w${i}`, lineId: `r_s${i}` }]; });
     const middles = square.map(({ start, end }, i) => ({ id: `w${i}`, position: [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2] }));
     const document = documentWith({ points: [{ id: 'u', position: [40, 40] }, ...middles], entities: [], relations: [outline(square), ...ties] });
-    // Splitting s1 at (20, 4): the piece ending at the old joint keeps s1 and j1, and the piece before it is new, ending at its own joint.
+    // Splitting s1 at (20, 4) replaces one segment with two, and nothing says which piece is s1: both are new, so the relations on s1, on
+    // its end joint j1 and on s2, which now starts at a new joint, leave, and the edit asks before removing them.
     const pieces = [square[0], line([20, 0], [20, 4]), line([20, 4], [20, 10]), square[2], square[3]];
-    expect(refusal(() => edit(document, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: outline(pieces) }))).toMatchObject({ relationIds: ['on-s1'],
+    expect(refusal(() => edit(document, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: outline(pieces) }))).toMatchObject({ relationIds: ['to-j1', 'on-s1', 'on-s2'] });
+    // The caller's ids say which: the piece ending at the old joint is s1 and keeps it and j1, the piece before it is new, ending at its
+    // own joint, and only s1, which now starts there, is reshaped.
+    const identified = outline(pieces, [0, 4, 1, 2, 3]);
+    expect(refusal(() => edit(document, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: identified }))).toMatchObject({ relationIds: ['on-s1'],
       message: expect.stringMatching(/^Path "route" no longer generates geometry that Midpoint "on-s1" uses\./) });
     const released = edit(document, { kind: 'remove-sketch-relation', sketchId: 'sketch', relationId: 'on-s1' });
-    const split = edit(released, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: outline(pieces) });
+    const split = edit(released, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: identified });
     expect(graphOf(split).relations[0]).toMatchObject({ geometry: { ids: [0, 4, 1, 2, 3] } });
     expect(graphOf(split).relations.filter(relation => relation.kind !== 'generator')).toEqual(graphOf(released).relations.filter(relation => relation.kind !== 'generator'));
     expect(position(split, 'r_j1')).toEqual([20, 10]);

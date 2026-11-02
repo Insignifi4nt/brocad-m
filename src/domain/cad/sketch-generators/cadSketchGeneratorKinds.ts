@@ -243,55 +243,48 @@ const cadSketchEntryIds = (geometry: Listed): readonly number[] => geometry.ids 
 // The largest middle of two lists, in entries of each multiplied, compared entry by entry for the entries they share.
 const ENTRY_COMPARISON_LIMIT = 1_000_000;
 /**
- * `next` with an id for each entry. Ids `next` gives are its own. Otherwise a list of the same length keeps the ids in place, as an
- * edit of entries' fields does, unless it holds the same entries in another order, whose ids go with them. A list that grows or shrinks
- * keeps the id of each entry it holds unchanged: those in place, matched as the longest common run in order, then those moved, as the
- * same closed outline from another start holds them. In each gap between the entries in place, the changed entries take the ids of the
- * gap's changed previous entries from its end, as a segment split in two keeps its id on the piece that ends where it ended, which keys
- * the joint there, and the others take fresh ids. Ids that are the indices are not stored.
+ * `next` with an id for each entry. Ids `next` gives are its own: the caller's correspondence wins. Otherwise each entry `next` holds
+ * unchanged keeps its id: those in place, as the common start and end and then the longest common run in order, and then those moved,
+ * as the same closed outline from another start holds them. Between two entries kept in place, a gap holding as many changed entries
+ * as before keeps their ids in order, as an edit of entries' fields does. A gap that also grows or shrinks is ambiguous, an edit
+ * beside an insertion or a removal, so its changed entries take fresh ids and its previous ones leave, with the relations on their
+ * members through the confirmable removal: a relation never moves to an entry only guessed to replace its own. Ids that are the indices
+ * are not stored.
  */
 function identifiedEntries<G extends Listed>(previous: G, next: G): G {
   if (next.ids) return next;
   const before = entriesOf(previous).map(entry => JSON.stringify(entry)), after = entriesOf(next).map(entry => JSON.stringify(entry)), had = cadSketchEntryIds(previous);
-  const places = (from: number, to: number, taken: (index: number) => boolean) => {
-    const found = new Map<string, number[]>();
-    for (let index = from; index < to; index++) if (!taken(index)) { const list = found.get(before[index]); if (list) list.push(index); else found.set(before[index], [index]); }
-    return found;
-  };
-  let ids: (number | undefined)[] = new Array(after.length);
-  if (before.length === after.length) {
-    const found = places(0, before.length, () => false), moved = after.map(entry => found.get(entry)?.shift());
-    ids = moved.every(index => index !== undefined) ? moved.map(index => had[index!]) : [...had];
-  } else {
-    const claimed = new Uint8Array(before.length), keep = (from: number, to: number) => { ids[to] = had[from]; claimed[from] = 1; };
-    let start = 0, endBefore = before.length, endAfter = after.length;
-    while (start < endBefore && start < endAfter && before[start] === after[start]) { keep(start, start); start++; }
-    while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) keep(--endBefore, --endAfter);
-    // The unchanged entries of the middle in place, as pairs of indices in order.
-    const pairs: [number, number][] = [], rows = endBefore - start, columns = endAfter - start;
-    if (rows * columns <= ENTRY_COMPARISON_LIMIT && rows && columns) {
-      const lengths = new Uint32Array((rows + 1) * (columns + 1)), at = (row: number, column: number) => row * (columns + 1) + column;
-      for (let row = rows - 1; row >= 0; row--) for (let column = columns - 1; column >= 0; column--)
-        lengths[at(row, column)] = before[start + row] === after[start + column] ? lengths[at(row + 1, column + 1)] + 1 : Math.max(lengths[at(row + 1, column)], lengths[at(row, column + 1)]);
-      for (let row = 0, column = 0; row < rows && column < columns;) {
-        if (before[start + row] === after[start + column]) { pairs.push([start + row, start + column]); keep(start + row, start + column); row++; column++; }
-        else if (lengths[at(row + 1, column)] >= lengths[at(row, column + 1)]) row++; else column++;
-      }
+  const ids: (number | undefined)[] = new Array(after.length), claimed = new Uint8Array(before.length);
+  const keep = (from: number, to: number) => { ids[to] = had[from]; claimed[from] = 1; };
+  let start = 0, endBefore = before.length, endAfter = after.length;
+  while (start < endBefore && start < endAfter && before[start] === after[start]) { keep(start, start); start++; }
+  while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) keep(--endBefore, --endAfter);
+  // The unchanged entries of the middle in place, as pairs of indices in order.
+  const pairs: [number, number][] = [], rows = endBefore - start, columns = endAfter - start;
+  if (rows * columns <= ENTRY_COMPARISON_LIMIT && rows && columns) {
+    const lengths = new Uint32Array((rows + 1) * (columns + 1)), at = (row: number, column: number) => row * (columns + 1) + column;
+    for (let row = rows - 1; row >= 0; row--) for (let column = columns - 1; column >= 0; column--)
+      lengths[at(row, column)] = before[start + row] === after[start + column] ? lengths[at(row + 1, column + 1)] + 1 : Math.max(lengths[at(row + 1, column)], lengths[at(row, column + 1)]);
+    for (let row = 0, column = 0; row < rows && column < columns;) {
+      if (before[start + row] === after[start + column]) { pairs.push([start + row, start + column]); keep(start + row, start + column); row++; column++; }
+      else if (lengths[at(row + 1, column)] >= lengths[at(row, column + 1)]) row++; else column++;
     }
-    const moved = places(start, endBefore, index => claimed[index] === 1);
-    for (let index = start; index < endAfter; index++) if (ids[index] === undefined) { const from = moved.get(after[index])?.shift(); if (from !== undefined) keep(from, index); }
-    let gapBefore = start, gapAfter = start;
-    for (const [matchedBefore, matchedAfter] of [...pairs, [endBefore, endAfter] as [number, number]]) {
-      const olds: number[] = [], news: number[] = [];
-      for (let index = gapBefore; index < matchedBefore; index++) if (!claimed[index]) olds.push(index);
-      for (let index = gapAfter; index < matchedAfter; index++) if (ids[index] === undefined) news.push(index);
-      for (let back = 1; back <= Math.min(olds.length, news.length); back++) keep(olds[olds.length - back], news[news.length - back]);
-      gapBefore = matchedBefore + 1; gapAfter = matchedAfter + 1;
-    }
-    let fresh = Math.max(-1, ...had) + 1;
-    for (let index = 0; index < ids.length; index++) if (ids[index] === undefined) ids[index] = fresh++;
-    if (fresh - 1 > CAD_SKETCH_ENTRY_ID_MAX) throw invalid(`This ${next.kind} has used every entry id up to ${CAD_SKETCH_ENTRY_ID_MAX}. Detach it, and draw a new one.`);
   }
+  // The unchanged entries that moved.
+  const moved = new Map<string, number[]>();
+  for (let index = start; index < endBefore; index++) if (!claimed[index]) { const list = moved.get(before[index]); if (list) list.push(index); else moved.set(before[index], [index]); }
+  for (let index = start; index < endAfter; index++) if (ids[index] === undefined) { const from = moved.get(after[index])?.shift(); if (from !== undefined) keep(from, index); }
+  let gapBefore = start, gapAfter = start;
+  for (const [matchedBefore, matchedAfter] of [...pairs, [endBefore, endAfter] as [number, number]]) {
+    const olds: number[] = [], news: number[] = [];
+    for (let index = gapBefore; index < matchedBefore; index++) if (!claimed[index]) olds.push(index);
+    for (let index = gapAfter; index < matchedAfter; index++) if (ids[index] === undefined) news.push(index);
+    if (olds.length === news.length) olds.forEach((from, at) => keep(from, news[at]));
+    gapBefore = matchedBefore + 1; gapAfter = matchedAfter + 1;
+  }
+  let fresh = Math.max(-1, ...had) + 1;
+  for (let index = 0; index < ids.length; index++) if (ids[index] === undefined) ids[index] = fresh++;
+  if (fresh - 1 > CAD_SKETCH_ENTRY_ID_MAX) throw invalid(`This ${next.kind} has used every entry id up to ${CAD_SKETCH_ENTRY_ID_MAX}. Detach it, and draw a new one.`);
   const { ids: _none, ...plain } = next;
   return (ids.every((id, index) => id === index) ? plain : { ...plain, ids }) as G;
 }

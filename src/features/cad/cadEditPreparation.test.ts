@@ -547,4 +547,29 @@ describe('sketch generators in edit preparation', () => {
       expect(kept.relations.map(relation => relation.id)).toContain('tie');
     });
   });
+
+  it('ask before removing a relation on a vertex an edit moves in the gap it also inserts into, and never move the geometry on it to another vertex', async () => {
+    type Point = readonly [number, number];
+    const plate = (points: readonly Point[], ids?: readonly number[]) => ({ id: 'p', kind: 'generator' as const, idPrefix: 'p', construction: false,
+      geometry: { kind: 'polygon' as const, points, ...ids ? { ids } : {} } });
+    const square: readonly Point[] = [[0, 0], [20, 0], [20, 20], [0, 20]];
+    const document = parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Sketch', suppressed: false,
+      plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [20, 0] }], entities: [],
+        relations: [plate(square), { id: 'tie', kind: 'coincident', pointIds: ['u', 'p_v1'] }] } }] });
+    const set = (generator: ReturnType<typeof plate>, removedRelationIds?: readonly string[]): CadEdit => ({ kind: 'set-sketch-generator', sketchId: 'sketch', generator,
+      ...removedRelationIds ? { removedRelationIds } : {} });
+    const at = (graph: ReturnType<typeof graphOf>, id: string) => graph.points.find(point => point.id === id)!.position as readonly [number, number];
+    // The second vertex moved and another inserted after it: nothing says which new vertex, if either, is the one the point is on.
+    const reshaped: readonly Point[] = [[0, 0], [18, -2], [22, 8], [20, 20], [0, 20]];
+    await expect(prepareCadEdits(document, [set(plate(reshaped))], solver)).rejects.toMatchObject({ code: 'unconfirmed-sketch-generator-removals', relationIds: ['tie'] });
+    // Confirmed, both vertices are new and the point stays where it was.
+    const confirmed = graphOf((await prepareCadEdits(document, [set(plate(reshaped), ['tie'])], solver)).document);
+    expect(confirmed.relations.map(relation => relation.id)).toEqual(['p']);
+    expect(confirmed.relations[0]).toMatchObject({ geometry: { ids: [0, 4, 5, 2, 3] } });
+    expect(at(confirmed, 'u')).toEqual([20, 0]);
+    // The caller's ids say which: the moved vertex is still the second, so the relation stays and the point follows it.
+    const identified = graphOf((await prepareCadEdits(document, [set(plate(reshaped, [0, 1, 4, 2, 3]))], solver)).document);
+    expect(identified.relations.map(relation => relation.id)).toEqual(['p', 'tie']);
+    at(identified, 'u').forEach((value, axis) => expect(value).toBeCloseTo([18, -2][axis], 9));
+  });
 });
