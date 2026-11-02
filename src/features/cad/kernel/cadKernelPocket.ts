@@ -34,7 +34,7 @@ function extrudePocketRegion(wires: readonly Sketch[], span: number, normal: Sim
     const oriented = own(fixer.Face());
     const vector = own(new Vector([normal[0] * span, normal[1] * span, normal[2] * span]));
     const builder = own(new oc.BRepPrimAPI_MakePrism(oriented, vector.wrapped, false, true));
-    if (!builder.IsDone()) throw new CadError('pocket-tool', 'OpenCascade could not extrude the through-all cutting face.');
+    if (!builder.IsDone()) throw new CadError('pocket-tool', 'The pocket could not make its through-all cutting tool from the sketch. A contour may cross itself; edit the sketch.');
     const raw = own(builder.Shape()); const shape = cast(raw);
     if (!isShape3D(shape)) { cadKernelDisposeOwned(shape); throw new CadError('pocket-tool', 'Pocket profiles did not produce a solid cutting tool.'); }
     return shape;

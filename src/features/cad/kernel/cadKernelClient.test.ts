@@ -93,6 +93,7 @@ describe('CAD worker lifetime and cancellation', () => {
     expect(isCadKernelReply(reply(stop))).toBe(false);
     expect(isCadKernelReply(reply({ ...failure, featureId: 'other' }, stop))).toBe(false);
     expect(isCadKernelReply(reply(failure, { ...stop, featureId: undefined }))).toBe(false);
+    expect(isCadKernelReply(reply(failure, { ...stop, details }))).toBe(false);
   });
   it('checks preview triangle topology and rejects malformed buffers before rendering', () => {
     const mesh = { featureId: 'body', name: 'Body', positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1], indices: [0, 1, 2], edges: [], volume: 1,

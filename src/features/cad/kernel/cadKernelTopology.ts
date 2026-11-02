@@ -227,7 +227,7 @@ export class CadKernelTopology {
   meshGroups(mesh: ShapeMesh, edgeMesh: ShapeEdgeMesh): { faceGroups: CadMeshTopologyGroup[]; edgeGroups: CadMeshTopologyGroup[] } {
     const keyFor = (kind: Entry['kind'], index: number) => {
       const entry = this.indices.get(`${kind}:${index}`);
-      if (!entry) throw new CadError('topology-mapping', 'The kernel preview contains topology absent from the exact body.');
+      if (!entry) throw new CadError('topology-mapping', 'The drawn body has faces or edges the exact body does not. Rebuild the part and select again.');
       return entry.key;
     };
     return { faceGroups: mesh.faceGroups.filter(group => group.count > 0).map(group => ({ start: group.start, count: group.count, key: keyFor('face', group.faceId) })),
@@ -336,7 +336,7 @@ export class CadKernelTopology {
         const raw = builder.Edge(contour, index);
         try {
           const member = this.indices.get(`edge:${indexed.FindIndex(raw)}`);
-          if (member?.kind !== 'edge') throw new CadError('kernel-operation-failed', 'The native tangent chain left this body. Rebuild and select again.');
+          if (member?.kind !== 'edge') throw new CadError('kernel-operation-failed', 'The tangent edges found from this edge left the body. Rebuild the part and select again.');
           edges.add(member.key);
         } finally { cadKernelDisposeOwned(raw); }
       }

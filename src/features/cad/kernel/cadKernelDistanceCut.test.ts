@@ -170,7 +170,7 @@ describe('confirmed material removal by sketch-based Distance Cut', () => {
     try {
       const model = buildCadKernelModel(parseCadDocument(document([...stock(), sketch('tool', circle()), cut()])));
       try {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'cut', message: `Interrupted Cut ${phase}` }); expect(model.result.meshes[0].featureId).toBe('stock');
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'cut', code: 'kernel-operation-failed', details: { operation: 'cut', input: { field: 'targetId', id: 'stock' }, kernelMessage: `Interrupted Cut ${phase}` } }); expect(model.result.meshes[0].featureId).toBe('stock');
         if (!target || !tool) throw new Error('Expected native cutting operands');
         expect(measureVolume(target)).toBeCloseTo(4000, 7); const releasedTool = tool; expect(() => releasedTool.wrapped).toThrow();
         if (phase === 'cut') { if (!common) throw new Error('Expected owned intersection'); const releasedCommon = common; expect(() => releasedCommon.wrapped).toThrow(); }

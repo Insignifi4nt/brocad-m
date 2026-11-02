@@ -143,7 +143,7 @@ describe('canonical datum loft construction', () => {
       const model = buildCadKernelModel(document([...stock, datum(), sketch('a', 0, circle(5)), sketch('b', 20, circle(5)),
         loft(['a', 'b'], { operation: 'cut', targetId: 'stock' })]));
       try {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'loft', message: 'Forced loft setup failure' });
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'loft', code: 'kernel-operation-failed', details: { operation: 'loft', input: null, kernelMessage: 'Forced loft setup failure' } });
         expect(model.result.meshes.map(mesh => mesh.featureId)).toEqual(['stock']);
         expect(model.result.meshes[0].volume).toBeCloseTo(8000, 6);
         expect(() => model.section({ bodyId: 'stock', plane: 'XY', offset: 10 })).toThrow('Fix the model diagnostics');

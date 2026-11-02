@@ -343,3 +343,13 @@ it('retains accepted material when exporting a diagnosed candidate, while an exp
       .toMatchObject({ kind: 'topology-inspected', result: { total: 12 } });
   } finally { runtime.dispose(); }
 });
+
+it('names a kernel that fails to load as the cause of a request, keeping the loader\'s words apart', async () => {
+  const runtime = createCadKernelRuntime(async () => { throw new Error('WebAssembly.instantiate(): out of memory'); });
+  const unavailable = { kind: 'error', code: 'kernel-unavailable', message: 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.',
+    kernelMessage: 'WebAssembly.instantiate(): out of memory' };
+  try {
+    expect(await runtime.evaluate({ id: 1, kind: 'build', document })).toEqual({ id: 1, ...unavailable });
+    expect(await runtime.evaluate({ id: 2, kind: 'import-solid', source: { format: 'step', fileName: 'part.step', encoding: 'utf8', data: 'ISO-10303-21;' } })).toEqual({ id: 2, ...unavailable });
+  } finally { runtime.dispose(); }
+});

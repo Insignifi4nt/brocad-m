@@ -107,7 +107,7 @@ export function createCadKernelClient(makeWorker: () => CadWorkerTransport = () 
           if (!isCadKernelReply(event.data)) { fail(new Error('Invalid CAD worker response.')); return; }
           if (event.data.id !== active?.request.id) return; // A stale worker can never overwrite a newer request.
           if (!active || !matchesTopologyRequest(active.request, event.data)) { fail(new Error('CAD topology response does not match the requested body and build.')); return; }
-          finish(event.data.kind === 'error' ? event.data.code ? new CadError(event.data.code, event.data.message) : new Error(event.data.message) : event.data);
+          finish(event.data.kind === 'error' ? event.data.code ? CadError.received(event.data.code, event.data.message, event.data) : new Error(event.data.message) : event.data);
         };
         transport.onerror = () => { if (worker === transport) fail(new Error('The CAD worker stopped. Retry the operation to restart it.')); };
         transport.onmessageerror = () => { if (worker === transport) fail(new Error('The CAD worker response could not be read.')); };

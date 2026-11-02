@@ -38,7 +38,7 @@ export function sectionCadKernelShape(shape: Shape3D, section: Pick<CadSectionRe
     const builder = new (getOC()).BRepAlgoAPI_Section(shape.wrapped, plane, false);
     try {
       builder.Approximation(false); builder.Build();
-      if (builder.HasErrors()) throw new CadError('section-failed', 'OpenCascade could not compute an exact planar section.');
+      if (builder.HasErrors()) throw new CadError('section-failed', 'The section could not be cut through this body. The plane may run along a face or an edge; move the section plane slightly.');
       const raw = builder.Shape();
       let output: ReturnType<typeof cast>;
       try { output = cast(raw); } finally { cadKernelDisposeOwned(raw); }

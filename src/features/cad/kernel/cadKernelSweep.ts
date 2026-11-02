@@ -14,7 +14,7 @@ function validateSweepSolid(shape: Shape3D) {
   const oc = getOC(); const solids = cadKernelSolids(shape);
   try {
     if (solids.length !== 1) throw new CadError('sweep-invalid', 'Sweep must produce one closed solid. Revise the section or curve.');
-    if (!cadKernelIsValid(shape)) throw new CadError('sweep-invalid', 'OpenCascade rejected the exact Sweep topology. Revise the section or curve.');
+    if (!cadKernelIsValid(shape)) throw new CadError('sweep-invalid', 'The sweep made a body whose faces cross or leave gaps. Reduce the section or ease the bends of the curve.');
     const volume = cadKernelVolume(shape);
     if (!Number.isFinite(volume) || volume <= CAD_PRECISION.kernelMinimumVolumeMm3) throw new CadError('sweep-volume', 'Sweep must produce positive volume with outward orientation.');
     const shells = new oc.TopExp_Explorer(shape.wrapped, oc.TopAbs_ShapeEnum.TopAbs_SHELL, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
@@ -96,11 +96,11 @@ export function buildCadSweepSolid(resolved: CadResolvedSweepInputs): Shape3D {
       const axis = center ? own(cadKernelAx1([center[0], center[1], center[2]], [resolved.frame.binormal[0], resolved.frame.binormal[1], resolved.frame.binormal[2]])) : null;
       const builder = segment.kind === 'line' && displacement ? own(new oc.BRepPrimAPI_MakePrism(face.wrapped, displacement.wrapped, false, true))
         : segment.kind === 'arc' && axis ? own(new oc.BRepPrimAPI_MakeRevol(face.wrapped, axis, segment.sweep * Math.PI / 180, false)) : null;
-      if (!builder || !builder.IsDone()) throw new CadError('sweep-failed', `OpenCascade could not construct curve segment ${index + 1}.`);
+      if (!builder || !builder.IsDone()) throw new CadError('sweep-failed', `The sweep could not follow curve segment ${index + 1}. The section may be too large for that segment; reduce the section or revise the segment.`);
       const raw = builder.Shape(); let piece: Shape3D;
       try {
         const shape = cast(raw);
-        if (!isShape3D(shape)) { cadKernelDisposeOwned(shape); throw new CadError('sweep-invalid', 'Sweep segment did not produce a native solid.'); }
+        if (!isShape3D(shape)) { cadKernelDisposeOwned(shape); throw new CadError('sweep-invalid', `The sweep made no closed solid along curve segment ${index + 1}. The section may be too large for that segment; reduce the section or revise the segment.`); }
         piece = own(shape);
       } finally { cadKernelDisposeOwned(raw); }
       validateSweepSolid(piece);

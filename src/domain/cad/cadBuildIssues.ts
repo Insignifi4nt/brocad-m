@@ -73,7 +73,7 @@ function kernelFailure(diagnostic: CadDiagnostic, key: string, feature: CadFeatu
   const input = diagnostic.details?.input ?? null;
   const subject = diagnostic.featureId === undefined ? { kind: 'document' } as const
     : input ? { kind: 'reference-slot', featureId: diagnostic.featureId, field: input.field, inputId: input.id } as const : { kind: 'feature', featureId: diagnostic.featureId } as const;
-  const failure: CadKernelFailure = { operation: diagnostic.details?.operation ?? operationOf(feature), input, kernelMessage: diagnostic.details?.kernelMessage ?? null };
+  const failure: CadKernelFailure = { operation: diagnostic.details?.operation ?? cadKernelOperationOf(feature), input, kernelMessage: diagnostic.details?.kernelMessage ?? null };
   // The reply guard admits only codes the registry lists, with the facts each carries; anything else is an unexpected kernel failure.
   const code = isCadRefusalCode(diagnostic.code) && diagnostic.code !== 'rebuild-stopped' ? diagnostic.code : 'kernel-operation-failed';
   const common = { key, namespace: 'kernel', severity: 'error', state: 'failed', subject, message: diagnostic.message, causes,
@@ -99,8 +99,8 @@ function featureRepairs(feature: CadFeature, code: CadRefusalCode, version: stri
   return repairs;
 }
 
-/** The step a failure without kernel details was taking: the feature's own operation. */
-function operationOf(feature: CadFeature | undefined): CadKernelOperation {
+/** The kernel step a feature's rebuild starts with, and the step a failure without kernel details names: the feature's own operation. */
+export function cadKernelOperationOf(feature: CadFeature | undefined): CadKernelOperation {
   switch (feature?.kind) {
     case 'imported': return 'import';
     case 'extrude': case 'revolve': case 'loft': case 'sweep': case 'pocket': case 'fillet': case 'chamfer': case 'shell': case 'transform': case 'mirror': return feature.kind;

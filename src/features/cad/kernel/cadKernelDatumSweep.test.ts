@@ -119,7 +119,7 @@ describe('exact datum Sweep transport', () => {
     try {
       const features = inputs('XY', mixed); const model = buildCadKernelModel(document([...stock, ...features.direct.slice(0, -1), sweep({ operation: 'cut', targetId: 'stock' })]));
       try {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'sweep', message: 'Forced datum terminal cap failure' });
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'sweep', code: 'kernel-operation-failed', details: { operation: 'sweep', kernelMessage: 'Forced datum terminal cap failure' } });
         expect(model.result.meshes.map(mesh => mesh.featureId)).toEqual(['stock']); expect(model.result.meshes[0].volume).toBeCloseTo(8000, 6);
         expect(released).toContain(failed); expect(wires.length).toBeGreaterThanOrEqual(2);
         for (const wire of wires) expect(() => wire.wrapped).toThrow();

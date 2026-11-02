@@ -120,7 +120,7 @@ describe('exact native circular solid patterns', () => {
     });
     try {
       built([...seed, circular()], model => {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'pattern', message: 'Interrupted native union' });
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'pattern', code: 'kernel-operation-failed', details: { operation: 'pattern', input: { field: 'sourceId', id: 'seed' }, kernelMessage: 'Interrupted native union' } });
         expect(model.result.meshes[0].featureId).toBe('seed');
         expect(model.result.meshes[0].volume).toBeCloseTo(2 * Math.PI, 6);
         if (!originalSeed) throw new Error('Expected retained native seed');

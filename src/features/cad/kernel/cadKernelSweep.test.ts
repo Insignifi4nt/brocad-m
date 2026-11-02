@@ -181,7 +181,7 @@ describe('exact segmented Sweep solids', () => {
     const fail = vi.spyOn(cadKernelBuilders, 'fuse').mockImplementation((left, other) => { target = left; generated = other; return native(left, other); });
     try {
       built([...block, sketch(), rail(), sweep({ operation: 'join', targetId: 'block' })], model => {
-        expect(model.result.diagnostics[0].message).toBe('Interrupted Sweep join'); expect(model.result.meshes[0].featureId).toBe('block');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'join', input: { field: 'targetId', id: 'block' }, kernelMessage: 'Interrupted Sweep join' } }); expect(model.result.meshes[0].featureId).toBe('block');
         if (!generated || !target) throw new Error('Expected native operands');
         const released = generated; expect(() => released.wrapped).toThrow(); expect(measureVolume(target)).toBeCloseTo(500, 7);
         expect(watch.failed).toHaveLength(1); expect(watch.outstanding()).toBe(0);
@@ -196,7 +196,7 @@ describe('exact segmented Sweep solids', () => {
     });
     try {
       built([...block, sketch(), rail(mixed), sweep()], model => {
-        expect(model.result.diagnostics[0].message).toBe('Interrupted staged Sweep fuse'); expect(model.result.meshes[0].featureId).toBe('block');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'sweep', kernelMessage: 'Interrupted staged Sweep fuse' } }); expect(model.result.meshes[0].featureId).toBe('block');
         expect(staged).toHaveLength(2); for (const shape of staged) expect(() => shape.wrapped).toThrow();
         expect(model.result.meshes[0].volume).toBeCloseTo(500, 7);
         expect(watch.failed).toHaveLength(1); expect(watch.outstanding()).toBe(0);
