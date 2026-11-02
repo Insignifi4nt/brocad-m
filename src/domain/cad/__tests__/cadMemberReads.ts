@@ -1,7 +1,7 @@
 // TypeScript 7 ships no compiler API yet; AST tooling uses the TypeScript 6 package.
 import ts from '@typescript/typescript6';
 import {
-  bareExpression, isCadErrorFactory, isExtended, isReference, isTypeOnly, methodUse, type CadDiagnosticReach, type CadMemberRead, type CadSourceIndex
+  bareExpression, calleeOf, isCadErrorFactory, isExtended, isReference, isTypeOnly, methodUse, type CadDiagnosticReach, type CadMemberRead, type CadSourceIndex
 } from './cadDiagnosticReach';
 
 /**
@@ -132,7 +132,11 @@ function outermost(node: ts.Expression): ts.Expression {
  *   `CadError` factories, whose code is read at each call. One that resolves to the `CadError` constructor, inherited or not, or a factory,
  *   which the walk neither took as a raise (`raises`) nor reported, unless it reported a factory, or a class raising `CadError`, given on
  *   (`escaped`). One that resolves to a function or constructor whose parameter gives a code, at which the walk did not read that
- *   parameter (`argumentsRead`), unless it reported that function or constructor passed on (`escaped`).
+ *   parameter (`argumentsRead`), unless it reported that function or constructor passed on (`escaped`). A call that may run a function
+ *   TypeScript gives no implementation of (`unimplemented`), such as a callable parameter, a variable or a member only a signature
+ *   declares, which the walk neither traced from the value that gives it (`traced`) nor reported: its targets say nothing of what it
+ *   runs. A member read it calls may stand instead when the walk stopped at it, or followed it and each signature TypeScript gives it is
+ *   one an object or class of the source fits (`accessedMembers`), whose code the member reads' check finds entered.
  */
 export function cadSkippedMemberReads(index: CadSourceIndex, reach: CadDiagnosticReach): readonly string[] {
   const skipped: string[] = [];
@@ -185,8 +189,18 @@ export function cadSkippedMemberReads(index: CadSourceIndex, reach: CadDiagnosti
     const callee = bareExpression(call.expression);
     return ts.isIdentifier(callee) ? reach.unresolved.has(callee) : (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) && reach.accesses.get(callee) === 'unexpanded';
   };
+  const settledMember = (call: ts.CallExpression) => {
+    const callee = calleeOf(call), value = callee && bareExpression(callee);
+    if (!value || !(ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value))) return false;
+    const outcome = reach.accesses.get(value);
+    if (outcome === 'stopped') return true;
+    const name = ts.isPropertyAccessExpression(value) ? value.name.text : ts.isStringLiteralLike(value.argumentExpression) ? value.argumentExpression.text : undefined;
+    return outcome === 'followed' && name !== undefined && index.accessedMembers(value, name, () => true)?.bare.length === 0;
+  };
   for (const { file, call } of cadCalls(reach)) {
     const at = `${file}: ${shortly(call)}`;
+    if (ts.isCallExpression(call) && index.unimplemented(call) && !reach.traced.has(call) && !reported(call) && !settledMember(call))
+      skipped.push(`${at}, a call of a function TypeScript gives no implementation of, which the walk neither traced nor reported`);
     for (const target of index.calledDeclarations(call)) {
       if (raising(target)) {
         if (!reach.raises.has(call) && !reach.untold.has(call) && !reach.escaped.has(target)) skipped.push(`${at}, a CadError raised whose code the walk did not read`);

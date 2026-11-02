@@ -174,6 +174,46 @@ describe('CAD diagnostic reach', () => {
     expect(reach(`function inspect(sketch: { name: string }) { return new Inspection(sketch); }\n${check}`).unexpanded)
       .toEqual([`${FILE}: Inspection, a class the walk cannot tell, constructed`, UNFOUND('Inspection'), `${FILE}: inspection.code, from ${FILE}: new Inspection(sketch).code`]);
   });
+
+  it('reports a call of a function it cannot establish: a callable parameter, destructured or not, a member only a signature declares, a variable set elsewhere', () => {
+    const given = (site: string, from: string) => `${FILE}: ${site}, a call of a function a value gives, from ${FILE}: ${from}`;
+    const cases: readonly (readonly [string, string])[] = [
+      // A callback registered by a function the walk does not enter.
+      [`let refuse: () => never; export function configure() { refuse = () => { throw new CadError('registered-refusal', ''); }; } export function check() { refuse(); }`,
+        given('refuse()', `() => { throw new CadError('registered-refusal', ''); }, a function the walk did not enter`)],
+      [`let refuse: () => never; export function check() { refuse(); }`, given('refuse()', 'refuse, declared with no value the walk can find')],
+      [`declare const refuse: () => never; export function check() { refuse(); }`, given('refuse()', 'refuse, declared with no value the walk can find')],
+      [`export function check(refuse: () => never) { refuse(); }`, given('refuse()', 'refuse, a parameter of a function the walk sees no call of')],
+      [`export function check({ refuse }: { refuse(): never }) { refuse(); }`, given('refuse()', '{ refuse }, a parameter of a function the walk sees no call of')],
+      [`export function check(value: { refuse(): never }) { value.refuse(); }`,
+        `${FILE}: value.refuse(), a member only a signature declares, from ${FILE}: value, a parameter of a function the walk sees no call of`],
+      [`class Checker { private refuse?: () => never; run() { this.refuse?.(); } } export function check() { new Checker().run(); }`,
+        `${FILE}: this.refuse?.(), a member only a signature declares, from ${FILE}: refuse, declared with no value the walk can find`]
+    ];
+    for (const [source, site] of cases) expect(reach(source), source).toEqual({ codes: [], unexpanded: [site] });
+  });
+
+  it('follows a call of a function it can establish: a closure, an alias, a bound function, a map\'s or a private property\'s, one returned or given on', () => {
+    const cases: readonly (readonly [string, string])[] = [
+      [`const { refuse } = { refuse() { throw new CadError('destructured-closure', ''); } }; export function check() { refuse(); }`, 'destructured-closure'],
+      [`const refuse = (() => { return () => { throw new CadError('returned-closure', ''); }; })(); export function check() { refuse(); }`, 'returned-closure'],
+      [`function refusal(): never { throw new CadError('aliased', ''); } const refuse = refusal; export function check() { refuse(); }`, 'aliased'],
+      [`const { refuse }: { refuse(): never } = { refuse() { throw new CadError('typed-closure', ''); } }; export function check() { refuse(); }`, 'typed-closure'],
+      [`const boxed = { refuse() { throw new CadError('opaque', ''); } } as { refuse(): never }; export function check() { boxed.refuse(); }`, 'opaque'],
+      [`function refusal(this: unknown): never { throw new CadError('bound', ''); } export function check() { refusal.bind(null)(); }`, 'bound'],
+      [`const cache = new Map<string, () => never>(); export function check() { cache.set('a', () => { throw new CadError('cached', ''); }); cache.get('a')!(); }`, 'cached'],
+      [`class Checker { private refuse?: () => never; run() { this.refuse ??= () => { throw new CadError('lazy', ''); }; this.refuse(); } } export function check() { new Checker().run(); }`, 'lazy'],
+      [`function make() { return (each: () => void) => each(); } export function check() { make()(() => { throw new CadError('made-given', ''); }); }`, 'made-given'],
+      [`const table = { run(each: () => void) { each(); } }; export function check() { table.run(() => { throw new CadError('member-given', ''); }); }`, 'member-given']
+    ];
+    for (const [source, code] of cases) expect(reach(source), source).toEqual({ codes: [code], unexpanded: [] });
+    // A map given on, or built with entries, may hold what the walk does not see.
+    const cache = `const cache = new Map<string, () => never>(); export function fill(each: (map: Map<string, () => never>) => void) { each(cache); }
+      export function check() { cache.set('a', () => { throw new CadError('cached', ''); }); cache.get('a')!(); }`;
+    expect(reach(cache)).toEqual({ codes: ['cached'], unexpanded: [`${FILE}: cache.get('a')!(), a call of a function a value gives, from ${FILE}: each(cache), a use of a map the walk cannot read`] });
+    expect(reach(`const cache = new Map<string, () => never>([['a', () => { throw new CadError('cached', ''); }]]); export function check() { cache.get('a')!(); }`).unexpanded)
+      .toEqual([`${FILE}: cache.get('a')!(), a call of a function a value gives, from ${FILE}: new Map<string, () => never>([['a', () => { throw new CadError('cached', ''); }…, a map built with entries the walk cannot read`]);
+  });
 });
 
 // Each walk builds a TypeScript program of its own.
@@ -274,9 +314,9 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
     }`;
     const raised = walk(`${factories} export function check(facts: unknown) { if (facts) throw CadError.checked('checked-code', ''); throw CadError.received('received-code', '', {}); }`);
     expect([[...raised.codes].sort(), raised.unexpanded, [...raised.declarations].filter(name => /checked|received/.test(name))]).toEqual([['checked-code', 'received-code'], [], []]);
-    // A method of that name on another class is walked as any other.
-    expect(reach(`${factories} class Other { static received(code: string) { return new CadError(code, ''); } } export function check() { throw Other.received('other-code'); }`).unexpanded)
-      .toEqual([`${FILE}: code, from ${FILE}: code`]);
+    // A method of that name on another class is walked as any other, its parameter read at the member's walked call.
+    expect(reach(`${factories} class Other { static received(code: string) { return new CadError(code, ''); } } export function check() { throw Other.received('other-code'); }`))
+      .toEqual({ codes: ['other-code'], unexpanded: [] });
     const refusal =`class Refusal extends CadError { constructor(code: string, message = '') { super(code, message); } }`;
     expect(reach(`${refusal} export function check() { throw new Refusal('refusal-code'); }`)).toEqual({ codes: ['refusal-code'], unexpanded: [] });
     // A subclass without a constructor passes its own arguments on; one with a constructor gives its own.
@@ -404,16 +444,17 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
   });
 
   it('reports a raise whose code it cannot read, and a factory or the class used where it cannot read the code', () => {
-    const cases: readonly (readonly [string, string])[] = [
+    const cases: readonly (readonly [string, string, ...string[]])[] = [
       [`export function check(args: [string, string]) { throw CadError.checked(...args); }`, `${FILE}: CadError.checked(...args), a CadError raised with a code the walk cannot read`],
       [`export function check() { throw new CadError(); }`, `${FILE}: new CadError(), a CadError raised with a code the walk cannot read`],
       [`export function check() { [CadError.checked].forEach(raise => { throw raise('given', ''); }); }`, `${FILE}: CadError.checked, a CadError factory given on, whose code the walk cannot read`],
       [`export function check() { throw CadError.checked.call(null, 'called', ''); }`, `${FILE}: CadError.checked, a CadError factory called through call or apply, whose code the walk cannot read`],
       [`const make = CadError.checked; export function check() { return [make]; }`, `${FILE}: make, a CadError factory given on, whose code the walk cannot read`],
-      [`export function check() { const { checked } = CadError; throw checked('destructured', ''); }`, `${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`],
+      [`export function check() { const { checked } = CadError; throw checked('destructured', ''); }`, `${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`,
+        `${FILE}: checked('destructured', ''), a call of a function a value gives, from ${FILE}: CadError.checked`],
       [`export function check() { return [CadError]; }`, `${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`]
     ];
-    for (const [source, site] of cases) expect(reach(source), source).toEqual({ codes: [], unexpanded: [site] });
+    for (const [source, ...sites] of cases) expect(reach(source), source).toEqual({ codes: [], unexpanded: sites });
     // Testing for a factory runs it nothing.
     expect(reach(`export function check() { if (!CadError.checked) throw new CadError('present', ''); }`)).toEqual({ codes: ['present'], unexpanded: [] });
   });
@@ -447,7 +488,7 @@ describe('CAD diagnostic reach through default exports, closed to what it cannot
   const UNTOLD = (name: string) => `${FILE}: ${name}, a class the walk cannot tell, constructed`;
 
   it('follows a default export, declared named or unnamed or an expression, through a default import, a renamed import and a re-export', () => {
-    const cases: readonly (readonly [string, Readonly<Record<string, string>>])[] = [
+    const cases: readonly (readonly [string, Readonly<Record<string, string>>, ...string[]])[] = [
       // A default class with a constructor of its own and a default function, which the walk took for undeclared names before.
       ['default-subclass', { 'src/refusal.ts': subclass('default-subclass'), [FILE]: construct('./refusal') }],
       ['default-function', { 'src/refusal.ts': `import { CadError } from './errors'; export default function refuse() { throw new CadError('default-function', ''); }`,
@@ -456,16 +497,18 @@ describe('CAD diagnostic reach through default exports, closed to what it cannot
       ['anonymous-function', { 'src/refusal.ts': `import { CadError } from './errors'; export default function () { throw new CadError('anonymous-function', ''); }`,
         [FILE]: CALL_DEFAULT }],
       ['default-arrow', { 'src/refusal.ts': `import { CadError } from './errors'; export default () => { throw new CadError('default-arrow', ''); };`, [FILE]: CALL_DEFAULT }],
-      // A default function given on, to be called wherever it goes.
+      // A default function given on, to be called wherever it goes; the root's own parameter it goes to may be any function.
       ['default-arrow-given', { 'src/refusal.ts': `import { CadError } from './errors'; export default () => { throw new CadError('default-arrow-given', ''); };`,
-        [FILE]: `import refuse from './refusal'; export function check(run: (each: () => void) => void) { run(refuse); }` }],
+        [FILE]: `import refuse from './refusal'; export function check(run: (each: () => void) => void) { run(refuse); }` },
+        `${FILE}: run(refuse), a call of a function a value gives, from ${FILE}: run, a parameter of a function the walk sees no call of`],
       // Read only for a member, it runs that member alone.
       ['default-object', { 'src/refusal.ts': `import { CadError } from './errors'; export default { refuse() { throw new CadError('default-object', ''); },
         unread() { throw new CadError('default-object-unread', ''); } };`,
         [FILE]: `import table from './refusal'; export function check() { table.refuse(); }` }],
       // A default object given on, any of whose methods may then be called.
       ['default-object-given', { 'src/refusal.ts': `import { CadError } from './errors'; export default { refuse() { throw new CadError('default-object-given', ''); } };`,
-        [FILE]: `import table from './refusal'; export function check(run: (value: object) => void) { run(table); }` }],
+        [FILE]: `import table from './refusal'; export function check(run: (value: object) => void) { run(table); }` },
+        `${FILE}: run(table), a call of a function a value gives, from ${FILE}: run, a parameter of a function the walk sees no call of`],
       ['default-class-expression', { 'src/refusal.ts': `import { CadError } from './errors'; export default (class extends CadError { constructor() { super('default-class-expression', ''); } });`,
         [FILE]: construct('./refusal') }],
       ['default-named-import', { 'src/refusal.ts': subclass('default-named-import'), [FILE]: construct('./refusal', '{ default as Refusal }') }],
@@ -476,7 +519,7 @@ describe('CAD diagnostic reach through default exports, closed to what it cannot
       ['default-by-name', { 'src/refusal.ts': `${subclass('default-by-name', 'class Refusal')} export default Refusal;`, [FILE]: construct('./refusal') }],
       ['default-imported-on', { 'src/refusal.ts': subclass('default-imported-on'), 'src/barrel.ts': `import Refusal from './refusal'; export default Refusal;`, [FILE]: construct('./barrel') }]
     ];
-    for (const [code, files] of cases) expect(result(files), code).toEqual({ codes: [code], unexpanded: [], skipped: [] });
+    for (const [code, files, ...unexpanded] of cases) expect(result(files), code).toEqual({ codes: [code], unexpanded, skipped: [] });
   });
 
   it('reads a parameter\'s code at each call through a renamed import, a default import and a default re-export', () => {
@@ -509,7 +552,8 @@ describe('CAD diagnostic reach through default exports, closed to what it cannot
     // A namespace given on as a value runs all its exports.
     expect(result({ 'src/raise.ts': `import { CadError } from './errors'; export function refuse(): never { throw new CadError('namespace-value', ''); }`,
       [FILE]: `import * as raise from './raise'; export function check() { Object.values(raise).forEach(each => each()); }` }))
-      .toEqual({ codes: ['namespace-value'], unexpanded: [`${FILE}: raise, a namespace used as a value, which the walk cannot follow`], skipped: [] });
+      .toEqual({ codes: ['namespace-value'], unexpanded: [`${FILE}: each(), a call of a function a value gives, from ${FILE}: Object.values(…)[]`,
+        `${FILE}: raise, a namespace used as a value, which the walk cannot follow`], skipped: [] });
     // Code of the project the index does not hold, here a file outside `src`.
     expect(result({ 'packages/raise.ts': `import { CadError } from '../src/errors'; export function refuse() { throw new CadError('unindexed', ''); } export const table = { refuse };`,
       [FILE]: `import { refuse, table } from '../packages/raise'; export function check(kind: number) { if (kind) refuse(); table.refuse(); }` }))
@@ -552,6 +596,16 @@ describe('CAD diagnostic reach coverage, checked apart from the walk', () => {
     expect(sorted(cadSkippedMemberReads(unindexed.index, { ...unindexed.found, unresolved: new Set() }))).toEqual([
       `${FILE}: refuse(), a call of packages/raise.ts: refuse, code the walk does not hold, not reported`,
       `${FILE}: refuse, a name of packages/raise.ts: refuse, code the walk does not hold, not reported`]);
+  });
+
+  it('flags a call of a function TypeScript gives no implementation of, which the walk neither traced from its value nor reported', () => {
+    for (const [source, site] of [[`export function check(refuse: () => never) { refuse(); }`, 'refuse()'], [`export function check({ refuse }: { refuse(): never }) { refuse(); }`, 'refuse()'],
+      [`export function check(value: { refuse(): never }) { value.refuse(); }`, 'value.refuse()'], [`let refuse: () => never; export function check() { refuse(); }`, 'refuse()']]) {
+      const { index, found } = across({ [FILE]: source });
+      expect(found.traced.size, source).toBeGreaterThan(0);
+      expect(cadSkippedMemberReads(index, { ...found, traced: new Set() }), source)
+        .toEqual([`${FILE}: ${site}, a call of a function TypeScript gives no implementation of, which the walk neither traced nor reported`]);
+    }
   });
 
   it('accepts a declaration `stop` names only as stopped at', () => {
