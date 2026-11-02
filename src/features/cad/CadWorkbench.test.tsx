@@ -12,6 +12,7 @@ import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadSketchGenerator, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
 import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import type { CadSketchGraphSelection } from '@/domain/cad/cadSketchGraphSelection';
+import type { CadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { prepareCadSketchCells } from '@/domain/cad/cadSketchRegionInspection';
 import { CadWorkbench, type CadWorkbenchProps } from './CadWorkbench';
@@ -1724,6 +1725,103 @@ describe('CAD sketch interaction', () => {
     const copy = currentDocument.features.at(-1); if (copy?.kind !== 'sketch' || !copy.graph || copy.id === 'sketch') throw new Error('Copied sketch missing.');
     expect(copy.graph.relations.filter(relation => relation.kind === 'generator')).toEqual([]); expect(copy.graph.entities).toHaveLength(4);
     expect(begin.mock.calls).toEqual([['sketch'], [copy.id]]);
+  });
+
+  it('moves, rounds, dimensions and switches a selected generated rectangle from the toolbar through its inputs, one undo step each', async () => {
+    // Origin X and the corner radius read parameters; a free point tied to the bottom side's end is added later to be removed.
+    const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
+      geometry: { kind: 'rectangle', x: 'px', y: 0, width: 15, height: 30, cornerRadius: 'r' } } as const;
+    const part = (points: CadSketchGraph['points'], relations: CadSketchGraph['relations']) => parseCadDocument({ ...createCadDocument('Plate', 'generated-commands'),
+      parameters: { px: 0, r: 5 }, schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline', plane: 'XY', offset: 0, suppressed: false, profiles: [],
+        graph: { points, entities: [], relations } }] });
+    const initial = part([], [plate]);
+    await mount(initial);
+    const choose = () => act(async () => { viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }); viewport().apply({ kind: 'select-profile', profileId: 'plate' }); });
+    await choose();
+    const generated = () => sketchGraph().relations.find(relation => relation.id === 'plate');
+    const form = (label: string) => container.querySelector(`form[aria-label="${label}"]`);
+    const named = (label: string) => { const found = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`); if (!found) throw new Error(`${label} missing.`); return found; };
+    const said = (role: string) => [...container.querySelectorAll(`[role="${role}"]`)].map(element => element.textContent);
+    const fillet = async () => { await click('Sketch corner tools'); await act(async () => button('Fillet').click()); };
+    // Move profile opens Move contour at its first distance. X follows a parameter, so it refuses as a drag does, and Y moves alone.
+    await click('Move profile');
+    expect(form('Move contour')).not.toBeNull(); expect(document.activeElement).toBe(named('Move X'));
+    await input(named('Move X'), '3');
+    expect(said('alert')).toContain('This contour position follows an expression. Change or unlink its position parameter before moving that axis.');
+    expect(button('Apply').disabled).toBe(true);
+    await input(named('Move X'), '0'); await input(named('Move Y'), '-2'); await click('Apply');
+    expect(generated()).toEqual({ ...plate, geometry: { ...plate.geometry, y: -2 } });
+    expect(form('Move contour')).toBeNull(); expect(field('Origin Y').value).toBe('-2');
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // Fillet opens Sketch fillet at the radius, which reads a parameter: a value sets the parameter, and an expression the input.
+    await fillet();
+    expect(form('Sketch fillet')).not.toBeNull(); expect(document.activeElement).toBe(named('Fillet radius')); expect(named('Fillet radius').value).toBe('5');
+    await input(named('Fillet radius'), '6'); await click('Apply');
+    expect(currentDocument.parameters).toEqual({ px: 0, r: 6 }); expect(generated()).toEqual(plate);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    await fillet(); await click('Edit expression'); await input(named('Fillet expression'), 'r - 1'); await click('Apply');
+    expect(generated()).toEqual({ ...plate, geometry: { ...plate.geometry, cornerRadius: 'r - 1' } }); expect(currentDocument.parameters).toEqual(initial.parameters);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // A radius of half the width leaves no bottom side, so the relation on its end goes, which Apply confirms in the same step.
+    const tied = part([{ id: 'u', position: [10, 0] }], [plate, { id: 'tie', kind: 'coincident', pointIds: ['u', 'plate_t1'] }]);
+    await act(async () => replaceDocument(tied)); await choose();
+    await fillet(); await input(named('Fillet radius'), '7.5');
+    expect(currentDocument).toBe(tied);
+    expect(said('status').some(text => text?.startsWith('This removes one relation on geometry the shape no longer has: Coincident'))).toBe(true);
+    await click('Apply');
+    expect(currentDocument.parameters.r).toBe(7.5); expect(sketchGraph().relations.some(relation => relation.id === 'tie')).toBe(false);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(tied);
+    // Dimension starts the Dimension tool, where generated edges are measured or anchor other geometry; the shape keeps its inputs.
+    await choose(); await click('Dimension');
+    expect(button('Dimension').getAttribute('aria-pressed')).toBe('true'); expect(currentDocument).toBe(tied);
+    await click('Dimension'); expect(button('Dimension').getAttribute('aria-pressed')).toBe('false');
+    // Construction switches the generator, and its edges follow it.
+    await choose();
+    const construction = container.querySelector<HTMLInputElement>('.cad-sketch-options input'); if (!construction) throw new Error('Construction control missing.');
+    expect(construction.checked).toBe(false);
+    await act(async () => construction.click());
+    expect(generated()).toEqual({ ...plate, construction: true });
+    expect(sketchGraph().entities.every(entity => entity.construction)).toBe(true);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(tied);
+  });
+
+  it('keeps each command on a generated edge or corner working, or off with its owner as the reason', async () => {
+    const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
+      geometry: { kind: 'rectangle', x: 20, y: 20, width: 50, height: 40, cornerRadius: 0 } } as const;
+    const initial = parseCadDocument({ ...createCadDocument('Plate', 'generated-members'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate] } }] });
+    await mount(initial);
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const owned = 'Rectangle "plate" generates this geometry. Edit the generator\'s inputs, or detach it, before editing generated geometry.';
+    const select = (selection: CadSketchGraphSelection) => act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection }));
+    const construction = () => { const found = container.querySelector<HTMLInputElement>('.cad-sketch-options input'); if (!found) throw new Error('Construction control missing.'); return found; };
+    const bottom = sketchGraph().entities.find(entity => entity.id === 'plate_e0'); if (bottom?.kind !== 'line') throw new Error('Bottom side missing.');
+    // An edge: moving it or switching it to construction is its shape's, and both say so.
+    await select({ kind: 'entity', id: 'plate_e0' });
+    expect(button('Move selection').disabled).toBe(true); expect(button('Move selection').getAttribute('aria-description')).toBe(owned);
+    expect(construction().disabled).toBe(true); expect(construction().getAttribute('aria-description')).toBe(owned);
+    // Reference length saves the measurement and Detach keeps the edges as plain geometry, each in one step.
+    await click('Reference length');
+    expect(sketchGraph().relations.filter(relation => relation.kind === 'reference-dimension')).toEqual([expect.objectContaining({ measurement: { kind: 'line-length', entityId: 'plate_e0' } })]);
+    expect(sketchGraph().relations[0]).toEqual(plate);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    await select({ kind: 'entity', id: 'plate_e0' }); await click('Detach');
+    expect(sketchGraph().relations.some(relation => relation.kind === 'generator')).toBe(false); expect(sketchGraph().entities).toHaveLength(4);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // Mirror copy copies the edge about another side as plain geometry.
+    await select({ kind: 'entity', id: 'plate_e0' }); await click('Mirror copy');
+    const canvas = container.querySelector<SVGSVGElement>('[aria-label="Sketch drawing canvas"]');
+    const axis = container.querySelector<SVGGElement>('[data-cad-sketch-entity="plate_e1"]'); if (!canvas || !axis) throw new Error('Right side missing.');
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, toJSON: () => ({}) });
+    await act(async () => { axis.focus(); axis.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); });
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === 'Use as mirror line')?.click());
+    await click('Apply');
+    expect(sketchGraph().entities).toHaveLength(5); expect(sketchGraph().relations[0]).toEqual(plate);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // A corner: the corner tools are its shape's, and say so.
+    await select({ kind: 'point', id: 'plate_p0' });
+    expect(button('Sketch corner tools').disabled).toBe(true); expect(button('Sketch corner tools').getAttribute('aria-description')).toBe(owned);
+    expect(button('Move selection').disabled).toBe(true);
   });
 
   it('renders an existing feature candidate while preserving accepted geometry and restores the original model on Cancel', async () => {
