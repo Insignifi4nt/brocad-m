@@ -65,26 +65,38 @@ type Confirmable = CadSketchGeneratorRemovedRelation & { readonly confirmed: boo
 export const cadSketchGeneratorRemovals = (confirmed: Iterable<string> = []): CadSketchGeneratorRemovals => ({ confirmed: new Set(confirmed), removed: [] });
 /**
  * A regeneration that removes user relations no one confirmed it removes. `relations` are all those the batch removes, confirmed or not,
- * and `relationIds` their IDs once each, which confirm them as removedRelationIds.
+ * `relationIds` their IDs once each, which confirm them as removedRelationIds, and `pendingRelationIds` those of them the batch did not
+ * confirm, so a caller that can list only some at a time lists the rest as each resend confirms more.
  */
 export class CadSketchGeneratorRemovalError extends CadError {
   readonly relationIds: readonly string[];
+  readonly pendingRelationIds: readonly string[];
   readonly relations: readonly CadSketchGeneratorRemovedRelation[];
   constructor(relations: readonly Confirmable[]) {
     super('unconfirmed-sketch-generator-removals', removalMessage(relations));
     this.relations = Object.freeze(relations.map(({ confirmed: _confirmed, ...relation }) => Object.freeze(relation)));
     this.relationIds = Object.freeze([...new Set(relations.map(relation => relation.relationId))]);
+    this.pendingRelationIds = Object.freeze([...new Set(relations.filter(relation => !relation.confirmed).map(relation => relation.relationId))]);
   }
 }
-/** Names the relations removed without confirmation, and lists every one the batch removes, by sketch when it removes them from several. */
+/** A refusal's message names up to this many relations; past that, it counts them and names the first few, so it stays short. */
+const NAMED_REMOVALS = 8, SAMPLED_REMOVALS = 4;
+const some = (items: readonly string[]) => items.length <= NAMED_REMOVALS ? listed(items) : `${items.slice(0, SAMPLED_REMOVALS).join(', ')} and ${items.length - SAMPLED_REMOVALS} more`;
+/**
+ * Names the relations removed without confirmation, and lists every one the batch removes, by sketch when it removes them from several;
+ * past eight, it counts them and names the first few, and says to confirm them all, as each refusal lists those not yet confirmed.
+ */
 function removalMessage(relations: readonly Confirmable[]): string {
   const sketches = new Set(relations.map(relation => relation.sketchId)), ids = [...new Set(relations.map(relation => relation.relationId))];
   const where = (relation: Confirmable) => sketches.size > 1 && relation.sketchId !== undefined ? ` in sketch "${relation.sketchId}"` : '';
   const unconfirmed = relations.filter(relation => !relation.confirmed), named = unconfirmed.length ? unconfirmed : relations;
   const generators = [...new Set(named.map(relation => `${relation.generator}${where(relation)}`))];
-  return `${listed(generators)} no longer generate${generators.length === 1 ? 's' : ''} geometry that ${listed(named.map(relation => `${relation.name}${where(relation)}`))} ${named.length === 1 ? 'uses' : 'use'}.`
-    + `${named.length === 1 ? ` ${named[0].reason}` : ''} This removes ${relations.length === 1 ? 'one relation' : `${relations.length} relations`}: ${relations.map(relation => `${relation.relationId}${where(relation)}`).join(', ')}.`
-    + ` Send exactly ${ids.length === relations.length ? 'these IDs' : `the IDs ${ids.join(', ')}`} as removedRelationIds to confirm, or keep the generator's inputs.`;
+  const users = named.length > NAMED_REMOVALS ? `${named.length} relations` : listed(named.map(relation => `${relation.name}${where(relation)}`));
+  const removed = relations.map(relation => `${relation.relationId}${where(relation)}`);
+  return `${some(generators)} no longer generate${generators.length === 1 ? 's' : ''} geometry that ${users} ${named.length === 1 ? 'uses' : 'use'}.`
+    + `${named.length === 1 ? ` ${named[0].reason}` : ''} This removes ${relations.length === 1 ? 'one relation' : `${relations.length} relations`}: ${removed.length > NAMED_REMOVALS ? some(removed) : removed.join(', ')}.`
+    + (ids.length > NAMED_REMOVALS ? ` Send all ${ids.length} IDs as removedRelationIds to confirm; a refusal lists those not yet sent, so resend with them until it applies. Or keep the generator's inputs.`
+      : ` Send exactly ${ids.length === relations.length ? 'these IDs' : `the IDs ${ids.join(', ')}`} as removedRelationIds to confirm, or keep the generator's inputs.`);
 }
 /**
  * Refuses a batch whose regeneration removed relations it did not confirm, listing every relation it removes. With `exact`, also

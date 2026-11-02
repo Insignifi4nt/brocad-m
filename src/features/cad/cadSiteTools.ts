@@ -125,6 +125,25 @@ function parameterContext(document: CadDocument) {
     omittedParameterCount: parameterCount - retainedParameterCount, parameterGroups, parameterGroupCount: allGroups.length,
     omittedParameterGroups: parameterGroups.length < allGroups.length, omittedParameterGroupCount: allGroups.length - parameterGroups.length };
 }
+/** A removal refusal lists at most this many IDs, with their rows in at most this many bytes, well inside a refusal's details. */
+const REMOVAL_PAGE_IDS = 64, REMOVAL_PAGE_BYTES = 12 * 1024;
+/**
+ * A removal refusal's details: the version it was refused at, how many relations the edit removes and how many it confirmed, and a page
+ * of the IDs it did not, each placed in its sketches by `relations`. Resent at that version with the page added to removedRelationIds, the
+ * edit lists the next page, and applies once it confirms them all.
+ */
+function removalPage(error: CadSketchGeneratorRemovalError, version: string) {
+  const relationIds: string[] = [], relations: { sketchId?: string; relationId: string }[] = [];
+  let bytes = 0;
+  for (const id of error.pendingRelationIds) {
+    const rows = error.relations.filter(relation => relation.relationId === id).map(({ sketchId, relationId }) => ({ ...sketchId === undefined ? {} : { sketchId }, relationId }));
+    const cost = jsonByteLength(id) + 1 + rows.reduce((sum, row) => sum + jsonByteLength(row) + 1, 0);
+    if (relationIds.length === REMOVAL_PAGE_IDS || bytes + cost > REMOVAL_PAGE_BYTES) break;
+    relationIds.push(id); relations.push(...rows); bytes += cost;
+  }
+  return { version, relationIds, relations, relationCount: error.relationIds.length, confirmedCount: error.relationIds.length - error.pendingRelationIds.length,
+    omittedRelationCount: error.pendingRelationIds.length - relationIds.length };
+}
 // The kinds agents may name, in catalog order; each definition holds what they are told of it.
 const agentFeatureKinds = cadFeatureKinds().filter(kind => cadFeaturePresentation(kind).agent.exposed);
 
@@ -146,9 +165,11 @@ export function cadSiteTools(getController: () => CadController) {
           pointIds: error.pointIds.slice(0, 8), pointCount: error.pointIds.length, omittedPointCount: Math.max(0, error.pointIds.length - 8)
         });
         if (error instanceof CadSketchTangentOwnershipError) throw new ToolError(error.code, error.message, { ownerRelationId: error.ownerRelationId });
-        // Every ID: a confirmation must list exactly the relations the edit removes.
-        if (error instanceof CadSketchGeneratorRemovalError) throw new ToolError(error.code, error.message, { relationIds: [...error.relationIds], relationCount: error.relations.length,
-          relations: error.relations.map(({ sketchId, relationId }) => ({ ...sketchId === undefined ? {} : { sketchId }, relationId })) });
+        if (error instanceof CadSketchGeneratorRemovalError) {
+          // The edit was prepared at its expectedVersion, so its page is that version's; an edit sent without one ran at the current version.
+          const pinned = (input as { readonly expectedVersion?: unknown }).expectedVersion;
+          throw new ToolError(error.code, error.message, removalPage(error, typeof pinned === 'string' ? pinned : getController().session.getSnapshot().version));
+        }
         if (error instanceof CadError || error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }

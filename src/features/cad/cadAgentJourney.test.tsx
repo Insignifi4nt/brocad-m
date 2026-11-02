@@ -113,6 +113,44 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(h.session.getSnapshot().document).toEqual(seeded.document);
   });
 
+  it('lists a removal too large for one refusal a page at a time at its version, and applies it once every ID is confirmed', async () => {
+    const h = await mount(), empty = h.session.getSnapshot();
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
+    // Two hundred points tied to the sixth corner, by IDs long enough that the whole set overflows one refusal's details.
+    const ids = Array.from({ length: 200 }, (_, at) => `tie-${at}-${'x'.repeat(70)}`);
+    await h.success('cad_edit_document', { expectedVersion: empty.version, edits: [{ kind: 'set-parameter', name: 'n', value: 6 }, { kind: 'set-parameter', name: 'spare', value: 0 },
+      { kind: 'add-feature', feature: { id: 'plate', name: 'Plate', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+        graph: { points: ids.map((_, at) => ({ id: `u${at}`, position: corner })), entities: [],
+          relations: [polygon, ...ids.map((id, at) => ({ id, kind: 'coincident', pointIds: [`u${at}`, 'poly_v5'] }))] } } }] });
+    const seeded = h.session.getSnapshot(), fewer = { kind: 'set-parameter', name: 'n', value: 5 }, sent: string[] = [];
+    for (let pages = 1; ; pages++) {
+      expect(pages).toBeLessThanOrEqual(4);
+      const response = object(await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [{ ...fewer, ...sent.length ? { removedRelationIds: sent } : {} }] }));
+      expect(new TextEncoder().encode(JSON.stringify(response)).length).toBeLessThanOrEqual(32 * 1024);
+      expect(response).toMatchObject({ ok: false, error: { code: 'unconfirmed-sketch-generator-removals', message: expect.stringContaining('Send all 200 IDs as removedRelationIds'),
+        details: { version: seeded.version, relationCount: 200, confirmedCount: sent.length } } });
+      expect(h.session.getSnapshot().document).toBe(seeded.document);
+      const details = object(object(response.error).details), page = details.relationIds as string[];
+      expect(page.length).toBeGreaterThan(0);
+      expect(details.omittedRelationCount).toBe(200 - sent.length - page.length);
+      sent.push(...page);
+      if (details.omittedRelationCount === 0) break;
+    }
+    expect(sent).toEqual(ids);
+    // A confirmation pinned to a version the draft has left is refused, and changes nothing; at the current version it applies.
+    await h.success('cad_edit_document', { expectedVersion: seeded.version, edits: [{ kind: 'set-parameter', name: 'spare', value: 1 }] });
+    const moved = h.session.getSnapshot();
+    expect(await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [{ ...fewer, removedRelationIds: sent }] })).toMatchObject({ ok: false, error: { code: 'STALE_STATE' } });
+    expect(h.session.getSnapshot()).toBe(moved);
+    await h.success('cad_edit_document', { expectedVersion: moved.version, edits: [{ ...fewer, removedRelationIds: sent }] });
+    const sketch = h.session.getSnapshot().document.features[0];
+    expect(sketch.kind === 'sketch' && sketch.graph?.relations.filter(relation => !relation.id.startsWith('poly_')).map(relation => relation.id)).toEqual(['poly']);
+    await h.success('cad_history', { expectedVersion: h.session.getSnapshot().version, direction: 'undo' });
+    expect(h.session.getSnapshot().document).toEqual(moved.document);
+  });
+
   it('keeps initial CAD discovery below 50 KiB without repeating complete plugin recipe schemas', () => {
     const tools = cadSiteTools(() => { throw new Error('Registration must not invoke a controller'); });
     const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
