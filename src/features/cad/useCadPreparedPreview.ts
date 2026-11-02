@@ -5,16 +5,16 @@ import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { needsCadSketchPreparation } from './cadEditPreparation';
 import { CadSketchPreparationError, type CadSketchConstraintFeedback } from './cadSketchConstraintFeedback';
 import type { CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
-import { cadGeneratorRemovalIds } from './cadGeneratorRemovals';
+import { cadGeneratorRemovals, type CadGeneratorRemovals } from './cadGeneratorRemovals';
 
 export type CadPrepareEdits = (edits: readonly CadEdit[], signal: AbortSignal) => Promise<CadDocument>;
 type Preview = { readonly kind: 'idle' | 'waiting' } | { readonly kind: 'ready'; readonly document: CadDocument }
   | { readonly kind: 'error'; readonly message: string; readonly feedback?: CadSketchConstraintFeedback; readonly marks?: CadSketchDiagnosisMarks | null;
     /** The relations the edit removes as a generator regenerates, which the same edits confirming them with removedRelationIds apply. */
-    readonly removals?: readonly string[] };
+    readonly removals?: CadGeneratorRemovals };
 
 function previewError(error: unknown, fallback: string): Extract<Preview, { kind: 'error' }> {
-  const removals = cadGeneratorRemovalIds(error);
+  const removals = cadGeneratorRemovals(error);
   return { kind: 'error', message: userFacingMessage(error, fallback),
     ...(error instanceof CadSketchPreparationError ? { feedback: error.feedback, marks: error.marks } : {}), ...removals ? { removals } : {} };
 }

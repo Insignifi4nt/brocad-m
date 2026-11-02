@@ -12,7 +12,7 @@ import { assertCadSketchExternalReferences, refreshCadSketchExternalReferences }
 import { cadSketchSolutionMatchesInput } from './sketch-solver/cadSketchSolverProtocol';
 import { cadSketchPatternSnapshotNeedsExact } from '@/domain/cad/cadSketchLinearPattern';
 import { cadSketchOwnedGeometryError } from '@/domain/cad/cadSketchOwnedGeometry';
-import { cadSketchGeneratorRemovals, isRegeneratedCadSketchGraph, settleCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { assertCadSketchGeneratorRemovals, cadSketchGeneratorRemovals, isRegeneratedCadSketchGraph, settleCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { cadSketchFeaturesEqualButPlacement, cadSketchRelationsEqualButPlacement, withoutCadSketchDimensionAnnotation } from '@/domain/cad/cadSketchPlacedDimensions';
 
@@ -87,6 +87,9 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
     const dependents = new Set(exact ? [exact.sketchId] : []);
     const acceptedSketches = new Map(accepted.features.map(feature => [feature.id, feature]));
     const sameParameters = Value.Equal(target.parameters, accepted.parameters);
+    // Relations that leave with members a solve regenerates must be among those the batch confirms it removes; every sketch settles
+    // before a refusal, so it lists them all.
+    const removals = cadSketchGeneratorRemovals(cadEditGeneratorRemovals(captured));
     for (const [index, feature] of target.features.entries()) {
       signal?.throwIfAborted();
       if (feature.kind !== 'sketch' || !feature.graph) { features.push(feature); previous.set(feature.id, feature); continue; }
@@ -114,16 +117,14 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
       assertCadSketchExternalReferences({ sketch: { ...refreshed, graph: result.graph }, parameters: target.parameters, previous });
       if (!cadSketchSolutionMatchesInput(input, result.graph)) throw exact?.error() ?? new CadError('invalid-sketch-solution', 'The sketch solution changed source records or fixed geometry.');
       // Generated geometry follows the solved inputs it reads, and is solved again so the relations on it hold.
-      // A graph settled back as it was given was solved already, even one an earlier settle regenerated. Relations that leave with
-      // members it regenerates must be among those the batch confirms it removes.
-      const removals = cadSketchGeneratorRemovals(cadEditGeneratorRemovals(captured));
-      let source = result.graph, graph = settleCadSketchGenerators(source, refreshed.graph, target.parameters, removals);
+      // A graph settled back as it was given was solved already, even one an earlier settle regenerated.
+      let source = result.graph, graph = settleCadSketchGenerators(source, refreshed.graph, target.parameters, removals, feature.id);
       for (let pass = 0; graph !== source && isRegeneratedCadSketchGraph(graph); pass++) {
         if (pass === 2) throw new CadError('invalid-sketch-generator', 'The inputs of a generator keep moving with the geometry it generates. Fix the inputs it reads, or detach it.');
         const again = await solver.solve({ graph, parameters: target.parameters }, signal);
         signal?.throwIfAborted();
         if (again.kind !== 'solved') throw new CadSketchPreparationError({ sketchId: feature.id, sketchName: feature.name, graph, rejection: again });
-        source = again.graph; graph = settleCadSketchGenerators(source, graph, target.parameters, removals);
+        source = again.graph; graph = settleCadSketchGenerators(source, graph, target.parameters, removals, feature.id);
       }
       const solved = { ...refreshed, graph };
       features.push(solved);
@@ -142,6 +143,8 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
       }
       previous.set(feature.id, solved);
     }
+    // The reduction already refused confirmed IDs no settle removed; one this solve does not remove may have left before it.
+    assertCadSketchGeneratorRemovals(removals, false);
     candidate = { ...candidate, features };
     accepted = candidate;
   }

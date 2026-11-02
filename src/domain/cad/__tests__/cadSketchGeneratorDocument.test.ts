@@ -228,5 +228,15 @@ describe('sketch generators in a document', () => {
     expect(graphOf(four).relations.filter(relation => relation.kind === 'coincident').map(relation => relation.id)).toEqual(['c0']);
     expect(refusal(() => edit(document, { kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4', 'c0'] }))).toMatchObject({
       code: 'stale-sketch-generator-removals', message: 'This edit no longer removes "c0". Send exactly the IDs it removes as removedRelationIds.' });
+    // A parameter two sketches' polygons follow is refused once, listing the relation in each sketch, which one confirmed ID removes from both.
+    const sketch = document.features[0] as CadSketchFeature;
+    const both = parseCadDocument({ ...document, features: [sketch, { ...sketch, id: 'second', name: 'Second' }] });
+    const twice = refusal(() => edit(both, { kind: 'set-parameter', name: 'n', value: 4 })) as { relationIds?: readonly string[]; relations?: readonly object[]; message: string };
+    expect(twice).toMatchObject({ code: 'unconfirmed-sketch-generator-removals', relationIds: ['c4'],
+      relations: [{ sketchId: 'sketch', relationId: 'c4' }, { sketchId: 'second', relationId: 'c4' }] });
+    expect(twice.message).toContain('Regular polygon "poly" in sketch "sketch" and Regular polygon "poly" in sketch "second" no longer generate geometry that');
+    expect(twice.message).toContain('This removes 2 relations: c4 in sketch "sketch", c4 in sketch "second". Send exactly the IDs c4 as removedRelationIds');
+    const confirmed = edit(both, { kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] });
+    for (const feature of confirmed.features) expect(feature.kind === 'sketch' && feature.graph!.relations.filter(relation => relation.kind === 'coincident').map(relation => relation.id)).toEqual(['c0']);
   });
 });

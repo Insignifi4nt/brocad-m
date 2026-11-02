@@ -45,23 +45,56 @@ const invalid = (message: string) => new CadError('invalid-sketch-generator', me
 const stale = (message: string) => new CadError('stale-sketch-generator', message);
 const owned = (message: string) => new CadError('owned-sketch-generator', message);
 
+/** A user relation a regeneration removes: the sketch it is in, when settling knows it, its name, and the generator it loses geometry of. */
+export interface CadSketchGeneratorRemovedRelation {
+  readonly sketchId?: string;
+  readonly relationId: string;
+  /** As a refusal names it, such as `Coincident "tie"`. */
+  readonly name: string;
+  readonly generator: string;
+  readonly reason: string;
+}
 /**
  * The relations an edit batch confirms it removes, its removedRelationIds, when members they use leave as a generator regenerates, and
- * those settling has removed so far.
+ * every relation settling has removed so far, confirmed or not. Settling with it goes on past a removal no one confirmed, so the refusal
+ * that follows lists every relation the batch removes, in every sketch it regenerates. Relation IDs are unique within a sketch, so one
+ * confirmed ID confirms that relation in each sketch the batch removes it from, as the refusal listed them.
  */
-export interface CadSketchGeneratorRemovals { readonly confirmed: ReadonlySet<string>; readonly removed: Set<string> }
-export const cadSketchGeneratorRemovals = (confirmed: Iterable<string> = []): CadSketchGeneratorRemovals => ({ confirmed: new Set(confirmed), removed: new Set() });
-/** A regeneration that removes user relations no one confirmed it removes; `relationIds` are all those the batch removes. */
+export interface CadSketchGeneratorRemovals { readonly confirmed: ReadonlySet<string>; readonly removed: CadSketchGeneratorRemovedRelation[] }
+type Confirmable = CadSketchGeneratorRemovedRelation & { readonly confirmed: boolean };
+export const cadSketchGeneratorRemovals = (confirmed: Iterable<string> = []): CadSketchGeneratorRemovals => ({ confirmed: new Set(confirmed), removed: [] });
+/**
+ * A regeneration that removes user relations no one confirmed it removes. `relations` are all those the batch removes, confirmed or not,
+ * and `relationIds` their IDs once each, which confirm them as removedRelationIds.
+ */
 export class CadSketchGeneratorRemovalError extends CadError {
   readonly relationIds: readonly string[];
-  constructor(message: string, relationIds: readonly string[]) {
-    super('unconfirmed-sketch-generator-removals', message);
-    this.relationIds = Object.freeze([...relationIds]);
+  readonly relations: readonly CadSketchGeneratorRemovedRelation[];
+  constructor(relations: readonly Confirmable[]) {
+    super('unconfirmed-sketch-generator-removals', removalMessage(relations));
+    this.relations = Object.freeze(relations.map(({ confirmed: _confirmed, ...relation }) => Object.freeze(relation)));
+    this.relationIds = Object.freeze([...new Set(relations.map(relation => relation.relationId))]);
   }
 }
-/** Refuses removedRelationIds that settling did not remove, which a request made for other inputs or geometry carries. */
-export function assertCadSketchGeneratorRemovals(removals: CadSketchGeneratorRemovals): void {
-  const extra = [...removals.confirmed].filter(id => !removals.removed.has(id));
+/** Names the relations removed without confirmation, and lists every one the batch removes, by sketch when it removes them from several. */
+function removalMessage(relations: readonly Confirmable[]): string {
+  const sketches = new Set(relations.map(relation => relation.sketchId)), ids = [...new Set(relations.map(relation => relation.relationId))];
+  const where = (relation: Confirmable) => sketches.size > 1 && relation.sketchId !== undefined ? ` in sketch "${relation.sketchId}"` : '';
+  const unconfirmed = relations.filter(relation => !relation.confirmed), named = unconfirmed.length ? unconfirmed : relations;
+  const generators = [...new Set(named.map(relation => `${relation.generator}${where(relation)}`))];
+  return `${listed(generators)} no longer generate${generators.length === 1 ? 's' : ''} geometry that ${listed(named.map(relation => `${relation.name}${where(relation)}`))} ${named.length === 1 ? 'uses' : 'use'}.`
+    + `${named.length === 1 ? ` ${named[0].reason}` : ''} This removes ${relations.length === 1 ? 'one relation' : `${relations.length} relations`}: ${relations.map(relation => `${relation.relationId}${where(relation)}`).join(', ')}.`
+    + ` Send exactly ${ids.length === relations.length ? 'these IDs' : `the IDs ${ids.join(', ')}`} as removedRelationIds to confirm, or keep the generator's inputs.`;
+}
+/**
+ * Refuses a batch whose regeneration removed relations it did not confirm, listing every relation it removes. With `exact`, also
+ * refuses removedRelationIds that settling did not remove, which a request made for other inputs or geometry carries.
+ */
+export function assertCadSketchGeneratorRemovals(removals: CadSketchGeneratorRemovals, exact = true): void {
+  if (removals.removed.some(relation => !removals.confirmed.has(relation.relationId)))
+    throw new CadSketchGeneratorRemovalError(removals.removed.map(relation => ({ ...relation, confirmed: removals.confirmed.has(relation.relationId) })));
+  if (!exact) return;
+  const removed = new Set(removals.removed.map(relation => relation.relationId)), extra = [...removals.confirmed].filter(id => !removed.has(id));
   if (extra.length) throw new CadError('stale-sketch-generator-removals', `This edit no longer removes ${extra.map(id => `"${id}"`).join(', ')}. Send exactly the IDs it removes as removedRelationIds.`);
 }
 const listed = (items: readonly string[]) => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
@@ -318,12 +351,13 @@ function sameMembers(a: Members, b: Members): boolean {
  * is the sketch's graph before the edit. The candidate's members of a generator must be untouched, which regenerates them from the inputs
  * they had before, or exactly what the generator makes now, as an edit that regenerated them leaves them; a member edited, removed or
  * added directly refuses the edit, naming the generator. Members that leave in a regeneration take the user relations on them through
- * the relation remap, as `regenerateCadSketchGenerators` says; a relation it removes must be one of `removals`, confirmed, or the
- * edit is refused with a CadSketchGeneratorRemovalError that lists them. A generator stored without members gets them, taking the place
- * of those it had before. The candidate itself when nothing needs generating.
+ * the relation remap, as `regenerateCadSketchGenerators` says. Without `removals`, a relation it removes refuses the edit with a
+ * CadSketchGeneratorRemovalError that lists them; with it, each is recorded there, under `sketchId`, and removed, and the caller's
+ * `assertCadSketchGeneratorRemovals` refuses those not confirmed once every sketch has settled. A generator stored without members gets
+ * them, taking the place of those it had before. The candidate itself when nothing needs generating.
  */
 export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: CadSketchGraph | undefined, parameters: Readonly<Record<string, number>>,
-  removals?: CadSketchGeneratorRemovals): CadSketchGraph {
+  removals?: CadSketchGeneratorRemovals, sketchId?: string): CadSketchGraph {
   candidate = withIdentifiedEntries(candidate, previous);
   const graph = isAcceptedCadSketchGraph(candidate) ? candidate : detachCadSketchGraph(candidate), index = generatorIndex(graph);
   if (!index.generators.length) return graph === candidate ? candidate : acceptCadSketchGraph(graph);
@@ -387,14 +421,10 @@ export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: C
     const named = (relation: CadSketchGraphRelation) => { const definition = cadSketchRelationDefinition(relation); return `${definition.nameOf?.(relation) ?? definition.name} "${relation.id}"`; };
     const refused = blocked.find(outcome => !outcome.confirmable);
     if (refused) throw owned(`${cadSketchGeneratorName(ownerOf(refused.relation))} no longer generates geometry that ${named(refused.relation)} uses. ${refused.reason} Remove the relation first, or keep the generator's inputs.`);
-    if (blocked.length && (!removals || blocked.some(outcome => !removals.confirmed.has(outcome.relation.id)))) {
-      const generators = [...new Set(blocked.map(outcome => cadSketchGeneratorName(ownerOf(outcome.relation))))];
-      const ids = [...new Set([...removals?.removed ?? [], ...blocked.map(outcome => outcome.relation.id)])];
-      throw new CadSketchGeneratorRemovalError(`${listed(generators)} no longer generate${generators.length === 1 ? 's' : ''} geometry that ${listed(blocked.map(outcome => named(outcome.relation)))} ${blocked.length === 1 ? 'uses' : 'use'}.`
-        + `${blocked.length === 1 ? ` ${blocked[0].reason}` : ''} This removes ${ids.length === 1 ? 'one relation' : `${ids.length} relations`}: ${ids.join(', ')}.`
-        + ` Send exactly these IDs as removedRelationIds to confirm, or keep the generator's inputs.`, ids);
-    }
-    for (const outcome of blocked) removals?.removed.add(outcome.relation.id);
+    const removed = blocked.map(outcome => ({ ...sketchId === undefined ? {} : { sketchId }, relationId: outcome.relation.id, name: named(outcome.relation),
+      generator: cadSketchGeneratorName(ownerOf(outcome.relation)), reason: outcome.reason }));
+    if (removed.length && !removals) throw new CadSketchGeneratorRemovalError(removed.map(relation => ({ ...relation, confirmed: false })));
+    for (const relation of removed) if (!removals!.removed.some(other => other.sketchId === relation.sketchId && other.relationId === relation.relationId)) removals!.removed.push(relation);
     relations = applyCadSketchRemapOutcomes(stored.relations, outcomes);
   }
   const result = accepted(stored, generations, graph, parameters, relations);

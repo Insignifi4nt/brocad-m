@@ -3,6 +3,7 @@ import { cadFeatureActive } from '@/domain/cad/features/cadFeatureActivity';
 import { MenuItem, MenuSeparator, MenuSurface } from '@/components/ui/menu';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
+import { cadGeneratorRemovalPrompt, cadGeneratorRemovals, type CadGeneratorRemovals } from './cadGeneratorRemovals';
 import type { CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { isCadSketchGraphSelected, reconcileCadSketchGraphSelection, toggleCadSketchGraphSelection, type CadSketchGeometryPick } from './cadSketchGraphSelection';
@@ -190,7 +191,7 @@ export interface CadWorkbenchProps extends CadPluginCommands {
   /** No new sketch analysis starts, as while the workspace is locked, but the one shown stays live. */
   sketchAnalysisPaused?: boolean;
   onBeginSketchEdit?(sketchId: string): void;
-  sketchEdit?: { readonly sketchId: string; inspectAreaRepairs(): CadSketchAreaRepairInspection | null; finish(signal?: AbortSignal, repairs?: CadSketchAreaRepairs): CadEditCompletion; cancel(): void };
+  sketchEdit?: { readonly sketchId: string; inspectAreaRepairs(): CadSketchAreaRepairInspection | null; finish(signal?: AbortSignal, repairs?: CadSketchAreaRepairs, removedRelationIds?: readonly string[]): CadEditCompletion; cancel(): void };
   onEdit(edit: CadEdit, signal?: AbortSignal): CadEditCompletion;
   onEditMany(edits: readonly CadEdit[], signal?: AbortSignal): CadEditCompletion;
   onPrepareEdits?: CadPrepareEdits;
@@ -377,6 +378,11 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const [areaRepairReady, setAreaRepairReady] = useState(false), areaRepairFormId = useId();
   const currentAreaRepair = areaRepair?.document === document && areaRepair.inspection.localVersion === props.documentVersion && props.sketchEdit ? areaRepair.inspection : null;
   useLayoutEffect(() => { if (areaRepair && !currentAreaRepair) setAreaRepair(null); }, [areaRepair, currentAreaRepair]);
+  // Relations a sketch edit's Finish removes from later sketches whose generators regenerate under its parameters, which Apply confirms,
+  // for the draft as it was when Finish found them, with the area choices that Finish carried.
+  const [finishRemovals, setFinishRemovals] = useState<{ readonly document: CadDocument; readonly version: string; readonly removals: CadGeneratorRemovals; readonly repairs?: CadSketchAreaRepairs } | null>(null);
+  const currentFinishRemovals = finishRemovals?.document === document && finishRemovals.version === props.documentVersion && props.sketchEdit ? finishRemovals : null;
+  useLayoutEffect(() => { if (finishRemovals && !currentFinishRemovals) setFinishRemovals(null); }, [finishRemovals, currentFinishRemovals]);
   const [parameterPending, setParameterPending] = useState(false);
   const [dimensionPending, setDimensionPending] = useState(false);
   const [treeMenuOpen, setTreeMenuOpen] = useState(false);
@@ -945,12 +951,14 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     try { Promise.resolve(action()).catch((cause: unknown) => setError(userFacingMessage(cause, 'The operation could not be completed.'))); }
     catch (cause) { setError(userFacingMessage(cause, 'The operation could not be completed.')); }
   };
-  const submitEdit = (apply: (signal: AbortSignal) => CadEditCompletion, accepted: () => void = () => undefined, failure = 'The edit could not be completed.') => {
+  /** Submits one edit; `asked` takes a refusal the caller answers itself, such as one to confirm, which is then not shown as an error. */
+  const submitEdit = (apply: (signal: AbortSignal) => CadEditCompletion, accepted: () => void = () => undefined, failure = 'The edit could not be completed.', asked?: (cause: unknown) => boolean) => {
     props.onWorkflowChange(true);
     setError(null); setFileMenu(false); reportEditFeedback(null);
     commandSubmission.submit(apply, accepted, cause => {
       // A synchronous rejection can batch applying true→false without a pending-effect change.
       props.onWorkflowChange(latestPending.current);
+      if (asked?.(cause)) return;
       setError(userFacingMessage(cause, failure));
       // The native judge's refusal names its relations in the header and the relations tree, as well as on the error line.
       if (cause instanceof CadSketchPreparationError) reportEditFeedback(cause.feedback);
@@ -1521,11 +1529,23 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (sketch && profile) { submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: withoutCadSketchProfile(sketch, profile.id) }, signal), () => setProfileId(current => current === profile.id ? null : current)); return; }
     if (selected) setDeleteFeature(selected);
   };
-  const closeSketchView = () => { setOffsetCommand(null); setAreaRepair(null); setSketchId(null); setProfileId(null); setGraphPick(null); setGraphRelationCommand(null); setTool('select'); };
+  const closeSketchView = () => { setOffsetCommand(null); setAreaRepair(null); setFinishRemovals(null); setSketchId(null); setProfileId(null); setGraphPick(null); setGraphRelationCommand(null); setTool('select'); };
   // The form can disappear when Finish releases its draft. Keep navigation with the stable workspace;
   // the authoritative finish operation already guards cancellation before committing the part.
-  const finishSketchWithAreas = (repairs: CadSketchAreaRepairs, signal: AbortSignal) =>
-    afterCadEdit(props.sketchEdit!.finish(signal, repairs), closeSketchView);
+  // A Finish that would remove relations from later sketches as their generators regenerate asks first, as the parameter editor does,
+  // and the draft stays open until Apply confirms them.
+  const askFinishRemovals = (cause: unknown, repairs?: CadSketchAreaRepairs) => {
+    const removals = cadGeneratorRemovals(cause);
+    if (!removals) return false;
+    setAreaRepair(null); setFinishRemovals({ document, version: props.documentVersion, removals, ...repairs ? { repairs } : {} }); setInspectorCollapsed(false);
+    return true;
+  };
+  const finishSketchWithAreas = (repairs: CadSketchAreaRepairs, signal: AbortSignal): CadEditCompletion =>
+    Promise.resolve(afterCadEdit(props.sketchEdit!.finish(signal, repairs), closeSketchView)).catch(cause => { if (!askFinishRemovals(cause, repairs)) throw cause; });
+  const confirmFinishRemovals = (confirmation: NonNullable<typeof finishRemovals>) => {
+    setFinishRemovals(null);
+    submitEdit(signal => props.sketchEdit!.finish(signal, confirmation.repairs, confirmation.removals.relationIds), closeSketchView, undefined, cause => askFinishRemovals(cause, confirmation.repairs));
+  };
   const finishSketch = () => {
     if (chainOnly) { drawingControls.current?.finishChain(() => setFinishAfterChain(true)); return; }
     if (props.sketchEdit) {
@@ -1533,7 +1553,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
         const inspection = props.sketchEdit.inspectAreaRepairs();
         if (inspection) { setAreaRepairReady(false); setAreaRepair({ document, inspection }); setTool('select'); setGraphPick(null); setProfileId(null); setInspectorCollapsed(false); return; }
       } catch (cause) { setError(userFacingMessage(cause, 'Correct the sketch before choosing replacement areas.')); return; }
-      submitEdit(signal => props.sketchEdit!.finish(signal), closeSketchView);
+      submitEdit(signal => props.sketchEdit!.finish(signal), closeSketchView, undefined, cause => askFinishRemovals(cause));
     }
     else closeSketchView();
   };
@@ -2176,7 +2196,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
         <div hidden={inspectorCollapsed}>
         {resolvingTopology && <div className="cad-topology-resolving" role="status"><Loader2 size={14} className="cad-spin" /><span>Verifying {resolvingTopology === 'shell' ? 'opening face' : 'selected edges'}…</span><Button onClick={cancel}>Cancel</Button></div>}
         {currentProperties && !featureEditorOpen && !currentTopologyPick && !newFeature && !sketch && !resolvingTopology && props.onInspectTopology && topologyReady && build && (topologySelection?.bodyId ?? (selected && currentBodyIds.includes(selected.id) ? selected.id : null)) && <CadTopologyInspector key={`${props.documentVersion}-${build.buildId}-${topologySelection?.bodyId ?? selectedId}-${pickMode}`} bodyId={topologySelection?.bodyId ?? selectedId ?? ''} buildId={build.buildId} documentVersion={props.documentVersion} pickMode={pickMode === 'auto' ? topologySelection?.picks[0]?.kind ?? 'body' : pickMode} selection={topologySelection} locked={locked} onInspect={props.onInspectTopology} onSelect={(pick, additive) => pickTopology({ bodyId: topologySelection?.bodyId ?? selectedId ?? '', pick }, additive)} onClear={() => run(() => viewportControls.apply({ kind: 'clear-topology' }))} />}
-        <fieldset className="cad-editor-fieldset" disabled={commandSubmission.applying || drawingPending && !curveCreation || parameterPending || dimensionPending || namePending && !partPropertiesOpen || treeRenamePending || storageBusy || resolvingTopology !== null}>{curveCreation ? <CadCurveCreationFields draft={curveCreation} document={document} onChange={setNewFeature} onCancel={cancel} /> : newFeature ? <CadFeatureEditor onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${newFeature.id}-${cancelSignal}`} feature={newFeature} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew currentBodyIds={currentBodyIds} onApply={applyFeature} onCancel={cancel} onPendingChange={setEditorPending} /> : currentAreaRepair ? <CadSketchAreaRepairPanel key={currentAreaRepair.localVersion} formId={areaRepairFormId} document={document} documentVersion={props.documentVersion} inspection={currentAreaRepair} interactionLocked={storageBusy || externalWorkflowOpen || commandSubmission.applying} onReferencePick={requestReferencePick} onReadyChange={setAreaRepairReady} onFinish={finishSketchWithAreas} onCancel={() => setAreaRepair(null)} /> : currentDimensionPicks ? <div className="cad-property-form"><div className="cad-property-title">Dimension</div><span role="status">{dimensionGeometryPick?.label}</span><div className="cad-form-actions"><Button onClick={escapeDimensionTool}>Cancel</Button></div></div> : profileCopyCommand ? <CadSketchProfileCopyEditor key={profileCopyCommand.token} document={document} documentVersion={props.documentVersion}
+        <fieldset className="cad-editor-fieldset" disabled={commandSubmission.applying || drawingPending && !curveCreation || parameterPending || dimensionPending || namePending && !partPropertiesOpen || treeRenamePending || storageBusy || resolvingTopology !== null}>{curveCreation ? <CadCurveCreationFields draft={curveCreation} document={document} onChange={setNewFeature} onCancel={cancel} /> : newFeature ? <CadFeatureEditor onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${newFeature.id}-${cancelSignal}`} feature={newFeature} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew currentBodyIds={currentBodyIds} onApply={applyFeature} onCancel={cancel} onPendingChange={setEditorPending} /> : currentAreaRepair ? <CadSketchAreaRepairPanel key={currentAreaRepair.localVersion} formId={areaRepairFormId} document={document} documentVersion={props.documentVersion} inspection={currentAreaRepair} interactionLocked={storageBusy || externalWorkflowOpen || commandSubmission.applying} onReferencePick={requestReferencePick} onReadyChange={setAreaRepairReady} onFinish={finishSketchWithAreas} onCancel={() => setAreaRepair(null)} /> : currentFinishRemovals ? <div className="cad-property-form" role="group" aria-label="Confirm finishing the sketch"><div className="cad-property-title">Finish sketch</div><p className="cad-form-hint" role="status">{cadGeneratorRemovalPrompt(document, currentFinishRemovals.removals)}</p><div className="cad-form-actions"><Button type="button" onClick={() => setFinishRemovals(null)}><CloseIcon size={13} /> Cancel</Button><Button variant="primary" type="button" className="cad-primary" onClick={() => confirmFinishRemovals(currentFinishRemovals)}><Check size={13} /> Apply</Button></div></div> : currentDimensionPicks ? <div className="cad-property-form"><div className="cad-property-title">Dimension</div><span role="status">{dimensionGeometryPick?.label}</span><div className="cad-form-actions"><Button onClick={escapeDimensionTool}>Cancel</Button></div></div> : profileCopyCommand ? <CadSketchProfileCopyEditor key={profileCopyCommand.token} document={document} documentVersion={props.documentVersion}
           request={profileCopyCommand.request} onEditMany={props.onEditMany} onPrepareEdits={props.onPrepareEdits}
           onPreviewDocument={setProfileCopyPreview} onPendingChange={setEditorPending}
           interactionLocked={pendingOtherCommands || drawingPending || storageBusy || externalWorkflowOpen || Boolean(props.sketchEdit)}

@@ -450,6 +450,37 @@ describe('owned consumed-sketch draft', () => {
     expect(main.getSnapshot()).toBe(base);
   });
 
+  it('finishes a parameter that later sketches\' generators lose relations with only once Finish confirms them, as one undo step', async () => {
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 40, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
+    const follower = (id: string) => ({ id, kind: 'sketch', name: id, suppressed: false, plane: 'XY', offset: 0, profiles: [],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v5'] }] } });
+    const original = source(), document = parseCadDocument({ ...original, parameters: { ...original.parameters, n: 6 },
+      parameterMetadata: { ...original.parameterMetadata, n: { source: { kind: 'manual' } } }, features: [...original.features, follower('second'), follower('third')] });
+    const main = new CadSession(document), base = main.getSnapshot(), draft = new CadSketchEditDraft(base, 'sketch');
+    // The draft holds neither later sketch, so its own parameter edit removes nothing.
+    await draft.editPrepared([{ kind: 'set-parameter', name: 'n', value: 5 }], prepare);
+    const edited = draft.getSnapshot(), finish = draft.finishEdits(base);
+    expect(finish.edits).toEqual([{ kind: 'set-parameter', name: 'n', value: 5 }]);
+    // Preparing Finish against the whole part lists the relation in both later sketches at once, and changes nothing.
+    await expect(main.editPrepared(finish.baseVersion, value => prepare(value, finish.edits))).rejects.toMatchObject({ code: 'unconfirmed-sketch-generator-removals',
+      relationIds: ['tie'], relations: [{ sketchId: 'second', relationId: 'tie' }, { sketchId: 'third', relationId: 'tie' }] });
+    expect(main.getSnapshot()).toBe(base); expect(draft.getSnapshot()).toBe(edited);
+    // Declining keeps the draft as it was, still open for edits.
+    draft.assertCurrent(base, edited.version);
+    // Confirming puts the IDs on the parameter edit; the part commits what the same confirmed parameter edit makes of it, in one undo step.
+    const confirmed = draft.finishEdits(base, [], ['tie']);
+    expect(confirmed.edits).toEqual([{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }]);
+    await main.editPrepared(confirmed.baseVersion, value => prepare(value, confirmed.edits));
+    const committed = main.getSnapshot().document;
+    expect(committed).toEqual(await prepare(base.document, [{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }]));
+    for (const id of ['second', 'third']) expect(storedCadSketchGraph(sketchOf(committed, id).graph!).relations.map(relation => relation.id)).toEqual(['poly']);
+    main.undo(); expect(main.getSnapshot().document).toBe(base.document);
+    // IDs with no parameter edit to carry them are stale.
+    expect(() => new CadSketchEditDraft(base, 'sketch').finishEdits(base, [], ['tie'])).toThrow(expect.objectContaining({ code: 'stale-sketch-generator-removals' }));
+  });
+
   it('lets an earlier gear whose teeth follow a parameter change its member count during a later sketch\'s draft', async () => {
     const plugin = createCadPluginProfile(CAD_GEAR_V3_PLUGIN);
     const gear: CadSketchGenerator = { id: 'gear', kind: 'generator', idPrefix: 'g', construction: false,

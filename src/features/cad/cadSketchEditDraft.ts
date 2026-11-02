@@ -208,7 +208,12 @@ export class CadSketchEditDraft {
     if (this.owner.signal.aborted) return;
     this.owner.abort(); this.local.replace(this.initialDocument);
   }
-  finishEdits(source: CadSketchEditDraftSource, consumerRepairs: readonly CadEdit[] = []): CadSketchEditDraftFinish {
+  /**
+   * The edits that publish the draft: its parameters, then each sketch it changed, then `consumerRepairs`. `removedRelationIds` confirms the
+   * relations a later sketch loses as its generators regenerate under those parameters, which preparing the edits against the whole part
+   * refuses with their IDs until Finish confirms them; they go on the first parameter edit, as the parameter editor sends them.
+   */
+  finishEdits(source: CadSketchEditDraftSource, consumerRepairs: readonly CadEdit[] = [], removedRelationIds: readonly string[] = []): CadSketchEditDraftFinish {
     this.assertSource(source); validateCadEditBatch(consumerRepairs);
     const snapshot = this.local.getSnapshot(), candidate = snapshot.document;
     this.assertOwnedPrefix(candidate);
@@ -242,6 +247,11 @@ export class CadSketchEditDraft {
         || repaired.has(feature.id) || !same({ ...feature, regionSelection: undefined }, { ...original, regionSelection: undefined })) throw scopeError();
       repaired.add(feature.id);
       if (!same(feature, original)) edits.push(edit);
+    }
+    if (removedRelationIds.length) {
+      const index = edits.findIndex(edit => edit.kind === 'set-parameter'), parameter = edits[index];
+      if (parameter?.kind !== 'set-parameter') throw new CadError('stale-sketch-generator-removals', 'This sketch edit changes no parameter, so finishing it removes no relations. Finish it again.');
+      edits[index] = { ...parameter, removedRelationIds: [...removedRelationIds] };
     }
     validateCadEditBatch(edits);
     const finish = { baseVersion: this.pin.version, localVersion: snapshot.version, edits, noOp: edits.length === 0 };

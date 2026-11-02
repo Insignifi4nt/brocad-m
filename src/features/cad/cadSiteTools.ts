@@ -147,7 +147,8 @@ export function cadSiteTools(getController: () => CadController) {
         });
         if (error instanceof CadSketchTangentOwnershipError) throw new ToolError(error.code, error.message, { ownerRelationId: error.ownerRelationId });
         // Every ID: a confirmation must list exactly the relations the edit removes.
-        if (error instanceof CadSketchGeneratorRemovalError) throw new ToolError(error.code, error.message, { relationIds: [...error.relationIds], relationCount: error.relationIds.length });
+        if (error instanceof CadSketchGeneratorRemovalError) throw new ToolError(error.code, error.message, { relationIds: [...error.relationIds], relationCount: error.relations.length,
+          relations: error.relations.map(({ sketchId, relationId }) => ({ ...sketchId === undefined ? {} : { sketchId }, relationId })) });
         if (error instanceof CadError || error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }

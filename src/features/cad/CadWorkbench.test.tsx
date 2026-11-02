@@ -9,7 +9,8 @@ import { CadTangentContours, type CadTopologyAdjacency, type CadTopologyAdjacenc
 import { CAD_TOPOLOGY_LONE_EDGE_NOTE } from '@/domain/cad/selection/cadTopologySelection';
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
-import type { CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
+import type { CadSketchGenerator, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import type { CadSketchGraphSelection } from '@/domain/cad/cadSketchGraphSelection';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { prepareCadSketchCells } from '@/domain/cad/cadSketchRegionInspection';
@@ -557,6 +558,56 @@ describe('CAD sketch interaction', () => {
     await canvasKey('Escape'); expect(signal?.aborted).toBe(true);
     await act(async () => accept()); expect(currentDocument).toEqual(accepted);
     await click('Rectangle'); expect(control().checked).toBe(false);
+  });
+  it('asks before a sketch edit\'s Finish removes a later sketch\'s relations, keeps the draft on Cancel and commits the confirmed edit on Apply', async () => {
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 40, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
+    const initial = parseCadDocument({ ...createCadDocument(), schemaVersion: 2, parameters: { n: 6 }, parameterMetadata: { n: { source: { kind: 'manual' } } }, features: [
+      { id: 'sketch', kind: 'sketch', name: 'Outline', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+        points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [20, 0] }, { id: 'c', position: [20, 10] }, { id: 'd', position: [0, 10] }],
+        entities: ['a', 'b', 'c', 'd'].map((id, index) => ({ id: `${id}-edge`, kind: 'line', construction: false, startPointId: id, endPointId: ['b', 'c', 'd', 'a'][index] })), relations: [] } },
+      { id: 'pad', kind: 'extrude', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 5, symmetric: false, operation: 'new', targetId: null },
+      { id: 'later', kind: 'sketch', name: 'Later polygon', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+        graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v5'] }] } }] });
+    const main = new CadSession(initial), base = main.getSnapshot(), storage = {};
+    let editing: ReturnType<typeof useCadSketchEditing> | undefined;
+    const commit = vi.fn((edits: readonly CadEdit[], version: string, signal?: AbortSignal) => main.editPrepared(version, async document => applyCadEdits(document, edits), signal));
+    function Harness() {
+      useSyncExternalStore(main.subscribe, main.getSnapshot);
+      editing = useCadSketchEditing({ session: main, storage, open: true, locked: false,
+        prepare: async (document, edits, signal) => { signal?.throwIfAborted(); return applyCadEdits(document, edits); }, inspect: async () => undefined, commit });
+      const snapshot = editing.snapshot; currentDocument = snapshot.document;
+      return <CadWorkbench document={snapshot.document} documentVersion={snapshot.version} build={null} buildVersion={null} buildState="idle" dirty={snapshot.dirty}
+        canUndo={snapshot.canUndo} canRedo={snapshot.canRedo} onEdit={(edit, signal) => editing!.sketchId ? editing!.edit([edit], signal) : main.edit([edit])}
+        onEditMany={(edits, signal) => editing!.sketchId ? editing!.edit(edits, signal) : main.edit(edits)} onBeginSketchEdit={editing.begin}
+        sketchEdit={editing.sketchId ? { sketchId: editing.sketchId, finish: editing.finish, cancel: editing.cancel, inspectAreaRepairs: editing.inspectAreaRepairs } : undefined}
+        onWorkflowChange={editing.setWorkflowOpen} onUndo={editing.undo} onRedo={editing.redo} onSave={save} onBack={vi.fn()} onSendToCam={sendToCam}
+        onOpenDocument={vi.fn()} onNewDocument={vi.fn()} onImportDocument={async () => undefined} onExportDocument={vi.fn()}
+        onExportSolid={async () => undefined} onOpenDxfExport={async () => undefined} onViewportControlsReady={controls => { currentViewport = controls; }} />;
+    }
+    await act(async () => root.render(<Harness />));
+    await act(async () => viewport().apply({ kind: 'select-feature', featureId: 'sketch' })); await openSelected();
+    expect(editing?.sketchId).toBe('sketch');
+    await act(async () => editing!.edit([{ kind: 'set-parameter', name: 'n', value: 5 }]));
+    const edited = editing!.snapshot;
+    const confirmation = () => container.querySelector<HTMLElement>('[aria-label="Confirm finishing the sketch"]');
+    const within = (label: string) => [...confirmation()!.querySelectorAll('button')].find(entry => entry.textContent?.trim() === label)!;
+    // Finish finds the relation the later polygon loses and asks, naming it; nothing commits and the draft stays open.
+    await click('Finish sketch');
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(confirmation()?.textContent).toContain('This removes one relation on geometry the shape no longer has: Coincident "tie". Apply removes it, or Cancel keeps it.');
+    expect(container.querySelector('.cad-error')).toBeNull();
+    expect(main.getSnapshot()).toMatchObject({ version: base.version }); expect(main.getSnapshot().document).toBe(base.document); expect(editing?.sketchId).toBe('sketch'); expect(editing?.snapshot.document).toBe(edited.document); expect(editing?.snapshot.version).toBe(edited.version);
+    await act(async () => within('Cancel').click());
+    expect(confirmation()).toBeNull(); expect(editing?.sketchId).toBe('sketch'); expect(editing?.snapshot.document).toBe(edited.document); expect(editing?.snapshot.version).toBe(edited.version); expect(main.getSnapshot()).toMatchObject({ version: base.version }); expect(main.getSnapshot().document).toBe(base.document);
+    // Apply finishes again with the relation confirmed: the part is what the same confirmed parameter edit makes of it, in one undo step.
+    await click('Finish sketch');
+    await act(async () => within('Apply').click());
+    expect(commit).toHaveBeenLastCalledWith([{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }], base.version, expect.anything());
+    expect(editing?.sketchId).toBeNull(); expect(confirmation()).toBeNull();
+    expect(main.getSnapshot().document).toEqual(applyCadEdits(base.document, [{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }]));
+    await act(async () => main.undo()); expect(main.getSnapshot().document).toBe(base.document);
   });
   it('shows only current sketch areas while repairing a consumed boundary, without accepted suffix solids', async () => {
     const prefix = solidDocument(), sourceSketch = prefix.features[0];

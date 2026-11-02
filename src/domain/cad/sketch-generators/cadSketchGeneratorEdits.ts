@@ -87,7 +87,7 @@ export function settleCadDocumentGenerators(before: readonly CadFeature[], featu
   const previous = new Map(before.map(feature => [feature.id, feature]));
   return features.map(feature => {
     if (feature.kind !== 'sketch' || !feature.graph || !feature.graph.relations.some(relation => relation.kind === 'generator')) return feature;
-    const earlier = previous.get(feature.id), graph = settleCadSketchGenerators(feature.graph, earlier?.kind === 'sketch' ? earlier.graph : undefined, parameters, removals);
+    const earlier = previous.get(feature.id), graph = settleCadSketchGenerators(feature.graph, earlier?.kind === 'sketch' ? earlier.graph : undefined, parameters, removals, feature.id);
     return graph === feature.graph ? feature : { ...feature, graph };
   });
 }
