@@ -319,6 +319,42 @@ describe('unified feature history and dependency tree', () => {
     expect(onEditSketch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'sketch' }));
     expect(onEditCurve).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'curve' }));
   });
+  it('lists every generator with no profile view as a shape that opens its inputs, with a menu that edits, copies its outline or deletes it', async () => {
+    const corners = [[40, 0], [50, 0], [50, 10], [40, 10]] as const;
+    // A circular pattern of count 1 draws no copy, and is listed all the same.
+    const shapes = parseCadDocument({ ...createCadDocument('Shapes'), schemaVersion: 2, features: [{ id: 'sketch', name: 'Outline', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+      points: [{ id: 'a', position: [5, 0] }, { id: 'b', position: [10, 0] }, ...corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] }))],
+      entities: [{ id: 's', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' },
+        ...corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` }))],
+      relations: [{ id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: -40, y: 0, radius: 5, sides: 6, directionId: '@h' } },
+        { id: 'pat', kind: 'generator', idPrefix: 'pat', construction: true, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 1, angle: 360 } },
+        { id: 'wall', kind: 'generator', idPrefix: 'wall', name: 'Wall', construction: false, geometry: { kind: 'offset', chain: corners.map((_, index) => ({ entityId: `l${index}`, reversed: false })), distance: 2 } }] } }] });
+    const onDeleteProfile = vi.fn(), onCopyProfile = vi.fn(), onRename = vi.fn();
+    const callbacks = props({ document: shapes, selectedId: 'sketch', selectedProfileId: 'pat', onDeleteProfile, onCopyProfile, onRename });
+    await act(async () => root.render(<CadFeatureTree {...callbacks} />));
+    const row = (id: string) => container.querySelector<HTMLButtonElement>(`button[data-cad-profile-id="${id}"]`)!;
+    expect([...container.querySelectorAll('button[data-cad-profile-id]')].map(entry => [entry.getAttribute('data-cad-profile-id'), entry.getAttribute('aria-label'), entry.querySelector('small')?.textContent ?? null]))
+      .toEqual([['hex', 'Regular polygon shape', null], ['pat', 'Circular pattern shape', 'ref'], ['wall', 'Wall shape', null]]);
+    expect(row('pat').getAttribute('aria-pressed')).toBe('true'); expect(button('Select Outline in history').getAttribute('aria-pressed')).toBe('false');
+    await act(async () => row('hex').click());
+    expect(callbacks.onSelectProfile).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'sketch' }), 'hex');
+    const menu = async (id: string) => {
+      await act(async () => row(id).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
+      return [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map(item => item.textContent);
+    };
+    // The pattern's copies are not one outline to copy; the offset's outline is.
+    expect(await menu('pat')).toEqual(['Edit shape', 'Edit sketch', 'Delete shape']);
+    await menuAction('Edit shape');
+    expect(callbacks.onSelectProfile).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'sketch' }), 'pat');
+    expect(await menu('wall')).toEqual(['Edit shape', 'Edit sketch', 'Copy outline to editable sketch', 'Delete shape']);
+    await menuAction('Copy outline to editable sketch');
+    expect(onCopyProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'sketch' }), 'wall');
+    await menu('hex'); await menuAction('Delete shape');
+    expect(onDeleteProfile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 'sketch' }), 'hex');
+    // A shape has no profile to rename.
+    await act(async () => row('wall').dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true })));
+    expect(container.querySelector('input[aria-label="Profile name"]')).toBeNull();
+  });
   it('presents real diagnostics, suppression and parameter highlights without changing model data', async () => {
     const document = sample(), source = JSON.stringify(document);
     await act(async () => root.render(<CadFeatureTree {...props({ document, highlightedFeatureIds: ['pad'], diagnostics: [{ code: 'example', featureId: 'pad', message: 'Cannot build this body.' }] })} />));

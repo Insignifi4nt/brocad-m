@@ -17,6 +17,19 @@ export type CadSketchProfileGenerator = CadSketchGenerator & { readonly geometry
 const NOT_PROFILES: ReadonlySet<CadSketchGenerator['geometry']['kind']> = new Set(['regular-polygon', 'circular-pattern', 'offset']);
 const isProfileGenerator = (generator: CadSketchGenerator): generator is CadSketchProfileGenerator => !NOT_PROFILES.has(generator.geometry.kind);
 
+/** The name a generator's shape is listed by: its own, or its kind's when it has none. */
+export function cadSketchShapeName(generator: CadSketchGenerator): string {
+  return generator.name ?? cadSketchGeneratorKind(generator.geometry).label(generator.geometry);
+}
+
+/**
+ * Each generator of the sketch with no profile view, such as a regular polygon, a circular pattern or a linked offset, in relation order:
+ * the shapes a feature tree lists beside the profile views and opens by their inputs, whether or not they draw anything now.
+ */
+export function cadSketchViewlessGenerators(sketch: CadSketchFeature): readonly CadSketchGenerator[] {
+  return sketch.graph ? cadSketchGenerators(sketch.graph).filter(generator => !isProfileGenerator(generator)) : [];
+}
+
 const views = new WeakMap<CadSketchGenerator, CadSketchProfile>();
 /**
  * The profile `generator` is seen as; one object per record, so an unchanged record keeps its view. A listed polygon's or path's entry ids
@@ -26,7 +39,7 @@ function generatorProfile(generator: CadSketchProfileGenerator): CadSketchProfil
   let view = views.get(generator);
   if (!view) {
     const { ids: _ids, ...geometry } = generator.geometry as CadProfile & { readonly ids?: readonly number[] };
-    view = Object.freeze({ id: generator.id, name: generator.name ?? cadSketchGeneratorKind(generator.geometry).label(generator.geometry),
+    view = Object.freeze({ id: generator.id, name: cadSketchShapeName(generator),
       construction: generator.construction, geometry: 'ids' in generator.geometry ? geometry as CadProfile : generator.geometry });
     views.set(generator, view);
   }
@@ -56,7 +69,7 @@ export function cadSketchOutlineViews(sketch: CadSketchFeature, parameters: Read
     if (isProfileGenerator(generator)) continue;
     let kept = outlineViews.get(generator);
     if (kept?.shape !== shape) outlineViews.set(generator, kept = { shape, view: Object.freeze({ id: generator.id,
-      name: generator.name ?? cadSketchGeneratorKind(generator.geometry).label(generator.geometry), construction: generator.construction, geometry: shape }) });
+      name: cadSketchShapeName(generator), construction: generator.construction, geometry: shape }) });
     result.push(kept.view);
   }
   return result;

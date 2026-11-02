@@ -83,7 +83,7 @@ export interface CadSketchRelationListProps {
   readonly highlight?: CadSketchHighlightStore;
   /** A row's relation becomes the selection, its mark too; `additive` adds or removes it. */
   onSelect(relation: CadSketchGraphRelation, additive: boolean): void;
-  /** Double-click or Enter: a dimension's value editor, a pattern's editor, or the relation selected. */
+  /** Double-click or Enter: a dimension's value editor, a pattern's editor, a generator's inputs, or the relation selected. */
   onOpen(relation: CadSketchGraphRelation): void;
   /** Delete or Backspace: the selected relations, or the focused row's when it is not selected. */
   onDelete(relation: CadSketchGraphRelation): void;

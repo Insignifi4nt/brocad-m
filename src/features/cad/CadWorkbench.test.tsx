@@ -455,6 +455,54 @@ describe('CAD sketch interaction', () => {
     expect(generated('off')).toEqual({ ...offset, geometry: { ...offset.geometry, distance: 'gap' } });
     close(at('off_j_l3'), 37, -3); close(at('off_j_l1'), 53, 13);
   });
+  it('reopens a circular pattern of count 1, which draws no copy, from its tree row and its Relations row', async () => {
+    const pattern = { id: 'pat', kind: 'generator', idPrefix: 'pat', construction: false, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 } } as const;
+    await mount(parseCadDocument({ ...createCadDocument('Pattern', 'count-one'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Spokes',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [{ id: 'a', position: [5, 0] }, { id: 'b', position: [10, 0] }],
+        entities: [{ id: 's', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }], relations: [pattern] } }] }));
+    const copies = () => sketchGraph().entities.filter(entity => entity.id.startsWith('pat_')).map(entity => entity.id);
+    const count = async (value: string) => { await input(field('Count'), value); await click('Apply'); };
+    const treeRow = () => container.querySelector<HTMLButtonElement>('[aria-label="Part specification tree"] button[data-cad-profile-id="pat"]');
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    await act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: 'pat_i2_s' } }));
+    await click('Edit shape'); await count('1');
+    expect(copies()).toEqual([]);
+    // Closed, the sketch lists the pattern as a shape: no member is left to pick, and the row opens its inputs all the same.
+    await click('Finish sketch');
+    expect(treeRow()?.getAttribute('aria-label')).toBe('Circular pattern shape'); expect(treeRow()?.disabled).toBe(false);
+    await act(async () => treeRow()!.click());
+    expect(viewport().getState().selectedProfileId).toBe('pat');
+    await count('3');
+    expect(copies()).toEqual(['pat_i1_s', 'pat_i2_s']);
+    await count('1'); await click('Finish sketch');
+    // Reopened, Enter on its Relations row opens the inputs too.
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const toggle = container.querySelector<HTMLButtonElement>('[data-cad-sketch-relation-list] .cad-sketch-relation-list-toggle');
+    if (toggle?.getAttribute('aria-expanded') === 'false') await act(async () => toggle.click());
+    const row = () => { const found = container.querySelector<HTMLButtonElement>('button[data-cad-sketch-relation-row="pat"]'); if (!found) throw new Error('Pattern row missing.'); return found; };
+    expect(container.querySelector('.cad-parameter-editor')).toBeNull();
+    await act(async () => { row().focus(); row().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); });
+    expect(viewport().getState().selectedProfileId).toBe('pat');
+    await count('3');
+    expect(copies()).toEqual(['pat_i1_s', 'pat_i2_s']);
+    // A click only selects the row, closing the inputs.
+    await count('1'); await act(async () => row().click());
+    expect(viewport().getState().selectedProfileId).toBeNull(); expect(container.querySelector('.cad-parameter-editor')).toBeNull();
+    // Its row's menu has Edit shape as well.
+    const editFromMenu = async () => {
+      await act(async () => row().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 })));
+      const edit = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent?.trim() === 'Edit shape'); if (!edit) throw new Error('Edit shape missing.');
+      await act(async () => edit.click());
+      expect(viewport().getState().selectedProfileId).toBe('pat');
+    };
+    await editFromMenu();
+    // With relation marks hidden the row has its own menu, which has Edit shape too.
+    await act(async () => row().click()); await act(async () => setCadPreferences({ ...getCadPreferences(), showRelations: false }));
+    try { await editFromMenu(); } finally { setCadPreferences({ ...getCadPreferences(), showRelations: true }); }
+    await count('2');
+    expect(copies()).toEqual(['pat_i1_s']);
+    expect(sketchGraph().relations.find(relation => relation.id === 'pat')).toEqual({ ...pattern, geometry: { ...pattern.geometry, count: 2 } });
+  });
   it('keeps its mirror axis chooser alive through an owned keyboard menu without replacing the copied source selection', async () => {
     const source = pairedBoreMirrorPart(); await mount(source);
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));

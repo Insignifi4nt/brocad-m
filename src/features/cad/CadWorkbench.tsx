@@ -1347,6 +1347,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       // A glyph that draws X and Y held at 0 on one point reads as the point at the origin.
       const pair = isCadSketchOriginPair(shown, menu.picks.flatMap(pick => shown.relations.filter(item => item.id === pick.id)));
       canvasMenuTitle = pair ? CAD_SKETCH_ORIGIN_PAIR_NAME : cadSketchRelationName(shown, relation);
+      // A generator's row opens this menu while relation marks are shown; it edits the generator's inputs as the row's Enter does.
+      if (relation.kind === 'generator' && menu.picks.length === 1) canvasMenuItems.push({ label: 'Edit shape', onSelect: () => { if (current()) editShape(relation.id); } });
       canvasMenuItems.push({ label: 'Show in relations list', help: 'Scroll the relations under the sketch in the feature tree to this one.', onSelect: () => { if (current()) revealRelationRow(relation.id); } }, { kind: 'separator' }, deleteItem);
     } else if (shown && relation && isCadSketchDimensionRelation(relation)) {
       const graph = shown, reference = relation.kind === 'reference-dimension';
@@ -1384,6 +1386,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
         { label: 'Select seed', onSelect: () => { if (current()) selectGraph({ kind: 'entity', id: relation.seed.entityId }); } },
         { label: 'Detach pattern', help: 'Detach all occurrences and retain their current geometry.', onSelect: () => { if (current()) editSketchPattern(relation.id, true); } });
       else {
+        if (relation.kind === 'generator') canvasMenuItems.push({ label: 'Edit shape', onSelect: () => { if (current()) editShape(relation.id); } });
         const removed = selectedRelationIds.includes(relation.id) ? removableSelectedRelationIds(graph) : [relation.id];
         canvasMenuItems.push(...canvasMenuItems.length ? [{ kind: 'separator' } as const] : [], relation.kind === 'external-reference' && removed.length === 1
           ? { label: 'Detach reference', help: 'Detach this source link and retain the current geometry.', onSelect: () => { if (current()) deleteRelationRow(relation); } }
@@ -2113,10 +2116,13 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     setGraphRelationCommand(null); setProfileId(null); setProfileCommand(null);
     setRelationRowPick(ids.length ? { documentId: document.id, sketchId: sketch.id, relationIds: ids } : null);
   };
-  /** Double-click or Enter on a row: a value editor, a pattern's editor, or the relation selected. */
+  /** The inputs of a generator of any kind, opened whether or not it draws anything now. */
+  const editShape = (generatorId: string) => { selectGraph(null); selectProfile(generatorId); setInspectorCollapsed(false); };
+  /** Double-click or Enter on a row: a value editor, a pattern's editor, a generator's inputs, or the relation selected. */
   const openRelationRow = (relation: CadSketchGraphRelation) => {
     if (!sketch?.graph || interactionState.current.locked) return;
     if (relation.kind === 'linear-pattern') { editSketchPattern(relation.id); return; }
+    if (relation.kind === 'generator') { editShape(relation.id); return; }
     const pick = drawnRelationPick(relation.id);
     if (!isCadSketchValueRelation(relation)) { selectRelationRow(relation, false); return; }
     if (!pick) selectRelationRow(relation, false);
@@ -2274,7 +2280,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
             key={JSON.stringify([document.id, sketch.id, graphGeometry, cancelSignal])} document={document} sketch={sketch} graph={sketch.graph} selection={graphGeometry} onEditMany={props.onEditMany}
             onPrepareEdits={props.onPrepareEdits} onPendingChange={setEditorPending} onPreviewDocument={publishSketchPreview} onFeedback={reportEditFeedback} interactionLocked={sketchCommandLocked}
             onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })}
-            onEditGenerator={id => { selectGraph(null); selectProfile(id); setInspectorCollapsed(false); }} /> : profile && sketch ? selectedProfileEditor : shapeGenerator && sketch ? <CadSketchGeneratorInputsEditor key={`${shapeGenerator.id}-${cancelSignal}`} generator={shapeGenerator} sketch={sketch} document={document}
+            onEditGenerator={editShape} /> : profile && sketch ? selectedProfileEditor : shapeGenerator && sketch ? <CadSketchGeneratorInputsEditor key={`${shapeGenerator.id}-${cancelSignal}`} generator={shapeGenerator} sketch={sketch} document={document}
             onApply={async (edits, signal) => { await props.onEditMany(edits, signal); signal?.throwIfAborted(); setEditorPending(false); }} onCancel={cancel} onPendingChange={setEditorPending}
             onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} /> : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature}
             initialParameters={openingParameters?.featureId === selected.id ? openingParameters.parameters : undefined} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
