@@ -5,7 +5,8 @@ import type { CadEdit } from '../cadOperations';
 import type { CadSketchGenerator, CadSketchGraph } from '../cadSketchGraph';
 import { deleteCadSketchElements } from '../cadSketchGraphEdits';
 import { cadSketchGeneratorPrefixFor } from './cadSketchGeneratorEdits';
-import { cadSketchGeneratorKind, cadSketchGeneratorName, cadSketchGeneratorOutlines, cadSketchGenerators } from './cadSketchGenerators';
+import type { CadPluginPackage } from '../plugins/cadPlugins';
+import { cadSketchGeneratorKind, cadSketchGeneratorName, cadSketchGeneratorOutlines, cadSketchGeneratorOwner, cadSketchGenerators } from './cadSketchGenerators';
 
 // The shapes people configure as profiles: a sketch's saved legacy profiles, then each generator of a profile's geometry, seen as the
 // profile it replaces. The profile editor, the plugin panel, the parameter bindings and CAM notes read generators through these views,
@@ -61,6 +62,35 @@ export function cadSketchOutlineViews(sketch: CadSketchFeature, parameters: Read
   return result;
 }
 
+/** What export and CAM say about a plugin package: its identity, name and notes. */
+export type CadSketchPluginNote = Readonly<Pick<CadPluginPackage, 'id' | 'version' | 'name' | 'notes'>>;
+
+/**
+ * The plugin packages whose approximations the sketch's material geometry carries, one per shape, so export and CAM keep each package's
+ * notes: every nonconstruction plugin profile, saved or generated, in profile-view order, then each construction plugin generator that
+ * a nonconstruction linked offset or circular pattern copies from, directly or through another, since that copy is material made from
+ * the same approximated curves. Callers that list a package once dedupe by id and version.
+ */
+export function cadSketchPluginPackages(sketch: CadSketchFeature): readonly CadSketchPluginNote[] {
+  const packages: CadSketchPluginNote[] = cadSketchProfileViews(sketch).flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin' ? [profile.geometry.package] : []);
+  const graph = sketch.graph;
+  if (!graph) return packages;
+  const reached = new Set<string>();
+  const follow = (generator: CadSketchGenerator) => {
+    const inputs = generator.geometry.kind === 'offset' ? generator.geometry.chain.map(link => link.entityId)
+      : generator.geometry.kind === 'circular-pattern' ? generator.geometry.seedIds : [];
+    for (const id of inputs) {
+      const owner = cadSketchGeneratorOwner(graph, id);
+      if (!owner || reached.has(owner.id)) continue;
+      reached.add(owner.id);
+      if (owner.geometry.kind === 'plugin' && owner.construction) packages.push(owner.geometry.package);
+      follow(owner);
+    }
+  };
+  for (const generator of cadSketchGenerators(graph)) if (!generator.construction) follow(generator);
+  return packages;
+}
+
 /** The generator the profile view `profileId` of `sketch` stands for; undefined for a legacy profile or an id with no view. */
 export function cadSketchProfileGenerator(sketch: CadSketchFeature, profileId: string): CadSketchProfileGenerator | undefined {
   const generator = cadSketchWholeGenerator(sketch, profileId);
@@ -90,6 +120,11 @@ export function cadSketchGeneratorMoveReason(generator: CadSketchGenerator): str
     case 'offset': return `${name} follows the loop it offsets. Move that loop to move it.`;
     default: return null;
   }
+}
+
+/** The refusal of a grip on `generator`, a kind with no profile view, whose shape changes through its inputs only. */
+export function cadSketchGeneratorHandleError(generator: CadSketchGenerator): CadError {
+  return new CadError('unsupported-sketch-handle', `${cadSketchGeneratorName(generator)} has no grips. Change its inputs with set-sketch-generator.`);
 }
 
 /**

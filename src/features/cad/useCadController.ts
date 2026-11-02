@@ -33,7 +33,7 @@ import { needsCadSketchPreparation, prepareCadEdits, type CadSketchEditWarning, 
 import type { CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import type { CadSketchConstraintInspection } from './cadSketchConstraintInspection';
 import { useCadSketchEditing } from './useCadSketchEditing';
-import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { cadSketchGeneratorHandleError, cadSketchProfileViews, cadSketchWholeGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 type App = Pick<ReturnType<typeof useWorkbenchAppController>, 'connectedWorkbench' | 'workbenchInteractionLocked' | 'runAgentWorkbenchOperation'>
   & Partial<Pick<ReturnType<typeof useWorkbenchAppController>, 'showStatusToast'>>;
@@ -550,6 +550,9 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
     const document = session.getSnapshot().document, sketch = document.features.find(feature => feature.id === sketchId);
     const profile = sketch?.kind === 'sketch' ? cadSketchProfileViews(sketch).find(profile => profile.id === profileId) : undefined;
+    // A generator with no profile view, such as a regular polygon, has no grips: it is refused as move-sketch-handle refuses it.
+    const whole = !profile && sketch?.kind === 'sketch' ? cadSketchWholeGenerator(sketch, profileId) : undefined;
+    if (whole) throw cadSketchGeneratorHandleError(whole);
     if (!profile) throw new ToolError('NOT_FOUND', 'Choose an existing profile in a sketch.');
     return inspectCadSketchHandles(profile, document.parameters);
   }
@@ -829,11 +832,9 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     editable(expectedVersion); session.assertWorkflowClosed(scope); signal?.throwIfAborted();
     const document = session.getSnapshot().document;
     const section = await inspectSection(request, expectedVersion, signal, scope);
-    const { cadEntitiesToDxf } = await import('@/domain/cad/cadDxfExport');
+    const [{ cadEntitiesToDxf }, { cadSketchPluginNoteLines }] = await Promise.all([import('@/domain/cad/cadDxfExport'), import('@/domain/cad/cadCam')]);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
-    const notes = document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document)
-      ? cadSketchProfileViews(feature).flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin'
-        ? [`${profile.geometry.package.id}@${profile.geometry.package.version}: ${profile.geometry.package.notes}`] : []) : []);
+    const notes = cadSketchPluginNoteLines(document.features.flatMap(feature => feature.kind === 'sketch' && cadFeatureActive(feature, document) ? [feature] : []));
     const text = cadEntitiesToDxf(section.entities, notes);
     const fileName = `${fileBase(document.name)}-section-${section.plane}.dxf`;
     downloadCadBlob(new Blob([text], { type: 'application/dxf' }), fileName);

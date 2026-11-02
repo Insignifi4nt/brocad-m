@@ -17,6 +17,7 @@ import { signedDxfArcSweepRadians } from '@/domain/dxf/arcSweep';
 import type { DxfEntity } from '@/domain/dxf/types';
 import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
+import { cadSketchGeneratorName, cadSketchGenerators } from './sketch-generators/cadSketchGenerators';
 import type { CadSketchRelationCopy, CadSketchRemapPiece } from './sketch-relations/cadSketchRelationRemap';
 
 const strict = { additionalProperties: false };
@@ -84,6 +85,9 @@ export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSk
   if (!cadFeatureActive(sketch, { parameters })) return fail('Resume the sketch before offsetting a loop.');
   const { source, idPrefix } = request, distanceMm = evaluateCadScalar(request.distance, parameters);
   if (source.kind === 'profile') {
+    // A profile source names a saved legacy profile only. A generated shape is sketch geometry, so its loop is offset as a graph cycle.
+    const generator = sketch.graph ? cadSketchGenerators(sketch.graph).find(generator => generator.id === source.profileId) : undefined;
+    if (generator) return fail(`${cadSketchGeneratorName(generator)} is sketch geometry, not a saved profile. Offset its loop with a graph-cycle source, the sourceRefs of its contour in the region reference.`);
     const profile = sketch.profiles.find(profile => profile.id === source.profileId);
     if (!profile || profile.construction || profile.geometry.kind === 'plugin') return fail('Choose a nonconstruction standard profile or an exact graph loop.');
   }

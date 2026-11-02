@@ -29,7 +29,7 @@ import { CadSketchUseEntityRequestSchema, prepareCadSketchUseEntity, cadSketchEx
 import { prepareCadSketchPatternSnapshot, reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
 import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
 import { assertCadSketchGeneratorRemovals, cadSketchGeneratorLockReason, cadSketchGeneratorName, cadSketchGeneratorRemovals } from './sketch-generators/cadSketchGenerators';
-import { cadSketchGeneratorMoveReason, cadSketchProfileViews, cadSketchWholeGenerator, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
+import { cadSketchGeneratorHandleError, cadSketchGeneratorMoveReason, cadSketchProfileViews, cadSketchWholeGenerator, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
 import { detachCadSketchGenerator, setCadSketchGenerator, settleCadDocumentGenerators } from './sketch-generators/cadSketchGeneratorEdits';
 import { assertCadSketchGraphGeneratorCounts } from './sketch-generators/cadSketchGeneratorKinds';
 
@@ -359,7 +359,7 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to edit.');
         const profile = cadSketchProfileViews(feature).find(profile => profile.id === edit.profileId), whole = profile ? undefined : cadSketchWholeGenerator(feature, edit.profileId);
         // A generator with no profile view, such as a regular polygon, exists but is changed through its inputs only.
-        if (whole) throw new CadError('unsupported-sketch-handle', `${cadSketchGeneratorName(whole)} has no grips. Change its inputs with set-sketch-generator.`);
+        if (whole) throw cadSketchGeneratorHandleError(whole);
         if (!profile) throw new CadError('missing-profile', 'The selected sketch contour no longer exists.');
         const translation = [evaluateCadScalar(edit.translation[0], parameters), evaluateCadScalar(edit.translation[1], parameters)] satisfies readonly [number, number];
         // A generator's shape moves as its profile did; its record takes the new geometry and its members regenerate.

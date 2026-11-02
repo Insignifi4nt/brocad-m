@@ -89,6 +89,9 @@ describe('generators seen as the profiles they replace', () => {
       expect.objectContaining({ code: 'unsupported-sketch-handle', message: 'Regular polygon "hex" has no grips. Change its inputs with set-sketch-generator.' }));
     expect(refusal(() => applyCadEdits(document, [{ kind: 'add-sketch-dimension', sketchId: 'sketch', profileId: 'hex', constraint: { id: 'd', kind: 'dimension', quantity: 'diameter' } }])))
       .toMatchObject({ code: 'generator-sketch-dimension', message: expect.stringContaining('Regular polygon "hex"') });
+    // A profile source names a saved profile only; a generated shape's loop is a graph cycle.
+    expect(refusal(() => applyCadEdits(document, [{ kind: 'offset-sketch-loop', sketchId: 'sketch', source: { kind: 'profile', profileId: 'star' }, distance: 1, idPrefix: 'copy' }])))
+      .toMatchObject({ code: 'unsupported-sketch-offset', message: 'Star profile "star" is sketch geometry, not a saved profile. Offset its loop with a graph-cycle source, the sourceRefs of its contour in the region reference.' });
     const without = withoutCadSketchProfile(sketchOf(document), 'hex');
     expect(without.graph?.relations.map(relation => relation.id)).toEqual(['plate', 'star']);
     expect(without.graph?.points.some(point => point.id.startsWith('hex_'))).toBe(false); expect(without.graph?.entities.some(entity => entity.id.startsWith('hex_'))).toBe(false);

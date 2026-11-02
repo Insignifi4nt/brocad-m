@@ -9,6 +9,7 @@ import { parseCadDocument } from './cadSchema';
 import { cadSketchToEntities } from './cadSketchGeometry';
 import { cadEntitiesToDxf } from './cadDxfExport';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
+import { cadSketchPluginPackages } from './sketch-generators/cadSketchProfileViews';
 
 function entitiesForSketch(document: CadDocument, sketchId: string): DxfEntity[] {
   parseCadDocument(document);
@@ -28,11 +29,19 @@ export function cadSketchToCam(document: CadDocument, sketchId: string): PathPla
   return appendPluginNotes(result, [sketch]);
 }
 
+/**
+ * One DXF comment per plugin shape whose approximation the sketches' material geometry carries, saved profile or generator: the package's
+ * id, version and notes.
+ */
+export function cadSketchPluginNoteLines(sketches: readonly CadSketchFeature[]): string[] {
+  return sketches.flatMap(sketch => cadSketchPluginPackages(sketch).map(plugin => `${plugin.id}@${plugin.version}: ${plugin.notes}`));
+}
+
 function appendPluginNotes(result: PathPlanningDocument, sketches: readonly CadSketchFeature[]) {
   const seen = new Set<string>();
-  for (const sketch of sketches) for (const profile of sketch.profiles) {
-    if (profile.construction || profile.geometry.kind !== 'plugin' || !profile.geometry.package.notes) continue;
-    const plugin = profile.geometry.package, key = `${plugin.id}@${plugin.version}`;
+  for (const sketch of sketches) for (const plugin of cadSketchPluginPackages(sketch)) {
+    if (!plugin.notes) continue;
+    const key = `${plugin.id}@${plugin.version}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.diagnostics.push({ id: `cad_plugin_import_${seen.size}`, severity: 'warning', code: 'dxf-import-warning',
@@ -59,10 +68,6 @@ export function cadEntitiesToCam(entities: readonly DxfEntity[], sourceDocument?
 export function cadSketchToDxf(document: CadDocument, sketchId: string): string {
   const entities = entitiesForSketch(document, sketchId);
   const sketch = document.features.find(feature => feature.id === sketchId);
-  const notes = sketch?.kind === 'sketch' ? sketch.profiles.flatMap(profile => {
-    if (profile.construction || profile.geometry.kind !== 'plugin') return [];
-    const plugin = profile.geometry.package;
-    return [`${plugin.id}@${plugin.version}: ${plugin.notes}`];
-  }) : [];
+  const notes = sketch?.kind === 'sketch' ? cadSketchPluginNoteLines([sketch]) : [];
   return cadEntitiesToDxf(entities, notes);
 }

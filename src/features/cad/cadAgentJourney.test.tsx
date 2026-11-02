@@ -87,6 +87,11 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(await h.call('cad_inspect_sketch_handles', query)).toMatchObject({ ok: false, error: { code: 'STALE_STATE' } });
     await h.success('cad_history', { expectedVersion: after.version, direction: 'undo' });
     expect(h.session.getSnapshot().document).toEqual(before.document);
+    // A generator with no profile view has no grips, and the inspection says so as move-sketch-handle does.
+    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [{ kind: 'set-sketch-generator', sketchId: 'outline',
+      generator: { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: 60, y: 0, radius: 5, sides: 6, directionId: '@h' } } }] });
+    expect(await h.call('cad_inspect_sketch_handles', { ...query, expectedVersion: h.session.getSnapshot().version, profileId: 'hex' })).toMatchObject({ ok: false,
+      error: { code: 'unsupported-sketch-handle', message: 'Regular polygon "hex" has no grips. Change its inputs with set-sketch-generator.' } });
     await act(async () => h.session.setWorkflowOpen(true));
     expect(await h.call('cad_inspect_sketch_handles', { ...query, expectedVersion: h.session.getSnapshot().version })).toMatchObject({ ok: false, error: { code: 'WORKFLOW_OPEN' } });
     expect(await h.call('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [edit] })).toMatchObject({ ok: false, error: { code: 'WORKFLOW_OPEN' } });
