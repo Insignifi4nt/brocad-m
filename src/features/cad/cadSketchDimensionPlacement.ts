@@ -8,6 +8,9 @@ import { cadSketchLineAngleSectors, createCadSketchLineAngleRelation, type CadSk
 import type { Point2 } from '@/domain/path-intel/types';
 import { measureCadSketchReferenceDimension } from '@/domain/cad/cadSketchReferenceDimensions';
 import { userFacingMessage } from '@/lib/userMessage';
+import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchExternalReferenceLockReason } from '@/domain/cad/cadSketchExternalReferences';
+import { cadSketchGeneratedSizeReason, cadSketchGeneratorLockReason } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CAD_SKETCH_NO_REFERENCE_HOLD, cadSketchDistanceForPair, cadSketchMatchingReference, cadSketchPointLineDistanceFor, cadSketchRadialRelationForEntity, cadSketchSameIdentityPair } from './cadSketchDimensionCommands';
 import { isCadSketchDimensionRelation } from './cadSketchDimensionSelection';
 import type { CadSketchGraphSelection } from './cadSketchGraphSelection';
@@ -153,6 +156,22 @@ export function cadSketchDimensionRetry(feedback: CadSketchDimensionFeedback | n
 
 /** The points and edges the Dimension tool takes next, the origin among the points and the axes among the edges. */
 export interface CadSketchDimensionEligibility { readonly entityIds: readonly string[]; readonly pointIds: readonly string[] }
+/** The edges and points a dimension may measure at all, and the edges among them that take a size of their own. */
+export interface CadSketchDimensionPickTargets { readonly entityIds: readonly string[]; readonly sizedEntityIds: readonly string[]; readonly pointIds: readonly string[] }
+/**
+ * What the Dimension tool may pick in `graph`. A linear pattern's occurrences keep its spacing and take no dimension. A linked edge
+ * follows its source and a generated edge the inputs of its generator, so each anchors a distance or an angle to other geometry, whose free
+ * part the solve moves, but takes no size of its own. A circle whose radius follows an expression keeps its size there; its center still
+ * takes distances. Driven, generated and linked points anchor a free partner or a passive measurement; a lone point still measures from
+ * the origin or an axis.
+ */
+export function cadSketchDimensionPickTargets(graph: CadSketchGraph): CadSketchDimensionPickTargets {
+  const entities = graph.entities.filter(entity => !cadSketchLinearPatternLockReason(graph, { kind: 'entity', id: entity.id }));
+  return { entityIds: entities.map(entity => entity.id),
+    sizedEntityIds: entities.filter(entity => !cadSketchExternalReferenceLockReason(graph, { kind: 'entity', id: entity.id }) && !cadSketchGeneratorLockReason(graph, entity)
+      && !(entity.kind === 'circle' && typeof entity.radius === 'string' && !graph.relations.some(relation => relation.kind === 'radial-size' && relation.entityId === entity.id))).map(entity => entity.id),
+    pointIds: graph.points.map(point => point.id) };
+}
 const NOTHING: CadSketchDimensionEligibility = Object.freeze({ entityIds: [], pointIds: [] });
 /**
  * What the next pick may be, from `targets`, the edges and points a dimension may measure at all:
@@ -167,7 +186,7 @@ const NOTHING: CadSketchDimensionEligibility = Object.freeze({ entityIds: [], po
  *   across an axis, or a point or line on it, stays pickable, so the tool can say why it takes no distance;
  * - after two picks: nothing, so a click anywhere places the dimension.
  */
-export function cadSketchDimensionPickEligibility(graph: CadSketchGraph, targets: { readonly entityIds: readonly string[]; readonly sizedEntityIds: readonly string[]; readonly pointIds: readonly string[] },
+export function cadSketchDimensionPickEligibility(graph: CadSketchGraph, targets: CadSketchDimensionPickTargets,
   operands: readonly CadSketchDimensionOperand[]): CadSketchDimensionEligibility {
   if (operands.length > 1) return NOTHING;
   const first = operands[0];
@@ -229,8 +248,13 @@ export function planCadSketchDimension(graph: CadSketchGraph, parameters: Readon
   if (geometry.length !== lines.length + curves.length + points.length) return NO_SKETCH_DIMENSION_PLAN;
   // The origin and the axes are fixed together, so they take a dimension only with one point or edge of the sketch.
   if (geometry.length < operands.length && (operands.length !== 2 || geometry.length !== 1)) return NO_SKETCH_DIMENSION_PLAN;
+  // Picks a generator makes, with the origin or an axis, are held where its inputs put them, so a driving dimension on them alone drives
+  // nothing: each form that would add one offers its reference form instead, where it has one.
+  const generated = cadSketchGeneratedSizeReason(graph, operands.map(operand => operand.id));
+  const held = (candidate: CadSketchDimensionCandidate): CadSketchDimensionCandidate => generated && candidate.state === 'available'
+    ? { form: candidate.form, label: candidate.label, state: 'blocked', reason: generated, ...candidate.reference ? { reference: candidate.reference } : {}, preview: candidate.preview } : candidate;
   const plan = (candidates: readonly CadSketchDimensionCandidate[], defaultForm: CadSketchDimensionForm, pair: readonly [Point2, Point2] | null = null): CadSketchDimensionPlan =>
-    Object.freeze({ operands, candidates, pair, defaultForm, graph, parameters });
+    Object.freeze({ operands, candidates: generated ? candidates.map(held) : candidates, pair, defaultForm, graph, parameters });
   try {
     if (axis) return lines.length ? linePairPlan([lines[0].id, axis]) : plan([pointFromAxis(points[0] ?? curves[0].centerPointId, axis)], 'point-line');
     if (geometry.length === 1 && operands.length === 2) {

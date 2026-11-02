@@ -44,13 +44,16 @@ export function page<T, R = T>(rows: readonly T[], input: { offset?: number; lim
 export function siteTool<S extends TSchema>(
   name: string, description: string, inputSchema: S,
   run: (input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>,
-  readOnlyHint = true
+  readOnlyHint = true,
+  /** Refuses unchecked input with a reason its schema check would not give, before that check. */
+  refuse?: (input: unknown) => void
 ): SiteTool {
   return { name, description, inputSchema, annotations: { readOnlyHint, untrustedContentHint: true },
     async execute(input, options) {
       const signal = options?.signal ?? new AbortController().signal;
       try {
         signal.throwIfAborted();
+        refuse?.(input);
         if (!Value.Check(inputSchema, input)) {
           const issues = [];
           for (const issue of Value.Errors(inputSchema, input)) {

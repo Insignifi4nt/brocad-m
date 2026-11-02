@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CadDocument, CadMesh } from '@/domain/cad/cadDocument';
-import { createCadDocument } from '@/domain/cad/cadSchema';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 import { cadDirectDepthTarget, createCadDirectDepthControl, type CadDirectDepthEnvironment } from './cadDirectDepthControl';
 import { cadExtrudeDepthEdits, cadExtrudeEndFaceAt, cadExtrudeForEndFace, inspectCadExtrudeDepth } from './cadExtrudeDepthInteraction';
 import type { CadFeaturePreviewCommand } from './cadFeaturePreview';
@@ -65,12 +66,13 @@ describe('direct Pad depth edits', () => {
 });
 
 describe('direct Pad depth control', () => {
-  function harness(document = part()) {
+  function harness(document = part(), asking = false) {
     const environment = { current: { document, documentVersion: 'v1', enabled: true } as CadDirectDepthEnvironment };
-    const preview = vi.fn<(command: CadFeaturePreviewCommand) => void>(), commit = vi.fn(), gesture = vi.fn<(active: boolean) => void>();
-    const control = createCadDirectDepthControl({ featureId: 'pad', baseVersion: 'v1', owner: 'direct', read: () => environment.current, preview, commit, onGestureChange: gesture });
+    const preview = vi.fn<(command: CadFeaturePreviewCommand) => void>(), commit = vi.fn(), gesture = vi.fn<(active: boolean) => void>(), ask = vi.fn();
+    const control = createCadDirectDepthControl({ featureId: 'pad', baseVersion: 'v1', owner: 'direct', read: () => environment.current, preview, commit, onGestureChange: gesture,
+      ...asking ? { ask } : {} });
     const begin = () => { const token = control.begin(control.getState()?.definitionKey ?? ''); if (!token) throw new Error('Expected a drag'); return token; };
-    return { environment, preview, commit, gesture, control, begin };
+    return { environment, preview, commit, gesture, ask, control, begin };
   }
 
   it('previews each Length and commits exactly one edit on release', () => {
@@ -140,6 +142,32 @@ describe('direct Pad depth control', () => {
     expect(control.ownsEndFace?.(padMesh(two), 'face:top')).toBe(true);
     expect(control.ownsEndFace?.({ ...padMesh(two), featureId: 'boss' }, 'face:top')).toBe(false);
     expect(control.ownsEndFace?.(padMesh(two), 'face:side')).toBe(false);
+  });
+
+  it('applies nothing and hands the edits on to ask when released at a Length that removes relations, and commits a later Length that removes none', () => {
+    // The Pad's Length is n, which also counts a polygon's sides; the center's distance to the fifth corner, "c4", lasts only while n is at least 5.
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const base = part(' n ');
+    const document = parseCadDocument({ ...base, schemaVersion: 2, parameters: { n: 5 }, features: [...base.features, { id: 'poly-sketch', name: 'Polygon', kind: 'sketch', suppressed: false,
+      plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [0, 0] }], entities: [], relations: [polygon, { id: 'c4', kind: 'distance', pointIds: ['u', 'g-poly_v4'], value: 10 }] } }] });
+    const removing = [{ kind: 'update-feature', feature: document.features[1] }, { kind: 'set-parameter', name: 'n', value: 4 }];
+    const first = harness(document, true), token = first.begin();
+    expect(first.control.setQuantity(token, 4)).toBe(true);
+    // The canvas shows no candidate the part refuses, and the release asks instead of committing.
+    expect(first.preview).not.toHaveBeenCalledWith(expect.objectContaining({ kind: 'candidate' }));
+    expect(first.control.release(token)).toBe(true);
+    expect(first.ask.mock.calls).toEqual([[removing]]); expect(first.commit).not.toHaveBeenCalled();
+    expect(first.preview).toHaveBeenLastCalledWith({ kind: 'clear', owner: 'direct' }); expect(first.control.getState()?.gestureActive).toBe(false);
+    // A Length that removes nothing after one that would commits as before.
+    const second = harness(document, true), again = second.begin();
+    second.control.setQuantity(again, 4); second.control.setQuantity(again, 7);
+    expect(second.control.release(again)).toBe(true);
+    expect(second.ask).not.toHaveBeenCalled(); expect(second.commit.mock.calls).toEqual([[[removing[0], { kind: 'set-parameter', name: 'n', value: 7 }]]]);
+    // A caller that cannot ask keeps the last Length that removes nothing.
+    const silent = harness(document), quiet = silent.begin();
+    silent.control.setQuantity(quiet, 7); silent.control.setQuantity(quiet, 4); silent.control.release(quiet);
+    expect(silent.commit.mock.calls).toEqual([[[removing[0], { kind: 'set-parameter', name: 'n', value: 7 }]]]);
   });
 
   it('cancels an open drag when disposed', () => {

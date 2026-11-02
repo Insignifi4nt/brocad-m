@@ -9,8 +9,9 @@ import { CAD_SKETCH_ORIGIN_ID, isCadSketchVirtualId, type CadSketchVirtualAxisId
 // definition). Trim, extend, split, pattern omission, mirror, offset and the linear pattern's occurrences describe their edit or copy here
 // and read one outcome for each relation, so no operation carries a rule of its own. Each operand follows by its role: a curve's carrier,
 // extent, joint or ray end, or a point. Curves are read only through their traits (`cadSketchCurveTraits`), so a new kind of curve (an
-// ellipse, a spline) needs only its traits and its pieces' intervals, never a rule per operation. A sketch circular pattern, should one be
-// added, must copy through `copyCadSketchRelations` as a rotation, as the linear pattern copies as a translation.
+// ellipse, a spline) needs only its traits and its pieces' intervals, never a rule per operation. Both sketch patterns copy through
+// `copyCadSketchRelations` as a pattern: the linear one translates its seed and the circular one turns it, and the rule a kind declares
+// for a pattern keeps only what any such rigid motion keeps.
 
 /**
  * One curve of the edited graph that covers a span of an old curve. `interval` is the span of the old curve's parameter it covers, from
@@ -39,11 +40,13 @@ export interface CadSketchRelationEdit {
 }
 /**
  * A copy of some of the sketch's geometry, as a map from each copied curve and point to its copy. A mirror reflects, an offset moves each
- * curve along its normal, and a pattern translates its seed to each occurrence it generates. Elements in `invariant`, such as the mirror
- * line and its ends, are their own copies.
+ * curve along its normal, a pattern moves its seed rigidly to each occurrence it generates, along a row or about a centre, and an exact
+ * copy, such as a shape copied to a new sketch on the same plane, leaves every point where it was: it keeps every relation internal to
+ * the copied set, and those on the origin and the axes, which stay where they are. Elements in `invariant`, such as the mirror line and
+ * its ends, are their own copies.
  */
 export interface CadSketchRelationCopy {
-  readonly kind: 'mirror' | 'offset' | 'pattern';
+  readonly kind: 'mirror' | 'offset' | 'pattern' | 'exact';
   readonly curves: ReadonlyMap<string, CadSketchRemapPiece>;
   readonly points: ReadonlyMap<string, string>;
   readonly invariant?: ReadonlySet<string>;
@@ -111,7 +114,7 @@ function graphIndex(graph: CadSketchGraph, traits: CadSketchCurveCapabilities = 
   const curves = new Map<string, CadSketchCurveTraits>();
   const add = (id: string, at: number) => { const list = naming.get(id); if (!list) naming.set(id, [at]); else if (list.at(-1) !== at) list.push(at); };
   graph.relations.forEach((relation, at) => {
-    const definition = cadSketchRelationDefinition(relation), owned = definition.owns?.(relation);
+    const definition = cadSketchRelationDefinition(relation), owned = definition.owns?.(relation, graph);
     for (const id of definition.operands(relation)) add(id, at);
     for (const id of [...owned?.entityIds ?? [], ...owned?.pointIds ?? []]) add(id, at);
   });
@@ -167,7 +170,7 @@ const REASONS = {
 } as const;
 const block = (reason: string, confirmable = true): Failure => ({ reason, confirmable });
 /** Why a copy's kind leaves a relation out by its rule; geometry outside the copy is a separate reason. */
-const COPY_DROPS: Readonly<Record<CadSketchRelationCopy['kind'], string>> = {
+const COPY_DROPS: Readonly<Record<Exclude<CadSketchRelationCopy['kind'], 'exact'>, string>> = {
   mirror: 'A mirrored copy does not keep it.',
   offset: 'An offset copy does not keep it.',
   pattern: 'The pattern owns its occurrences, which keep only reference dimensions: it drives them through the seed instead.'
@@ -178,7 +181,7 @@ function resolveEdit(graph: CadSketchGraph, index: GraphIndex, edit: CadSketchRe
   const definition = cadSketchRelationDefinition(relation), rule = ruleOf(relation), roles = rolesOf(relation, rule);
   const slots = cadSketchRelationSignature(relation).slots, ids = definition.operands(relation), next = [...ids], reversed = ids.map(() => false);
   const points = edit.points ?? new Map<string, string | null>();
-  const owned = definition.owns?.(relation);
+  const owned = definition.owns?.(relation, graph);
   if (owned && (owned.entityIds.some(id => edit.curves.has(id) && !whole(edit.curves.get(id))) || owned.pointIds.some(id => points.get(id) === null)))
     return rule.owned === 'refuse' ? block(REASONS.source, false) : block(REASONS.owned);
   // Two points at the ends of one line, and of no other edge, hold that line's direction: each follows the line's end on its side.
@@ -287,8 +290,8 @@ export const blockedCadSketchRemaps = (outcomes: readonly CadSketchRemapOutcome[
 function resolveCopy(index: GraphIndex, copy: CadSketchRelationCopy, relation: CadSketchGraphRelation): Exclude<Resolved, Failure> | string {
   const definition = cadSketchRelationDefinition(relation), rule = ruleOf(relation), roles = rolesOf(relation, rule);
   if (definition.owns) return 'It owns geometry, which the copy keeps plain.';
-  const copies: CadSketchCopyRule = rule.copy[copy.kind];
-  if (copies === 'drop') return COPY_DROPS[copy.kind];
+  const copies: CadSketchCopyRule = copy.kind === 'exact' ? 'follow' : rule.copy[copy.kind];
+  if (copies === 'drop' && copy.kind !== 'exact') return COPY_DROPS[copy.kind];
   if (copies === 'axes' && !copy.axis) return 'It holds the H or V direction, which a mirror about this line does not keep.';
   const ids = definition.operands(relation), next = [...ids], reversed = ids.map(() => false), invariant = copy.invariant ?? new Set<string>();
   let kept = false;
@@ -296,6 +299,7 @@ function resolveCopy(index: GraphIndex, copy: CadSketchRelationCopy, relation: C
     if (roles[at] === 'end') continue;
     const endSlot = roles[at + 1] === 'end' ? at + 1 : null;
     if (isCadSketchVirtualId(id)) {
+      if (copy.kind === 'exact') continue;
       if (!copy.axis) return 'It names the origin or an axis, which this copy does not carry.';
       // The other axis lies on itself the other way round, so a ray along it runs toward its other end and a side on it turns over.
       if (id !== CAD_SKETCH_ORIGIN_ID && id !== copy.axis) {
@@ -339,7 +343,7 @@ function resolveCopy(index: GraphIndex, copy: CadSketchRelationCopy, relation: C
  * Each relation that names copied geometry with what the copy does to it, in graph order. A relation internal to the copied set, or
  * reaching only geometry the copy keeps in place, is carried onto the copy, with a mirror's sense or side reversed. One that reaches
  * other geometry, or that the kind's rule leaves out, is not copied, with the reason. A copy is laid out automatically, so it keeps no
- * dimension placement. The original relations always stay.
+ * dimension placement, except an exact copy, whose geometry is where it was. The original relations always stay.
  */
 export function copyCadSketchRelations(graph: CadSketchGraph, copy: CadSketchRelationCopy): readonly CadSketchRemapOutcome[] {
   const index = graphIndex(graph, copy.traits);
@@ -347,8 +351,9 @@ export function copyCadSketchRelations(graph: CadSketchGraph, copy: CadSketchRel
   return touched(graph, index, [...copy.curves.keys(), ...copy.points.keys()], []).map((relation): CadSketchRemapOutcome => {
     const resolved = resolveCopy(index, copy, relation);
     if (typeof resolved === 'string') return { kind: 'remove', relation, reason: resolved };
-    const { annotation: _placement, ...plain } = moved(relation, resolved, copy.kind === 'mirror') as CadSketchGraphRelation & { readonly annotation?: unknown };
-    return { kind: 'replace', relation, relations: [{ ...plain, id: copy.relationId(relation, copied++) } as CadSketchGraphRelation] };
+    const placed = moved(relation, resolved, copy.kind === 'mirror') as CadSketchGraphRelation & { readonly annotation?: unknown };
+    const { annotation: _placement, ...plain } = placed;
+    return { kind: 'replace', relation, relations: [{ ...copy.kind === 'exact' ? placed : plain, id: copy.relationId(relation, copied++) } as CadSketchGraphRelation] };
   });
 }
 /** The relations a copy adds, in graph order. */

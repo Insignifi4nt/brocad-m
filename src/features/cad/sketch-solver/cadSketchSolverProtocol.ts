@@ -6,7 +6,9 @@ import { CadIdentifierSchema, CadNumberSchema } from '../../../domain/cad/cadPri
 import { cadImportDataCopy, cadImportDataFields, isCadImportData } from '../../../domain/cad/cadImportData';
 import { CadError } from '../../../domain/cad/cadError';
 import { cadSketchExternalReferenceComponents } from '../../../domain/cad/cadSketchExternalReferences';
+import { cadSketchFixedComponents } from '../../../domain/cad/cadSketchFixedComponents';
 import { cadSketchLinearPatternLockReason } from '../../../domain/cad/cadSketchLinearPattern';
+import { cadSketchGeneratorLockReason } from '../../../domain/cad/sketch-generators/cadSketchGenerators';
 import type { CadSketchSolveDiagnostics, CadSketchSolveInput, CadSketchSolveResult } from './cadSketchSolverTypes';
 
 // The graph is not part of this schema: its own parser validates it, once.
@@ -61,6 +63,8 @@ export function parseCadSketchSolveInput(value: unknown): CadSketchSolveInput {
   if (drag && !graph.points.some(point => point.id === drag.pointId)) throw new Error('The sketch drag point does not exist.');
   if (drag && cadSketchExternalReferenceComponents(graph).pointIds.has(drag.pointId)) throw new Error('Detach the sketch reference before dragging its geometry.');
   if (drag && cadSketchLinearPatternLockReason(graph, { kind: 'point', id: drag.pointId })) throw new Error('Edit the seed or detach the linear pattern before dragging generated geometry.');
+  const generatedLock = drag ? cadSketchGeneratorLockReason(graph, { id: drag.pointId }) : null;
+  if (generatedLock) throw new Error(generatedLock);
   return Object.freeze({ graph, parameters: Object.freeze({ ...parameters }), ...(drag ? { drag: Object.freeze({ pointId: drag.pointId,
     position: Object.freeze([drag.position[0], drag.position[1]] satisfies [number, number]) }) } : {}), ...(analyseDefinition ? { analyseDefinition: true } : {}) });
 }
@@ -87,7 +91,7 @@ export function isCadSketchSolverEnvelope(value: unknown): value is { id: number
 
 export function cadSketchSolutionMatchesInput(input: CadSketchSolveInput, graph: CadSketchSolveInput['graph']) {
   if (graph.points.length !== input.graph.points.length || graph.entities.length !== input.graph.entities.length) return false;
-  const owned = cadSketchExternalReferenceComponents(input.graph);
+  const owned = cadSketchFixedComponents(input.graph);
   return Value.Equal({ ...graph, points: graph.points.map((point, index) => ({ ...point,
     position: point.position.map((value, axis) => typeof input.graph.points[index].position[axis] === 'number' && !owned.pointIds.has(input.graph.points[index].id) ? input.graph.points[index].position[axis] : value)
   })), entities: graph.entities.map((entity, index) => {
@@ -112,6 +116,6 @@ export function parseCadSketchSolverReply(value: unknown, input: CadSketchSolveI
   if (!graph || (diagnostics.status !== 'success' && diagnostics.status !== 'converged') || diagnostics.degreesOfFreedom !== null && diagnostics.degreesOfFreedom < 0
     || diagnostics.conflictingIds.length || diagnostics.redundantIds.length || diagnostics.partiallyRedundantIds.length || diagnostics.issues.length
     || !definitionMatchesInput(input, diagnostics.definition)
-    || checkCadSketchGraph(graph, input.parameters).length) throw new Error('Sketch worker solution does not match its request or constraints.');
+    || checkCadSketchGraph(graph, input.parameters, 'solve').length) throw new Error('Sketch worker solution does not match its request or constraints.');
   return { id: value.id, kind: 'result', result: { kind: 'solved', graph, diagnostics } };
 }

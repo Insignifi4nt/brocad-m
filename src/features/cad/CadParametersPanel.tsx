@@ -10,9 +10,11 @@ import type { CadEdit } from '@/domain/cad/cadOperations';
 import { inspectCadParameters, type CadParameterUsage } from '@/domain/cad/cadParameters';
 import { formatCadLocalizedQuantity } from './cadDisplayQuantity';
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
+import { cadGeneratorRemovalPrompt, cadGeneratorRemovals, type CadGeneratorRemovals } from './cadGeneratorRemovals';
 import './cad-parameters.css';
 
-type Editor = { kind: 'parameter'; originalName: string | null; name: string; value: string; groupId: string; error: string }
+// A parameter's removals are the relations its new value removes as generators regenerate, which the next Apply confirms.
+type Editor = { kind: 'parameter'; originalName: string | null; name: string; value: string; groupId: string; error: string; removals?: CadGeneratorRemovals }
   | { kind: 'group'; originalId: string | null; name: string; error: string };
 /** Commands the tree's Parameters menu sends; each is ignored while the panel is locked or already editing. */
 export interface CadParametersPanelControls { create(kind: 'parameter' | 'group'): void }
@@ -61,8 +63,12 @@ export function CadParametersPanel({ controls, document: cadDocument, onEditMany
   };
   useImperativeHandle(controls, () => ({ create: kind => begin(kind === 'group' ? { kind: 'group', originalId: null, name: '', error: '' }
     : { kind: 'parameter', originalName: null, name: '', value: '', groupId: '', error: '' }) }));
-  const update = (values: Partial<Pick<Editor, 'name' | 'error'>>) => setEditor(current => current ? { ...current, ...values } : current);
-  const report = (error: unknown) => update({ error: userFacingMessage(error, 'Unable to apply this change.') });
+  const update = (values: Partial<Pick<Editor, 'name' | 'error'>>) => setEditor(current => current ? { ...current, ...values, ...current.kind === 'parameter' ? { removals: undefined } : {} } : current);
+  const report = (error: unknown) => {
+    const removals = cadGeneratorRemovals(error);
+    if (removals) setEditor(current => current?.kind === 'parameter' ? { ...current, removals, error: '' } : current);
+    else update({ error: userFacingMessage(error, 'Unable to apply this change.') });
+  };
   const assertCurrent = () => { if (editorDocument.current !== cadDocument) throw new Error('The part changed while this editor was open. Cancel and reopen it to edit the current values.'); };
   const apply = () => {
     if (!editor || interactionLocked || submission.applying) return;
@@ -80,7 +86,7 @@ export function CadParametersPanel({ controls, document: cadDocument, onEditMany
         const value = Number(editor.value);
         if (!editor.value.trim() || !Number.isFinite(value) || Math.abs(value) > 1e9) throw new Error('Enter a finite value between −1,000,000,000 and 1,000,000,000.');
         if (editor.originalName && editor.originalName !== name) edits.push({ kind: 'rename-parameter', name: editor.originalName, newName: name });
-        if (!editor.originalName || cadDocument.parameters[editor.originalName] !== value) edits.push({ kind: 'set-parameter', name, value });
+        if (!editor.originalName || cadDocument.parameters[editor.originalName] !== value) edits.push({ kind: 'set-parameter', name, value, ...editor.removals ? { removedRelationIds: [...editor.removals.relationIds] } : {} });
         const originalGroupId = editor.originalName ? inspection.parameters.find(parameter => parameter.name === editor.originalName)?.groupId ?? '' : '';
         if (originalGroupId !== editor.groupId) edits.push({ kind: 'move-parameter', name, groupId: editor.groupId || null });
       }
@@ -120,9 +126,10 @@ export function CadParametersPanel({ controls, document: cadDocument, onEditMany
       <form aria-busy={submission.applying || undefined} onSubmit={event => { event.preventDefault(); apply(); }}>
         <fieldset disabled={interactionLocked || submission.applying}>
           <label><span>{editor.kind === 'group' ? 'Group name' : 'Name'}</span><Input aria-label={editor.kind === 'group' ? 'Group name' : 'Parameter name'} value={editor.name} spellCheck={false} autoComplete="off" onChange={event => update({ name: event.target.value, error: '' })} /></label>
-          {editor.kind === 'parameter' && <><label><span>Value</span><Input aria-label="Parameter value" inputMode="decimal" value={editor.value} onChange={event => setEditor(current => current?.kind === 'parameter' ? { ...current, value: event.target.value, error: '' } : current)} /></label><label><span>Group</span><Select aria-label="Parameter group" value={editor.groupId} onChange={event => setEditor(current => current?.kind === 'parameter' ? { ...current, groupId: event.target.value, error: '' } : current)}><option value="">Ungrouped</option>{inspection.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</Select></label></>}
+          {editor.kind === 'parameter' && <><label><span>Value</span><Input aria-label="Parameter value" inputMode="decimal" value={editor.value} onChange={event => setEditor(current => current?.kind === 'parameter' ? { ...current, value: event.target.value, error: '', removals: undefined } : current)} /></label><label><span>Group</span><Select aria-label="Parameter group" value={editor.groupId} onChange={event => setEditor(current => current?.kind === 'parameter' ? { ...current, groupId: event.target.value, error: '' } : current)}><option value="">Ungrouped</option>{inspection.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</Select></label></>}
           {selected && <details className="cad-parameter-usage" open><summary>{selected.usages.length ? `Used by ${selected.usages.length} dimension${selected.usages.length === 1 ? '' : 's'}` : 'Unused'}</summary>{selected.usages.map((usage, index) => <div key={`${usage.featureId}/${usage.path}/${index}`} className={usage.active ? '' : 'is-inactive'}><Button type="button" disabled={!onInspectUsage} aria-label={`Inspect ${usage.featureName}${usage.inputName ? ` ${usage.inputName}` : ''}`} onClick={() => onInspectUsage?.(usage)}>{usage.featureName}{usage.inputName ? ` · ${usage.inputName}` : ''}</Button><code>{usage.expression}</code>{!usage.active && <small>{usage.reason ?? 'Inactive'}</small>}</div>)}</details>}
           {editor.error && <p className="cad-parameter-error" role="alert">{editor.error}</p>}
+          {editor.kind === 'parameter' && editor.removals && <p className="cad-form-hint" role="status">{cadGeneratorRemovalPrompt(cadDocument, editor.removals)}</p>}
         </fieldset>
         <footer>{(editor.kind === 'parameter' && editor.originalName || editor.kind === 'group' && editor.originalId) && <Button variant="danger" type="button" className="cad-parameter-delete" aria-label={editor.kind === 'group' ? 'Remove parameter group' : 'Remove parameter'} disabled={interactionLocked || submission.applying || editor.kind === 'parameter' && Boolean(selected?.usages.length)} title={selected?.usages.length ? 'This parameter is referenced. Remove its links before deleting it.' : editor.kind === 'group' ? 'Keeps values and moves them to Ungrouped' : 'Remove this unused value'} onClick={remove}><DeleteIcon size={12} /></Button>}<Button type="button" onClick={close}>Cancel</Button><Button variant="primary" type="submit" className="cad-parameter-apply" disabled={interactionLocked || submission.applying}><ConfirmIcon size={12} /> Apply</Button></footer>
       </form>

@@ -191,6 +191,15 @@ it('waits for local workflow ownership before analysis or history and inspects t
   expect(h.inspect).toHaveBeenCalledWith(local.document, 'sketch', expect.any(AbortSignal)); expect(h.editing().analysisReady).toBe(true);
 });
 
+it('pauses analysis without leaving it while the workspace is locked, as for a capture', async () => {
+  const h = await mount();
+  expect(h.editing()).toMatchObject({ analysisReady: true, analysisPaused: false });
+  await h.changeHost({ locked: true });
+  expect(h.editing()).toMatchObject({ analysisReady: true, analysisPaused: true });
+  await h.changeHost({ locked: false });
+  expect(h.editing()).toMatchObject({ analysisReady: true, analysisPaused: false });
+});
+
 it.each(['storage', 'open', 'source'] as const)('aborts a pending local edit when its %s owner changes and preserves the accepted full part', async change => {
   const h = await mount(), base = h.session.getSnapshot(); await act(async () => h.editing().begin('sketch'));
   let complete: (document: CadDocument) => void = () => { throw new Error('Preparation missing'); };

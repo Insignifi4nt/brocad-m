@@ -1,13 +1,13 @@
 import { expect, test } from './fixtures/native-sketch-solver';
 import type { CadFeature } from '../src/domain/cad/cadDocument';
 import type { CadTopologyDescriptor } from '../src/domain/cad/cadTopology';
-import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, openFeatureEditor } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, generatedSketch, openFeatureEditor } from './cad-tool-helpers';
 
 for (const kind of ['fillet', 'chamfer', 'shell'] as const) test(`replaces an existing ${kind} input with Cancel, exact agent parity, history and save`, async ({ page }, testInfo) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
   await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'add-feature', feature: { id: 'outline', name: 'Footprint', kind: 'sketch', suppressed: false, plane: 'XY', offset: '0',
-      profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: '0', y: '0', width: 20, height: 10, cornerRadius: 0 } }] } },
+    { kind: 'add-feature', feature: generatedSketch({ id: 'outline', name: 'Footprint', kind: 'sketch', suppressed: false, plane: 'XY', offset: '0',
+      profiles: [{ id: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: '0', y: '0', width: 20, height: 10, cornerRadius: 0 } }] }) },
     { kind: 'add-feature', feature: { id: 'pad', name: 'Stock', kind: 'extrude', suppressed: false, sketchId: 'outline', distance: '5', symmetric: false, operation: 'new', targetId: null } },
   ] });
   const base = await context(page), built = await call(page, 'cad_build', { expectedVersion: base.version });

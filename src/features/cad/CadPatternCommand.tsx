@@ -4,8 +4,9 @@ import { CadToolbarMenu } from './CadToolbarMenu';
 
 type PatternKind = Extract<CadFeature['kind'], 'linear-pattern' | 'circular-pattern'>;
 
-export function CadPatternCommand({ disabled, onChoose, context = 'body' }: { disabled: boolean; context?: 'sketch' | 'body'; onChoose(kind: PatternKind): void }) {
-  return <CadToolbarMenu label="Pattern" menuLabel="Pattern commands" icon={<PatternIcon size={15} strokeWidth={1.5} />} disabled={disabled} items={[
+/** The pattern commands; a disabled command's `reason` replaces its help. */
+export function CadPatternCommand({ disabled, onChoose, context = 'body', reason }: { disabled: boolean; context?: 'sketch' | 'body'; onChoose(kind: PatternKind): void; reason?: string }) {
+  return <CadToolbarMenu label="Pattern" menuLabel="Pattern commands" icon={<PatternIcon size={15} strokeWidth={1.5} />} disabled={disabled} title={disabled ? reason : undefined} items={[
     { key: 'linear-pattern', label: 'Linear pattern', icon: <LinearPatternIcon size={14} />, onSelect: () => onChoose('linear-pattern') },
     ...context === 'body' ? [{ key: 'circular-pattern', label: 'Circular pattern', icon: <CircularPatternIcon size={14} />, onSelect: () => onChoose('circular-pattern') }] : []
   ]} />;

@@ -1,5 +1,6 @@
 import { evaluateCadScalar } from '../cadExpression';
-import { cadSketchExternalReferenceComponents } from '../cadSketchExternalReferences';
+import { cadSketchFixedComponents } from '../cadSketchFixedComponents';
+import { cadSketchGeneratedComponents } from '../sketch-generators/cadSketchGenerators';
 import type { CadSketchGraph } from '../cadSketchGraph';
 import { CadSketchPositions } from '../sketch-relations/cadSketchVirtualElements';
 import type { CadSketchEquationModel } from './cadSketchEquationModel';
@@ -38,7 +39,7 @@ export interface CadSketchCompiledSketch extends CadSketchEquationModel {
  */
 export function compileCadSketchEquations(input: CadSketchEquationInput): CadSketchCompiledSketch {
   const graph = input.graph, scalar = (value: number | string) => evaluateCadScalar(value, input.parameters);
-  const owned = cadSketchExternalReferenceComponents(graph);
+  const owned = cadSketchFixedComponents(graph);
   const values: number[] = [], fixed: boolean[] = [];
   const pointParameters = new Map<string, number>(), radiusParameters = new Map<string, number>(), numericPoints = new CadSketchPositions();
   for (const point of graph.points) {
@@ -52,8 +53,10 @@ export function compileCadSketchEquations(input: CadSketchEquationInput): CadSke
     values.push(scalar(entity.radius)); fixed.push(typeof entity.radius === 'string' || owned.circleIds.has(entity.id));
   }
   const lowering = new CadSketchLowering(graph, input.parameters, pointParameters, radiusParameters, numericPoints, fixed, input.startChoices);
-  for (const entity of graph.entities) lowering.structure(entity);
-  lowering.lowerAll(graph.relations);
+  // A generator's members are fixed values that hold its relations among them already, so they add no equation.
+  const generated = cadSketchGeneratedComponents(graph);
+  for (const entity of graph.entities) if (!generated.entityIds.has(entity.id)) lowering.structure(entity);
+  lowering.lowerAll(generated.relationIds.size ? graph.relations.filter(relation => !generated.relationIds.has(relation.id)) : graph.relations);
   // A relation can start free points where it puts them, as a mirror puts a curve on the other's image; the solve sets out from there.
   for (const { index, value } of lowering.seeds) values[index] = value;
   // The origin's and the axes' fixed values where an equation keeps them, and the free radius an arc's relation makes, follow every

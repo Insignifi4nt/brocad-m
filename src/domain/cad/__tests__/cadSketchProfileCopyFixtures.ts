@@ -18,5 +18,5 @@ export function profileCopyDxfPart() {
     '0', 'ARC', '8', 'OUTLINE', '10', '0', '20', '0', '40', '1', '50', '0', '51', '270',
     '0', 'LINE', '8', 'OUTLINE', '10', '0', '20', '-1', '11', '1', '21', '0', '0', 'ENDSEC', '0', 'EOF', ''].join('\r\n');
   const imported = importCadDxfSketch({ fileName: 'Major-孔.dxf', text, sketchId: 'source', name: 'Accepted inch major arc' });
-  return parseCadDocument({ ...createCadDocument('Accepted DXF', 'dxf-source'), features: [imported.sketch] });
+  return parseCadDocument({ ...createCadDocument('Accepted DXF', 'dxf-source'), schemaVersion: 2, features: [imported.sketch] });
 }

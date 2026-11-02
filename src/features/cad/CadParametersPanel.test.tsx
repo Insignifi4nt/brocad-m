@@ -1,7 +1,10 @@
 import { act, createRef, useSyncExternalStore } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createCadDocument } from '@/domain/cad/cadSchema';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import type { CadSketchFeature } from '@/domain/cad/cadDocument';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { CAD_GEAR_V2_PLUGIN } from '@/domain/cad/plugins/cadPlugins';
 import { CadSession } from './cadSession';
@@ -38,6 +41,30 @@ async function renderPanel(session = new CadSession(linkedDocument())) {
   await act(async () => root.render(<Harness />)); return { session, inspect, pending, edits };
 }
 describe('document parameter editing', () => {
+  it('asks before a value removes relations as a generator regenerates, and applies the confirmed removal in the same edit', async () => {
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+    const session = new CadSession(parseCadDocument({ ...createCadDocument(), schemaVersion: 2, parameters: { n: 5 }, features: [{ id: 'sketch', name: 'Plate', kind: 'sketch',
+      suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: corner }], entities: [],
+        relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } }] }));
+    const { edits } = await renderPanel(session), before = session.getSnapshot();
+    // Four sides lose the fifth corner and the relation on it: Apply first says so and changes nothing.
+    await click('Edit parameter n'); await input('Parameter value', '4'); await click('Apply');
+    expect(dialog().querySelector('[role="status"]')?.textContent).toMatch(/^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/);
+    expect(dialog().querySelector('[role="alert"]')).toBeNull();
+    expect(session.getSnapshot()).toBe(before);
+    await click('Apply');
+    expect(edits).toHaveBeenLastCalledWith([{ kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }], expect.anything());
+    const graph = (session.getSnapshot().document.features[0] as CadSketchFeature).graph!;
+    expect(graph.relations.filter(relation => !relation.id.startsWith('g-poly_')).map(relation => relation.id)).toEqual(['poly']);
+    expect(document.querySelector('.cad-parameter-editor')).toBeNull();
+    // A changed value asks again rather than confirming a removal it was not shown.
+    session.undo();
+    await click('Edit parameter n'); await input('Parameter value', '4'); await click('Apply'); await input('Parameter value', '3');
+    expect(dialog().querySelector('[role="status"]')).toBeNull();
+  });
+
   it('retains a rejected asynchronous edit and cancels its old owner before another editor opens', async () => {
     const session = new CadSession(linkedDocument()), pending = vi.fn();
     let rejectEdit: (error: Error) => void = () => { throw new Error('Edit was not started.'); };

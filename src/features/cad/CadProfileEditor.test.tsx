@@ -1,4 +1,4 @@
-import { act, useState, useSyncExternalStore } from 'react';
+import { act, StrictMode, useState, useSyncExternalStore } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importCadDxfSketch } from '@/domain/cad/cadDxfImport';
@@ -8,6 +8,9 @@ import { resolveCadProfile } from '@/domain/cad/cadSketchGeometry';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { CadSession } from './cadSession';
 import { CadProfileEditor } from './CadFeatureEditor';
+import { cadSketchProfileEdits, cadSketchProfileViews, withCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { CAD_STAR_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
 
 const dxf = ['0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '4', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES',
   '0', 'LINE', '8', 'PROFILE', '10', '0', '20', '0', '11', '20', '21', '0',
@@ -26,22 +29,23 @@ function currentSketch(): CadSketchFeature {
   return feature;
 }
 function currentPath(): Extract<CadProfile, { kind: 'path' }> {
-  const path = currentSketch().profiles[0]?.geometry;
+  const path = cadSketchProfileViews(currentSketch())[0]?.geometry;
   if (!path || path.kind !== 'path') throw new Error('Analytic path missing');
   return path;
 }
 async function mount(geometry?: Extract<CadProfile, { kind: 'path' }>) {
   const { sketch } = importCadDxfSketch({ fileName: 'Profile.dxf', text: dxf, sketchId: 'sketch' });
-  const document: CadDocument = parseCadDocument({ ...createCadDocument('Imported contour'), parameters: { width: 40, lift: 5 },
-    features: [geometry ? { ...sketch, profiles: sketch.profiles.map(profile => ({ ...profile, geometry })) } : sketch] });
+  const document: CadDocument = parseCadDocument({ ...createCadDocument('Imported contour'), schemaVersion: 2, parameters: { width: 40, lift: 5 },
+    features: [geometry ? withCadSketchProfile(sketch, { ...cadSketchProfileViews(sketch)[0], geometry }) : sketch] });
   session = new CadSession(document);
   function Harness() {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
     const [epoch, setEpoch] = useState(0);
     const feature = snapshot.document.features[0];
-    if (feature?.kind !== 'sketch' || !feature.profiles[0]) throw new Error('Profile missing');
-    return <CadProfileEditor key={epoch} profile={feature.profiles[0]} document={snapshot.document}
-      onApply={profile => { session.edit([{ kind: 'update-feature', feature: { ...feature, profiles: feature.profiles.map(entry => entry.id === profile.id ? profile : entry) } }], snapshot.version); }}
+    const profile = feature?.kind === 'sketch' ? cadSketchProfileViews(feature)[0] : undefined;
+    if (feature?.kind !== 'sketch' || !profile) throw new Error('Profile missing');
+    return <CadProfileEditor key={epoch} profile={profile} document={snapshot.document}
+      onApply={(next, parameters, _signal, removed) => { session.edit(cadSketchProfileEdits(feature, next, parameters, removed), snapshot.version); }}
       onCancel={() => setEpoch(previous => previous + 1)} onPendingChange={session.setWorkflowOpen} />;
   }
   await act(async () => root.render(<Harness />));
@@ -122,7 +126,8 @@ describe('imported analytic profile editing', () => {
       { kind: 'line', start: [0, 5], end: [40, 5] }, { kind: 'arc', center: [20, 5], radius: 20, startAngle: 0, sweep: -180 }
     ] });
     expect(measureCadSketch(updated.document, 'sketch').materialAreaMm2).toBeCloseTo(200 * Math.PI);
-    expect(currentSketch().source).toEqual(source); expect(currentSketch().source?.text).toBe(dxf); expect(currentSketch().profiles[0].role).toBeUndefined();
+    expect(currentSketch().source).toEqual(source); expect(currentSketch().source?.text).toBe(dxf); expect(currentSketch().profiles).toEqual([]);
+    expect(currentSketch().graph?.relations.find(relation => relation.id === 'contour_1')).not.toHaveProperty('role');
     await act(async () => session.undo()); expect(session.getSnapshot().document).toEqual(before.document);
   });
   it('rejects discontinuity without repairing a joint, changing history or losing its draft', async () => {
@@ -170,5 +175,85 @@ describe('imported analytic profile editing', () => {
     await input(selector, '512'); expect(selector.value).toBe('512'); expect(field('End Y').value).toBe('0');
     expect(container.querySelectorAll('input')).toHaveLength(7); expect(container.querySelector<HTMLButtonElement>('[aria-label="Next path segment"]')?.disabled).toBe(true);
     await input(selector, '513'); expect(selector.value).toBe('512'); expect(session.getSnapshot()).toBe(before);
+  });
+});
+
+describe('generator profile editing', () => {
+  it('opens at the shape a grip moved a generator to, as a pending draft Apply applies, until a later revision of the part resets it', async () => {
+    const rect = { id: 'rect', kind: 'generator', idPrefix: 'g-rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } } as const;
+    const document = parseCadDocument({ ...createCadDocument('Moved plate', 'cad_moved_plate'), schemaVersion: 2, parameters: { size: 2 }, features: [{ id: 'sketch', name: 'Sketch',
+      kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [], entities: [], relations: [rect] } }] });
+    const revised = parseCadDocument({ ...document, parameters: { size: 3 } }), profile = cadSketchProfileViews(document.features[0] as CadSketchFeature)[0];
+    if (cadSketchProfileViews(revised.features[0] as CadSketchFeature)[0] !== profile) throw new Error('Expected the revision to keep its view');
+    const pending = vi.fn<(pending: boolean) => void>(), applied = vi.fn<(geometry: CadProfile) => void>();
+    // The app runs its effects twice on mount, which must not reset the opening shape.
+    const render = (part: CadDocument) => act(async () => root.render(<StrictMode><CadProfileEditor document={part} profile={profile} initialGeometry={{ ...rect.geometry, width: 30 }}
+      onApply={next => applied(next.geometry)} onPendingChange={pending} onCancel={() => undefined} /></StrictMode>));
+    await render(document);
+    expect(field('Width').value).toBe('30'); expect(pending).toHaveBeenLastCalledWith(true);
+    await click('Apply');
+    expect(applied).toHaveBeenCalledExactlyOnceWith({ ...rect.geometry, width: 30 });
+    await render(revised);
+    expect(field('Width').value).toBe('20'); expect(pending).toHaveBeenLastCalledWith(false);
+  });
+
+  it('shows the relations a regeneration removes, and applies exactly the previewed edit when Apply confirms them', async () => {
+    const document = parseCadDocument({ ...createCadDocument('Rounded plate', 'cad_rounded_plate'), schemaVersion: 2, features: [{ id: 'sketch', name: 'Sketch',
+      kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [0, 0] }], entities: [], relations: [
+        { id: 'rect', kind: 'generator', idPrefix: 'g-rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } },
+        { id: 'tie', kind: 'coincident', pointIds: ['u', 'g-rect_p0'] }] } }] });
+    session = new CadSession(document);
+    const before = session.getSnapshot(), previews: (CadDocument | null)[] = [];
+    const applied = vi.fn<(removed: readonly string[] | undefined) => void>();
+    function Harness() {
+      const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
+      const sketch = snapshot.document.features[0] as CadSketchFeature, profile = cadSketchProfileViews(sketch)[0];
+      return <CadProfileEditor profile={profile} document={snapshot.document} onPreviewDocument={candidate => { previews.push(candidate); }}
+        onApply={(next, parameters, _signal, removed) => { applied(removed); session.edit(cadSketchProfileEdits(sketch, next, parameters, removed), snapshot.version); }}
+        onCancel={() => undefined} onPendingChange={() => undefined} />;
+    }
+    await act(async () => root.render(<Harness />));
+    // Rounding the corners regenerates them as arcs, so the sharp corner the free point is tied to leaves, and its relation with it.
+    await input(field('Corner radius'), '2');
+    const notice = [...container.querySelectorAll('[role="status"]')].find(element => element.textContent?.startsWith('This removes one relation'));
+    expect(notice?.textContent).toMatch(/^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/);
+    const shown = previews.filter(Boolean).at(-1)!;
+    expect((shown.features[0] as CadSketchFeature).graph!.relations.filter(relation => !relation.id.startsWith('g-rect_')).map(relation => relation.id)).toEqual(['rect']);
+    expect(session.getSnapshot()).toBe(before);
+    await click('Apply');
+    expect(applied).toHaveBeenCalledExactlyOnceWith(['tie']);
+    expect(session.getSnapshot().document).toEqual(shown);
+  });
+
+  it('confirms in a saved plugin profile\'s form the relations its shared parameter removes from a generator beside it', async () => {
+    const plugin = createCadPluginProfile(CAD_STAR_PLUGIN);
+    const hexagon = { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: 100, y: 0, radius: 10, sides: 'n', directionId: '@h' } } as const;
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [hexagon] }, { n: 6 }).points.find(point => point.id === 'hex_v5')!.position;
+    session = new CadSession(parseCadDocument({ ...createCadDocument('Star and hexagon', 'cad_star_hexagon'), schemaVersion: 2, parameters: { n: 6 }, features: [{ id: 'sketch',
+      name: 'Sketch', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ id: 'star', name: 'Star', construction: false, geometry: { ...plugin, inputs: { ...plugin.inputs, lobes: 'n' } } }],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [hexagon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'hex_v5'] }] } }] }));
+    const before = session.getSnapshot(), previews: (CadDocument | null)[] = [];
+    function Harness() {
+      const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
+      const sketch = snapshot.document.features[0] as CadSketchFeature;
+      return <CadProfileEditor profile={cadSketchProfileViews(sketch)[0]} document={snapshot.document} onPreviewDocument={candidate => { previews.push(candidate); }}
+        onApply={(next, parameters, _signal, removed) => { session.edit(cadSketchProfileEdits(sketch, next, parameters, removed), snapshot.version); }}
+        onCancel={() => undefined} onPendingChange={() => undefined} />;
+    }
+    await act(async () => root.render(<Harness />));
+    // The star's lobe count is the shared n: five lobes leave the hexagon five corners, and its sixth takes the tie with it.
+    const lobes = container.querySelector<HTMLInputElement>('input[aria-label="Lobes"]');
+    if (!lobes) throw new Error('Lobes field missing');
+    await input(lobes, '5');
+    const notice = [...container.querySelectorAll('[role="status"]')].find(element => element.textContent?.startsWith('This removes one relation'));
+    expect(notice?.textContent).toMatch(/^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/);
+    const shown = previews.filter(Boolean).at(-1)!;
+    expect(shown.parameters.n).toBe(5);
+    expect(session.getSnapshot()).toBe(before);
+    await click('Apply');
+    const applied = session.getSnapshot().document;
+    expect(applied).toEqual(shown);
+    expect((applied.features[0] as CadSketchFeature).graph!.relations.filter(relation => !relation.id.startsWith('hex_')).map(relation => relation.id)).toEqual(['hex']);
   });
 });

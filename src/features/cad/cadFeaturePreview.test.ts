@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
-import { createCadDocument } from '@/domain/cad/cadSchema';
+import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { applyCadEdits } from '@/domain/cad/cadOperations';
 import { createBrowserCacheAdapter } from '@/domain/storage/browserCacheAdapter';
@@ -119,6 +121,31 @@ it('builds during a continuous stream of candidates instead of waiting for the s
   h.candidate('depth * 5'); await vi.advanceTimersByTimeAsync(50);
   expect(h.kernel.build).toHaveBeenCalledTimes(2); expect(h.kernel.build.mock.calls[1][0].features[1]).toHaveProperty('distance', 'depth * 5');
   h.preview.dispose();
+});
+it('reports the relations a parameter removes as generators regenerate without applying them, then previews the confirmed candidate', async () => {
+  // n sizes the Pad and the polygon's sides; four sides drop "c4" on the fifth corner.
+  const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+    geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+  const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+  const source = parseCadDocument({ ...document, schemaVersion: 2, parameters: { n: 5 }, features: [{ ...document.features[0], profiles: [],
+    graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } }, { ...document.features[1], distance: 'n' }] });
+  const text = /^This removes one relation on geometry the shape no longer has: Coincident relation 2 · [^.]*.$/;
+  const removals = { relationIds: ['c4'], relations: [expect.objectContaining({ relationId: 'c4', sketchId: 'outline' })] };
+  for (const prepare of [undefined, async (base: CadDocument, edits: Parameters<typeof applyCadEdits>[1]) => applyCadEdits(base, edits)]) {
+    const h = fixture(source, prepare); h.kernel.build.mockResolvedValue(built('confirmed'));
+    const pad = h.before.document.features[1], edits = (confirmed?: readonly string[]) => [{ kind: 'update-feature' as const, feature: pad },
+      { kind: 'set-parameter' as const, name: 'n', value: 4, ...confirmed ? { removedRelationIds: [...confirmed] } : {} }] as const;
+    h.preview.update({ kind: 'candidate', owner: 'editor_1', expectedVersion: h.before.version, edits: edits() }); await vi.advanceTimersByTimeAsync(200);
+    // Synchronous or prepared, the refusal comes back with the relations to ask about, in user words; native work never starts.
+    const refused = h.states.at(-1);
+    expect(refused).toMatchObject({ kind: 'error', stage: 'validation', removals }); expect(refused?.kind === 'error' && refused.message).toMatch(text);
+    expect(h.kernel.build).not.toHaveBeenCalled(); expect(h.session.getSnapshot()).toBe(h.before);
+    h.preview.update({ kind: 'candidate', owner: 'editor_1', expectedVersion: h.before.version, edits: edits(['c4']) }); await vi.advanceTimersByTimeAsync(200);
+    const ready = h.states.at(-1); if (ready?.kind !== 'ready') throw new Error('Expected the confirmed preview');
+    const sketch = ready.document.features[0];
+    expect(sketch.kind === 'sketch' && sketch.graph?.relations.some(relation => relation.id === 'c4')).toBe(false); expect(ready.document.parameters.n).toBe(4);
+    expect(h.session.getSnapshot()).toBe(h.before); h.preview.dispose();
+  }
 });
 it('rejects invalid expressions before allocating native work and suppresses an older successful result', async () => {
   const h = fixture(), response = deferred<CadBuildResult>(); h.kernel.build.mockReturnValue(response.promise);

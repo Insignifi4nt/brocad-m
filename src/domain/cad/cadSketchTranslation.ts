@@ -8,7 +8,8 @@ import { cadPathClosureTolerance } from './cadAnalyticSegments';
 import { signedSweep } from '@/domain/path-intel/segments';
 import type { Point2 } from '@/domain/path-intel/types';
 import { cadSketchExternalReferenceLockReason } from './cadSketchExternalReferences';
-import { cadSketchLinearPatternLockReason, reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
+import { reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
 import { cadRoundoff } from '@/domain/precision/cadPrecision';
 
 function position(points: ReadonlyMap<string, Point2>, id: string): Point2 {
@@ -27,7 +28,7 @@ export function translateCadSketchGraph({ graph, selections, translation, parame
   const delta = translation.map(value => evaluateCadScalar(value, parameters));
   if (delta.every(value => value === 0)) return graph;
   for (const selection of selected) {
-    const reason = cadSketchLinearPatternLockReason(graph, selection) ?? cadSketchExternalReferenceLockReason(graph, selection);
+    const reason = cadSketchOwnedGeometryLockReason(graph, selection) ?? cadSketchExternalReferenceLockReason(graph, selection);
     if (reason) throw new CadError('referenced-sketch-geometry', reason);
   }
   const points = new Set(selected.filter(item => item.kind === 'point').map(item => item.id));

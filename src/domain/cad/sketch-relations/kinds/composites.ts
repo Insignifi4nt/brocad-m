@@ -1,13 +1,16 @@
 import { checkCadSketchCornerRelation, resolveCadSketchCornerTopology } from '../../cadSketchCornerGeometry';
 import { validateCadSketchExternalReference } from '../../cadSketchExternalReferences';
 import { cadSketchLinearPatternInstances, checkCadSketchLinearPattern, validateCadSketchLinearPattern } from '../../cadSketchLinearPattern';
+import { cadSketchGraphEntity } from '../../cadSketchGraphLookup';
+import { cadSketchEntityPointIds } from '../../cadSketchGraphReferences';
+import { cadSketchGeneratorKind, cadSketchGeneratorOwnership, checkCadSketchGeneratorMembers, validateCadSketchGeneratorRecord } from '../../sketch-generators/cadSketchGenerators';
 import type { CadSketchLoweringContext } from '../../sketch-solver/cadSketchLoweringContext';
 import { checkCadSketchExternalReferenceOwnership } from '../cadSketchRelationChecks';
 import type { CadSketchOperandSignature, CadSketchRelationDefinition, CadSketchRelationOf, CadSketchRemapRule } from '../cadSketchRelationTypes';
 import { sortedIds } from './kindParts';
 
-// Relations that made geometry and keep it: a pattern's copies, a linked reference's construction edge and a corner's arc or chamfer
-// line. Tools create them with that geometry, so none is offered from a selection.
+// Relations that made geometry and keep it: a pattern's copies, a linked reference's construction edge, a corner's arc or chamfer
+// line and a generator's members. Tools create them with that geometry, so none is offered from a selection.
 
 export const linearPattern: CadSketchRelationDefinition<'linear-pattern'> = {
   kind: 'linear-pattern', family: 'composite', name: 'Linear pattern',
@@ -120,4 +123,31 @@ export const chamferCorner: CadSketchRelationDefinition<'chamfer-corner'> = {
   } },
   agent: { exposed: true, summary: 'A line cuts the corner where two lines meet, set back by two lengths.',
     meaning: 'Keeps two driving setbacks along the finite sides of the original reference corner.' }
+};
+
+/**
+ * A generator makes and keeps geometry from its inputs: a profile's outline, a plugin's shape, a regular polygon, a circular pattern of
+ * curves or a linked offset of a closed chain. Its members are fixed values in the solve, so it adds no equation, and only its own inputs
+ * or detaching it change them; the curves it reads are its sources, so a trim or split of one waits until it is detached.
+ */
+export const generator: CadSketchRelationDefinition<'generator'> = {
+  kind: 'generator', family: 'composite', name: 'Generator',
+  nameOf: relation => cadSketchGeneratorKind(relation.geometry).label(relation.geometry),
+  stored: relation => cadSketchGeneratorKind(relation.geometry).signature(relation.geometry),
+  operands: relation => cadSketchGeneratorKind(relation.geometry).operands(relation.geometry),
+  withOperands: (relation, ids) => ({ ...relation, geometry: cadSketchGeneratorKind(relation.geometry).withOperands(relation.geometry, ids) }),
+  owns: (relation, graph) => cadSketchGeneratorOwnership(relation, graph),
+  key: relation => [`generator ${relation.idPrefix}`, ...cadSketchGeneratorKind(relation.geometry).operands(relation.geometry)].join(' '),
+  validate: (graph, relation) => { validateCadSketchGeneratorRecord(graph, relation); },
+  // The points it reads and those of the curves it reads, each once, not its members, which it makes.
+  pointIds: (graph, relation) => [...new Set(cadSketchGeneratorKind(relation.geometry).operands(relation.geometry).flatMap(id => {
+    const entity = cadSketchGraphEntity(graph, id);
+    return entity ? cadSketchEntityPointIds(entity) : [id];
+  }))],
+  lower: () => {},
+  check: (graph, relation, _, parameters) => checkCadSketchGeneratorMembers(graph, relation, parameters),
+  remap: { roles: relation => cadSketchGeneratorKind(relation.geometry).operands(relation.geometry).map(() => 'source' as const), owned: 'refuse',
+    copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' } },
+  agent: { exposed: false, summary: 'Geometry generated from a profile, plugin, regular polygon, circular pattern or linked offset, kept by its generator.',
+    meaning: 'Owns generated points, edges and relations with ids "<idPrefix>_<key>". Edit the generator\'s inputs to change them, or detach it to keep them as plain geometry.' }
 };

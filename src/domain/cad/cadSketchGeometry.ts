@@ -196,6 +196,18 @@ export function* cadBoundaryCandidatePairs(boundaries: readonly Boundary[]): Gen
     active.push(entry);
   }
 }
+/** The indexes of the bounds that meet at least one other, as `cadBoundaryCandidatePairs` compares edge bounds. */
+function boundsMeetingOthers(bounds: readonly BoundaryBounds[]): ReadonlySet<number> {
+  const order = bounds.map((_, index) => index).sort((a, b) => bounds[a].minX - bounds[b].minX || a - b), meeting = new Set<number>();
+  let active: number[] = [];
+  for (const index of order) {
+    const entry = bounds[index];
+    active = active.filter(previous => bounds[previous].maxX >= entry.minX);
+    for (const previous of active) if (!(bounds[previous].maxY < entry.minY || entry.maxY < bounds[previous].minY)) { meeting.add(previous); meeting.add(index); }
+    active.push(index);
+  }
+  return meeting;
+}
 function cross(a: DxfPoint, b: DxfPoint) { return a.x * b.y - a.y * b.x; }
 function subtract(a: DxfPoint, b: DxfPoint) { return { x: a.x - b.x, y: a.y - b.y }; }
 function onCurve(entity: Boundary, point: DxfPoint): boolean {
@@ -288,14 +300,54 @@ export function cadProfileContainsPoint(profile: ResolvedCadProfile, point: DxfP
   }
 }
 
+/** A profile's exact curves, its edges and their bounds, as one resolution prepares them. */
+interface PreparedOutline { readonly geometry: ResolvedCadProfile; readonly path: AnalyticPath | null; readonly edges: readonly Boundary[]; readonly bounds: BoundaryBounds }
+// The preparation of each generator shape that passed the legacy checks, kept with the shape its kind made and checked.
+const checkedShapes = new WeakMap<ResolvedCadProfile, PreparedOutline>();
+
+/**
+ * The legacy checks of a generator's shape as one profile: sizes, closure, zero area and self-intersection, refused with the reasons a
+ * profile gives. The shape's preparation is kept with it, so a sketch contour that is the generator's whole outline reads it again.
+ */
+export function checkCadSketchGeneratorShape(shape: ResolvedCadProfile, name: string): void {
+  let kept: PreparedOutline | undefined;
+  const sketch: CadSketchFeature = { id: 'generator', name, kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: [{ id: 'generator', name, construction: false, geometry: shape as CadProfile }] };
+  selectCadSketchRegions(contoursOf(sketch, {}, prepared => { kept = prepared; }));
+  if (kept) checkedShapes.set(shape, kept);
+}
+
+/**
+ * Refuses shapes that overlap or touch one another, after the checks `checkCadSketchGeneratorShape` makes of each, with the reasons
+ * separate profiles gave. A drawing imported as one generator per contour checks its contours so, since generated curves may cross.
+ */
+export function checkCadSketchShapesApart(shapes: readonly { readonly name: string; readonly geometry: CadProfile }[]): void {
+  contoursOf({ id: 'shapes', name: 'Shapes', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+    profiles: shapes.map((shape, index) => ({ id: `shape_${index}`, name: shape.name, construction: false, geometry: shape.geometry })) }, {});
+}
+
 /** Infer regions from exact analytic contours, independent of authored orientation or CAM. */
 export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: Readonly<Record<string, number>>): readonly CadResolvedSketchContour[] {
-  const profiles = compileCadSketchGeometry(sketch, parameters).profiles.map(profile => ({ profile, geometry: resolveCadProfile(profile.geometry, parameters) }));
-  // Preparation belongs to this resolution only: parameter edits always rebuild
-  // the exact curves, but containment comparisons reuse them within this call.
-  const prepared = profiles.map(({ profile, geometry }) => {
+  return contoursOf(sketch, parameters);
+}
+
+function contoursOf(sketch: CadSketchFeature, parameters: Readonly<Record<string, number>>, keep?: (prepared: PreparedOutline) => void): readonly CadResolvedSketchContour[] {
+  const profiles = compileCadSketchGeometry(sketch, parameters).profiles.map(profile => {
+    const kept = 'generatorId' in profile && profile.generatorId !== undefined ? checkedShapes.get(profile.geometry as ResolvedCadProfile) : undefined;
+    return { profile, kept, geometry: kept?.geometry ?? resolveCadProfile(profile.geometry, parameters) };
+  });
+  // Preparation belongs to this resolution only: parameter edits always rebuild the exact curves, but containment comparisons reuse them
+  // within this call. A generator's whole outline is the shape its kind checked, and reads the preparation that check kept.
+  const prepared = profiles.map(({ profile, geometry, kept }) => {
+    if (kept) return { profile, ...kept };
     let path: AnalyticPath | null = null;
     let edges: Boundary[] | null = null;
+    // A generator's whole outline is the shape its kind already checked as a profile is checked here.
+    if ('generatorId' in profile && profile.generatorId !== undefined) {
+      if (geometry.kind === 'path') { path = analyticPath(geometry); edges = analyticPathToEntities(path, 'CAD'); }
+      edges ??= boundary(cadProfileToEntities(geometry));
+      return { profile, geometry, path, edges, bounds: contourBounds(edges) };
+    }
     switch (geometry.kind) {
       case 'circle': if (!cadSupportedLength(geometry.radius)) throw new CadError('invalid-profile', `Circle "${profile.name}" needs a positive radius.`); break;
       case 'rectangle': if (!cadSupportedLength(geometry.width) || !cadSupportedLength(geometry.height) || geometry.cornerRadius < 0 || geometry.cornerRadius > Math.min(geometry.width, geometry.height) / 2) throw new CadError('invalid-profile', `Rectangle "${profile.name}" has invalid dimensions or corner radius.`); break;
@@ -336,10 +388,14 @@ export function resolveCadSketchContours(sketch: CadSketchFeature, parameters: R
       default: { const exhaustive: never = geometry; throw exhaustive; }
     }
     edges ??= boundary(cadProfileToEntities(geometry));
-    return { profile, geometry, path, edges, bounds: contourBounds(edges) };
+    const outline: PreparedOutline = { geometry, path, edges, bounds: contourBounds(edges) };
+    keep?.(outline);
+    return { profile, ...outline };
   });
   const contours = prepared.filter(item => !item.profile.construction);
-  const indexedEdges = contours.flatMap((contour, index) => contour.edges.map(edge => ({ edge, contourIndex: index })));
+  // An edge's bounds lie inside its contour's, so only contours whose bounds meet another's have edges in the pairs below, in the same order.
+  const meeting = boundsMeetingOthers(contours.map(contour => contour.bounds));
+  const indexedEdges = contours.flatMap((contour, index) => meeting.has(index) ? contour.edges.map(edge => ({ edge, contourIndex: index })) : []);
   for (const [i, j] of cadBoundaryCandidatePairs(indexedEdges.map(item => item.edge))) {
     const first = indexedEdges[i]; const second = indexedEdges[j];
     if (first.contourIndex === second.contourIndex) continue;

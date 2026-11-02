@@ -77,6 +77,7 @@ export function resolveCadGear(profile: CadGearProfile, parameters: Readonly<Rec
     if (radialRoot) line(flank(startT, center, true), polar(rootRadius, center + rootHalfAngle));
     arc(rootRadius, center + rootHalfAngle, 2 * Math.PI / z - 2 * rootHalfAngle);
   }
+  // Each side of a tooth: a radial line from the root circle to the base circle, when the root is below it, then the flank's chords.
   return { segments, teeth: z, module: m, pitchDiameter: 2 * pitchRadius, tipDiameter: 2 * tipRadius, rootDiameter: 2 * rootRadius,
-    baseDiameter: 2 * baseRadius, toothThickness: 2 * pitchRadius * toothHalfAngle, tolerance, edgeCount };
+    baseDiameter: 2 * baseRadius, toothThickness: 2 * pitchRadius * toothHalfAngle, tolerance, edgeCount, rootSteps: radialRoot ? 1 : 0, flankSteps: steps };
 }

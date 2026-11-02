@@ -8,6 +8,7 @@ import { createCadDocument } from '@/domain/cad/cadSchema';
 import { CadPluginsPanel } from './CadPluginsPanel';
 import { CadWorkbench } from './CadWorkbench';
 import { CadSession } from './cadSession';
+import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 vi.mock('./CadViewport', () => ({ CadViewport: ({ hidden }: { hidden?: boolean }) => hidden ? <div className="cad-viewport" hidden /> : <div>Native viewport is verified in browser tests</div> }));
 let container: HTMLDivElement, root: Root;
@@ -79,7 +80,10 @@ describe('CAD plugin UI operations', () => {
     const close = document.querySelector<HTMLButtonElement>('button[aria-label="Close Module relation help"]');
     if (!close) throw new Error('Missing relation close'); await act(async () => close.click()); await click('Apply');
     const feature = session.getSnapshot().document.features[0];
-    expect(feature.kind === 'sketch' && feature.profiles[0].geometry.kind === 'plugin' && feature.profiles[0].geometry.inputs.module).toBe('chosenModule');
+    // The gear is a generator: the sketch keeps its record, with no saved profile, and the panel edits it as it did the profile.
+    const gear = feature.kind === 'sketch' ? cadSketchProfileViews(feature)[0]?.geometry : undefined;
+    expect(feature.kind === 'sketch' && feature.profiles).toEqual([]);
+    expect(gear?.kind === 'plugin' && gear.inputs.module).toBe('chosenModule');
     const before = session.getSnapshot().document;
     const teeth = Array.from(container.querySelectorAll('label')).find(label => label.querySelector('span')?.childNodes[0]?.textContent === 'Teeth')?.querySelector('input');
     if (!teeth) throw new Error('Missing Teeth input'); await input(teeth, '301'); await click('Apply');

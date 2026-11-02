@@ -8,8 +8,8 @@ import { cadToolbarPopupPosition } from './cadToolbarPopupPosition';
 
 type EdgeTreatmentKind = Extract<CadFeature['kind'], 'fillet' | 'chamfer'>;
 
-/** Keep edge treatments together, with the menu outside the scrolling toolbar. */
-export function CadEdgeTreatmentCommand({ disabled, onChoose, context = 'model', chamferAvailable = context === 'model' }: { disabled: boolean; onChoose(kind: EdgeTreatmentKind): void; context?: 'model' | 'sketch'; chamferAvailable?: boolean }) {
+/** Keep edge treatments together, with the menu outside the scrolling toolbar. A disabled command's `reason` replaces its help. */
+export function CadEdgeTreatmentCommand({ disabled, onChoose, context = 'model', chamferAvailable = context === 'model', reason }: { disabled: boolean; onChoose(kind: EdgeTreatmentKind): void; context?: 'model' | 'sketch'; chamferAvailable?: boolean; reason?: string }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const trigger = useRef<HTMLButtonElement>(null);
@@ -40,7 +40,7 @@ export function CadEdgeTreatmentCommand({ disabled, onChoose, context = 'model',
     };
   }, [open, disabled]);
   return <>
-    <Button ref={trigger} className="cad-tool" aria-label={context === 'sketch' ? 'Sketch corner tools' : 'Fillet / Chamfer'} title={context === 'sketch' ? 'Round or bevel supported sketch corners' : 'Round or bevel solid edges'} disabled={disabled} aria-haspopup="menu" aria-expanded={open && !disabled} aria-controls={open && !disabled ? id : undefined}
+    <Button ref={trigger} className="cad-tool" aria-label={context === 'sketch' ? 'Sketch corner tools' : 'Fillet / Chamfer'} title={disabled && reason ? reason : context === 'sketch' ? 'Round or bevel supported sketch corners' : 'Round or bevel solid edges'} disabled={disabled} aria-haspopup="menu" aria-expanded={open && !disabled} aria-controls={open && !disabled ? id : undefined}
       onPointerDown={event => { if (open) event.preventDefault(); }}
       onClick={() => { if (open) close(true); else { initialFocus.current = 'first'; setOpen(true); } }}
       onKeyDown={event => {

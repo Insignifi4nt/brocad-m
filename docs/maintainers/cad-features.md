@@ -163,6 +163,37 @@ every build (`CadBuildResult.bodies`, `CadMesh.bodyKey`). A kind's `body` behavi
   the latest body is chosen only when the selection leads to none. Worker requests and agent tools still pass the `featureId` of a body's
   current state as `bodyId`.
 
+## Sketch generators
+
+A sketch's shapes are generator records in `graph.relations`, `{ id, kind: 'generator', idPrefix, name?, construction, geometry }`, not
+saved profiles. No producer makes a saved profile any more: drawing, plugins, DXF import and the agent tools all make generators, and
+`cadLegacyProfileProducers.test.ts` and the tool pins in `cadSiteTools.test.ts` hold that. Saved profiles still load and stay editable,
+and `cadSketchProfileViews` shows a generator of profile geometry to the profile editor, plugin panel and parameter bindings as a profile.
+
+- **Kinds.** Each geometry kind is declared once in `CAD_SKETCH_GENERATOR_KINDS` (`sketch-generators/cadSketchGeneratorKinds.ts`) as a
+  `CadSketchGeneratorKind`. `signature`, `operands` and `withOperands` declare the sketch elements it reads, as operand slots.
+  `evaluate` refuses out-of-range inputs, naming the generator, and returns a `key` holding everything generation reads and a `build` that
+  makes its members. `shape` is the one closed outline it draws, if any, so its region reads as that shape. Plugins go through the
+  adapter, `resolveCadPluginOutline`, and keep their package API.
+- **Stored form.** Only the record is stored. Parsing regenerates the members (`expandCadSketchGenerators`) with ids
+  `<idPrefix>_<key>`, `storedCadDocument` strips them again, and a document that carries members must carry exactly these
+  (`stale-sketch-generator`).
+- **Keys.** A key names a member by its part of the shape: a tooth and part, a pattern occurrence and the seed curve it copies, a list
+  entry's id. Never coordinates or a place in a list, so a count or list change keeps the members that stay. Members that leave take the
+  user relations on them through `remapCadSketchRelations`. A relation it would remove stays until the edit confirms it with
+  `removedRelationIds` (`unconfirmed-sketch-generator-removals`), and `settleCadDocumentGenerators` regenerates every sketch an edit
+  reaches.
+- **Ownership.** Members are fixed for the solver and owned: an edit of one alone is refused with `owned-sketch-generator`, and so is a
+  driving dimension on members alone. Detach keeps them as ordinary geometry.
+- **Diagnostics.** Every code a kind raises must be in the sketch kind's `diagnostics` in `features/kinds/references.ts`; the reach test
+  in `cadFeatureDiagnostics.test.ts` walks the kinds to check it. A kind that rethrows a caught `error.code`, as the linked offset does
+  with an exact offset's refusal, needs its site in that test's `TAKEN` list.
+- **Trust.** A load accepts the member lists generation just marked without checking each item again. Under `setCadDevelopmentChecks`,
+  which every test suite turns on, every item is checked, and both settings must give the same result. The compiler's geometry check is
+  not trusted: it measures against tolerances, so generated items take it as stored items do.
+- **The linear pattern** stays a relation owner rather than a generator. Its copies are solver variables tied by offset equations and can
+  carry their own dimensions; fixed generated copies would change how it solves and what it stores.
+
 ## Not yet slots
 
 Revolve, circular pattern and mirror store their axis or plane as a choice of world axes and planes. K4 turns these into slots that

@@ -1,18 +1,20 @@
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import { CadIdentifierSchema, CadPoint2Schema, CadScalarSchema } from './cadPrimitives';
-import { isCadImportData } from './cadImportData';
+import { CadIdentifierSchema, CadLabelSchema, CadPoint2Schema, CadScalarSchema } from './cadPrimitives';
+import { cadImportDataFields, isCadImportData } from './cadImportData';
 import { CadError } from './cadError';
 import { evaluateCadScalar } from './cadExpression';
 import { cadPathClosureTolerance } from './cadAnalyticSegments';
 import { cadSketchEntityPointIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
-import { cadSketchExternalReferenceComponents } from './cadSketchExternalReferences';
+import { cadSketchFixedComponents } from './cadSketchFixedComponents';
 import { deepFreezeCadData } from './cadDeepFreeze';
+import { cadDevelopmentChecks } from './cadDevelopmentChecks';
 import { cadSketchRelationsEqualButPlacement } from './cadSketchPlacedDimensions';
 import { cadSketchRelationDefinition, checkCadSketchRelationOperands } from './sketch-relations/cadSketchRelationRegistry';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 import { cadSketchCanonicalForm, cadSketchCanonicalRefusal } from './sketch-relations/cadSketchCanonicalForms';
 import { CAD_SKETCH_ELEMENT_ID_PATTERN, CadSketchPositions, isCadSketchReservedId } from './sketch-relations/cadSketchVirtualElements';
+import { CAD_SKETCH_GENERATOR_PREFIX_PATTERN, CadSketchGeneratorGeometrySchema } from './sketch-generators/cadSketchGeneratorSchema';
 
 const strict = { additionalProperties: false };
 const id = CadIdentifierSchema;
@@ -43,6 +45,13 @@ const annotations = {
   reference: { annotation: Type.Optional(Type.Union([linearAnnotation, radialAnnotation])) }
 };
 export const CadSketchDimensionAnnotationSchema = Type.Union([linearAnnotation, angleAnnotation, radialAnnotation, setbacksAnnotation]);
+/**
+ * Geometry a generator makes from its inputs and keeps: points, edges and relations with ids `<idPrefix>_<key>`. Only the record is stored;
+ * a document's parse regenerates the rest (see `expandCadSketchGenerators`). Its optional name is what people called the shape, as a
+ * profile's name was.
+ */
+export const CadSketchGeneratorSchema = Type.Object({ id, kind: Type.Literal('generator'), idPrefix: Type.String({ pattern: CAD_SKETCH_GENERATOR_PREFIX_PATTERN }),
+  name: Type.Optional(CadLabelSchema), construction: Type.Boolean(), geometry: CadSketchGeneratorGeometrySchema }, strict);
 export const CadSketchGraphSchema = Type.Object({
   points: Type.Array(Type.Object({ id, position: CadPoint2Schema }, strict)),
   entities: Type.Array(Type.Union([
@@ -91,7 +100,8 @@ export const CadSketchGraphSchema = Type.Object({
     Type.Object({ id, kind: Type.Literal('point-line-distance'), pointId: ref, lineId: ref, side: Type.Union([Type.Literal('left'), Type.Literal('right')]), value: CadScalarSchema, ...annotations.linear }, strict),
     Type.Object({ id, kind: Type.Literal('axis-distance'), pointIds: refPair, axis: Type.Union([Type.Literal('x'), Type.Literal('y')]), value: CadScalarSchema, ...annotations.linear }, strict),
     Type.Object({ id, kind: Type.Literal('fillet-corner'), pointId: ref, lineIds: refPair, arcId: id, value: CadScalarSchema, ...annotations.radial }, strict),
-    Type.Object({ id, kind: Type.Literal('chamfer-corner'), pointId: ref, lineIds: refPair, chamferId: id, values: Type.Tuple([CadScalarSchema, CadScalarSchema]), ...annotations.setbacks }, strict)
+    Type.Object({ id, kind: Type.Literal('chamfer-corner'), pointId: ref, lineIds: refPair, chamferId: id, values: Type.Tuple([CadScalarSchema, CadScalarSchema]), ...annotations.setbacks }, strict),
+    CadSketchGeneratorSchema
   ]))
 }, strict);
 type Immutable<T> = { readonly [K in keyof T]: Immutable<T[K]> };
@@ -100,6 +110,8 @@ export type CadSketchGraphPoint = CadSketchGraph['points'][number];
 export type CadSketchGraphEntity = CadSketchGraph['entities'][number];
 export type CadSketchGraphRelation = CadSketchGraph['relations'][number];
 export type CadSketchLinearPattern = Extract<CadSketchGraphRelation, { kind: 'linear-pattern' }>;
+export type CadSketchGenerator = Extract<CadSketchGraphRelation, { kind: 'generator' }>;
+export type CadSketchGeneratorGeometry = CadSketchGenerator['geometry'];
 export type CadSketchReferenceDimension = Extract<CadSketchGraphRelation, { kind: 'reference-dimension' }>;
 export type CadSketchExternalReference = Extract<CadSketchGraphRelation, { kind: 'external-reference' }>;
 export type CadSketchCornerRelation = Extract<CadSketchGraphRelation, { kind: 'fillet-corner' | 'chamfer-corner' }>;
@@ -159,34 +171,146 @@ export function isAcceptedCadSketchGraph(graph: CadSketchGraph): boolean {
 /** Parse unsolved intent without solving, changing scalars, or checking geometric residuals. */
 export function parseCadSketchGraph(value: unknown): CadSketchGraph {
   if (typeof value === 'object' && value !== null && acceptedGraphs.has(value as CadSketchGraph)) return value as CadSketchGraph;
+  return acceptCadSketchGraph(detachCadSketchGraph(value));
+}
+
+// Lists of points, edges or relations a sketch generator made, each kept by its first item. Generation is typed code whose output meets
+// the schema, and it froze each item and marks each list once, so a graph holding a list's items in its order holds the generated
+// objects themselves: they are kept as they are instead of being cloned and checked again each time a graph holding them is parsed. A
+// proxy or copy of one is a different object and crosses the full boundary.
+const generatedRanges = new WeakMap<object, readonly object[]>();
+/** Freeze and trust a sketch generator's output list; only generation calls it, on what it has just made. */
+export function trustCadSketchGeneratedItems<T extends object>(items: readonly T[]): readonly T[] {
+  for (const item of items) deepFreezeCadData(item);
+  Object.freeze(items);
+  if (items.length) generatedRanges.set(items[0], items);
+  return items;
+}
+/** Whether `items` is a list generation made and trusted: that list itself, not a copy of it or another list holding its items. */
+const isGeneratedRange = (items: readonly object[]) => !items.length || generatedRanges.get(items[0]) === items;
+/**
+ * Reads a list's items in order and recognises those of a generated list, from its first item on and in its order, which are the
+ * generated objects themselves. An item out of that order, after a gap or a copy, is not recognised, and crosses the full boundary.
+ */
+class GeneratedRuns {
+  private range: readonly object[] | undefined;
+  private at = 0;
+  has(item: unknown): boolean {
+    if (this.range && this.range[this.at] === item) {
+      if (++this.at === this.range.length) this.range = undefined;
+      return true;
+    }
+    const range = typeof item === 'object' && item !== null ? generatedRanges.get(item) : undefined;
+    this.range = range && range.length > 1 ? range : undefined; this.at = 1;
+    return range !== undefined;
+  }
+}
+type Detached = { -readonly [K in keyof CadSketchGraph]: CadSketchGraph[K] extends readonly (infer T)[] ? T[] : CadSketchGraph[K] };
+
+/**
+ * The graph detached from `value` and checked against the schema, not yet checked for references or accepted. Generated items are kept as
+ * they are; everything else is cloned and checked.
+ */
+export function detachCadSketchGraph(value: unknown): CadSketchGraph {
   const invalid = () => new CadError('invalid-sketch-graph', 'Sketch graph must contain complete portable point, entity and relation data.');
   // Accessors are refused before cloning reads them; the detached copy is then checked again,
   // since a proxy can change the source between the first walk and the clone.
-  if (!isCadImportData(value)) throw invalid();
-  let graph: CadSketchGraph;
-  try { graph = structuredClone(value) as CadSketchGraph; } catch { throw invalid(); }
-  if (!isCadImportData(graph)) throw invalid();
-  assertNoReservedCadSketchIds(graph);
-  if (!Value.Check(CadSketchGraphSchema, graph)) throw invalid();
-  const ids = new Set<string>(), points = new Set(graph.points.map(point => point.id));
-  for (const item of [...graph.points, ...graph.entities, ...graph.relations]) {
+  const walked = new GeneratedRuns();
+  if (!isCadImportData(value, item => walked.has(item))) throw invalid();
+  const fields = cadImportDataFields(value);
+  const lists = fields && [fields.points, fields.entities, fields.relations].map(list => Array.isArray(list) ? Array.from(list as unknown[]) : null);
+  // Which items of each list are generated, read again in list order: the walk above only spared them its own reading.
+  const generated = lists?.map(list => { const runs = new GeneratedRuns(); return list ? list.map(item => runs.has(item)) : []; });
+  if (!fields || !lists || !generated || lists.some(list => !list) || !generated.some(marks => marks.includes(true))) {
+    let graph: CadSketchGraph;
+    try { graph = structuredClone(value) as CadSketchGraph; } catch { throw invalid(); }
+    if (!isCadImportData(graph)) throw invalid();
+    assertNoReservedCadSketchIds(graph);
+    if (!Value.Check(CadSketchGraphSchema, graph)) throw invalid();
+    return graph;
+  }
+  const [points, entities, relations] = lists as unknown[][], [pointMarks, entityMarks, relationMarks] = generated;
+  const own = { ...fields, points: points.filter((_, at) => !pointMarks[at]), entities: entities.filter((_, at) => !entityMarks[at]), relations: relations.filter((_, at) => !relationMarks[at]) };
+  let copy: Detached;
+  try { copy = structuredClone(own) as Detached; } catch { throw invalid(); }
+  if (!isCadImportData(copy)) throw invalid();
+  assertNoReservedCadSketchIds(copy);
+  if (!Value.Check(CadSketchGraphSchema, copy)) throw invalid();
+  // Each list in its submitted order, with the generated items where they were.
+  const merge = <T>(source: unknown[], marks: readonly boolean[], cloned: T[]): T[] => { let at = 0; return source.map((item, index) => marks[index] ? item as T : cloned[at++]); };
+  return { ...copy, points: merge(points, pointMarks, copy.points), entities: merge(entities, entityMarks, copy.entities), relations: merge(relations, relationMarks, copy.relations) };
+}
+
+/** One sketch generator's output: the points, edges and relations generation made under its id prefix, each list as it made it. */
+export interface CadSketchGeneratedRanges {
+  readonly idPrefix: string;
+  readonly points: readonly CadSketchGraphPoint[];
+  readonly entities: readonly CadSketchGraphEntity[];
+  readonly relations: readonly CadSketchGraphRelation[];
+}
+/**
+ * `graph`, which holds no generated geometry, with each generator's members after its own items, accepted as `acceptCadSketchGraph`
+ * accepts it. Members in lists generation made and trusted are not checked again one by one: kind code made each under its generator's
+ * prefix with its own key, its edges between its own points and its relations on its own geometry in canonical form, so the refusals
+ * are the same either way. The graph's own items are checked as ever, against the members too. Under development checks, or when a list
+ * is not one generation made, or when an item of the graph's own lies in a generator's id namespace, every item is checked.
+ *
+ * Only these structural checks trust members. The geometry check that compiling the graph runs later checks every member: it measures
+ * lengths, radii and each driving relation's residual against tolerances, so no construction shows a refusal stays the same without it.
+ */
+export function acceptCadSketchGraphWithMembers(graph: CadSketchGraph, members: readonly CadSketchGeneratedRanges[]): CadSketchGraph {
+  const whole: CadSketchGraph = { ...graph,
+    points: [...graph.points, ...members.flatMap(item => item.points)],
+    entities: [...graph.entities, ...members.flatMap(item => item.entities)],
+    relations: [...graph.relations, ...members.flatMap(item => item.relations)] };
+  const prefixes = new Set(members.map(item => item.idPrefix));
+  const namespace = (id: string) => { const at = id.indexOf('_'); return at > 0 ? id.slice(0, at) : undefined; };
+  const trusted = !cadDevelopmentChecks() && prefixes.size === members.length
+    && members.every(item => isGeneratedRange(item.points) && isGeneratedRange(item.entities) && isGeneratedRange(item.relations)
+      && [item.points[0], item.entities[0], item.relations[0]].every(first => first === undefined || namespace(first.id) === item.idPrefix))
+    && [graph.points, graph.entities, graph.relations].every(list => !list.some(item => prefixes.has(namespace(item.id) ?? '')));
+  return accept(whole, trusted ? { points: graph.points.length, entities: graph.entities.length, relations: graph.relations.length } : undefined);
+}
+
+/**
+ * Accept a detached graph: identities, references, operands, canonical forms and placements are checked, then it is frozen. Generated
+ * items are checked as everything else is, since what they reference must still be there.
+ */
+export function acceptCadSketchGraph(graph: CadSketchGraph): CadSketchGraph {
+  return accept(graph);
+}
+type ListEnds = { readonly [K in 'points' | 'entities' | 'relations']: number };
+/** Accept `graph`, checking each list's items before its end in `own`; those after it are trusted generated members. */
+function accept(graph: CadSketchGraph, own: ListEnds = { points: graph.points.length, entities: graph.entities.length, relations: graph.relations.length }): CadSketchGraph {
+  if (acceptedGraphs.has(graph)) return graph;
+  const lists = [[graph.points, own.points], [graph.entities, own.entities], [graph.relations, own.relations]] as const;
+  const ids = new Set<string>();
+  for (const [list, end] of lists) for (let at = 0; at < end; at++) {
+    const item = list[at];
     if (ids.has(item.id)) throw new CadError('duplicate-sketch-id', `Duplicate sketch graph identity "${item.id}".`);
     ids.add(item.id);
   }
+  // Every point id, the members' too, gathered when something first names a point.
+  let points: ReadonlySet<string> | undefined;
   const references = (owner: string, refs: readonly string[]) => {
-    if (new Set(refs).size !== refs.length) throw new CadError('invalid-sketch-reference', `Sketch graph "${owner}" needs distinct point references.`);
-    for (const ref of refs) if (!points.has(ref)) throw new CadError('missing-sketch-point', `Sketch graph "${owner}" references missing point "${ref}".`);
+    // An edge names two or three points: a scan finds a repeat sooner than a set; a long list takes the set.
+    if (refs.length > 8 ? new Set(refs).size !== refs.length : refs.some((ref, at) => refs.indexOf(ref) !== at)) throw new CadError('invalid-sketch-reference', `Sketch graph "${owner}" needs distinct point references.`);
+    for (const ref of refs) if (!(points ??= new Set(graph.points.map(point => point.id))).has(ref)) throw new CadError('missing-sketch-point', `Sketch graph "${owner}" references missing point "${ref}".`);
   };
-  for (const item of graph.entities) references(item.id, cadSketchEntityPointIds(item));
+  for (let at = 0; at < own.entities; at++) references(graph.entities[at].id, cadSketchEntityPointIds(graph.entities[at]));
+  // The lists are final here: frozen now, the relation checks look operands, identities and generators up instead of scanning. Trusted
+  // members were frozen when they were made.
+  for (const [list, end] of lists) { for (let at = 0; at < end; at++) deepFreezeCadData(list[at], { skipFrozen: true }); Object.freeze(list); }
   // Each kind's definition checks its operands: the slots that refuse missing or mistyped ones, then its own checks.
-  for (const item of graph.relations) {
+  for (let at = 0; at < own.relations; at++) {
+    const item = graph.relations[at];
     checkCadSketchRelationOperands(graph, item);
     const canonical = cadSketchCanonicalForm(graph, item);
     if (canonical) throw cadSketchCanonicalRefusal(item, canonical);
     assertCadSketchPlacementFits(item);
     references(item.id, cadSketchRelationPointIds(graph, item));
   }
-  deepFreezeCadData(graph);
+  deepFreezeCadData(graph, { skipFrozen: true });
   acceptedGraphs.add(graph);
   return graph;
 }
@@ -249,10 +373,10 @@ export type CadSketchSolvedSlot = { readonly kind: 'point'; readonly index: numb
 
 /**
  * The numbers a solver writes, in this order: each point's numeric x then y, in point order, then
- * each circle's numeric radius, in entity order. Expressions and external-reference snapshots stay fixed.
+ * each circle's numeric radius, in entity order. Expressions, external-reference snapshots and generated members stay fixed.
  */
 export function cadSketchSolvedSlots(graph: CadSketchGraph): readonly CadSketchSolvedSlot[] {
-  const owned = cadSketchExternalReferenceComponents(graph), slots: CadSketchSolvedSlot[] = [];
+  const owned = cadSketchFixedComponents(graph), slots: CadSketchSolvedSlot[] = [];
   graph.points.forEach((point, index) => {
     if (owned.pointIds.has(point.id)) return;
     for (const axis of [0, 1] as const) if (typeof point.position[axis] === 'number') slots.push({ kind: 'point', index, axis });
@@ -302,8 +426,12 @@ export function cadSketchGraphWithSolvedValues(source: CadSketchGraph, values: r
   return solved;
 }
 
-/** Nonrepairing acceptance check. Empty issues means current numeric geometry and relations agree. */
-export function checkCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>): readonly CadSketchGraphIssue[] {
+/**
+ * Nonrepairing acceptance check. Empty issues means current numeric geometry and relations agree. A solve's check (`scope` 'solve')
+ * leaves out whether each generator still carries what its inputs generate: a solve holds the members fixed while it may move the lines
+ * they are generated from, so its caller settles the generators and solves again before it accepts the sketch, as `prepareCadEdits` does.
+ */
+export function checkCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>, scope: 'graph' | 'solve' = 'graph'): readonly CadSketchGraphIssue[] {
   const issues: CadSketchGraphIssue[] = [], points = new CadSketchPositions();
   const scalar = (value: number | string) => evaluateCadScalar(value, parameters);
   const report = (source: CadSketchGraphIssue['source'], code: CadSketchGraphIssue['code'], message: string, residualMm?: number) => {
@@ -341,6 +469,7 @@ export function checkCadSketchGraph(graph: CadSketchGraph, parameters: Readonly<
   }
   // Each relation's definition checks it. Cross-feature authority, such as a linked reference's source, is checked by the document parser.
   for (const relation of graph.relations) {
+    if (scope === 'solve' && relation.kind === 'generator') continue;
     const source = { kind: 'relation', id: relation.id } as const;
     try {
       issues.push(...cadSketchRelationDefinition(relation).check(graph, relation, points, parameters));

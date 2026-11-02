@@ -1,4 +1,4 @@
-import { ChamferIcon, FilletIcon, LinearPatternIcon, LinkIcon, MeasureIcon, RelationCoincidentIcon, RelationCollinearIcon, RelationConcentricIcon, RelationEqualLengthIcon,
+import { ChamferIcon, FilletIcon, LinearPatternIcon, LinkIcon, MeasureIcon, ClosedPathIcon, RelationCoincidentIcon, RelationCollinearIcon, RelationConcentricIcon, RelationEqualLengthIcon,
   RelationEqualRadiusIcon, RelationFixIcon, RelationHorizontalIcon, RelationMidpointIcon, RelationParallelIcon, RelationPerpendicularIcon, RelationPointOnCurveIcon,
   RelationPointOnLineIcon, RelationSymmetricIcon, RelationTangentIcon, RelationVerticalIcon, type WorkbenchDrawnIconComponent } from '@wire-edm/icons-react';
 import type { CadSketchRelationKind } from '@/domain/cad/sketch-relations/cadSketchRelationTypes';
@@ -26,7 +26,7 @@ export interface CadSketchRelationGlyphPresentation { readonly glyph: CadSketchR
 export interface CadSketchRelationPresentation {
   /**
    * The glyph the canvas draws, or null for a relation drawn otherwise: dimensions draw as dimensions, and a linear pattern and a linked
-   * reference keep their own controls, whose Detach keeps their geometry, so a glyph Delete must never stand in for it.
+   * reference and a generator keep their own controls, whose Detach keeps their geometry, so a glyph Delete must never stand in for it.
    */
   readonly glyph: CadSketchRelationGlyphPresentation | null;
   /** The glyph of a Coincident between two arc or circle centres, which reads as Concentric. */
@@ -55,5 +55,5 @@ export const CAD_SKETCH_RELATION_PRESENTATION: Presentations = Object.freeze({
   'line-angle': drawnOtherwise(MeasureIcon), 'radial-size': drawnOtherwise(MeasureIcon), 'fixed-point': glyph('fix', 'at-point'),
   'fixed-axis': { ...glyph('coincident', 'at-point'), onAxisOnly: true },
   distance: drawnOtherwise(MeasureIcon), 'point-line-distance': drawnOtherwise(MeasureIcon), 'axis-distance': drawnOtherwise(MeasureIcon),
-  'fillet-corner': drawnOtherwise(FilletIcon), 'chamfer-corner': drawnOtherwise(ChamferIcon)
+  'fillet-corner': drawnOtherwise(FilletIcon), 'chamfer-corner': drawnOtherwise(ChamferIcon), generator: drawnOtherwise(ClosedPathIcon)
 } satisfies Presentations);

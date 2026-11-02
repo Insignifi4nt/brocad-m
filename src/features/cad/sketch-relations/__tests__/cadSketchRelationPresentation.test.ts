@@ -26,8 +26,8 @@ describe('sketch relation presentation', () => {
     expect(onAxisOnly).toEqual(['fixed-axis']);
   });
 
-  it('draw no glyph for dimensions, patterns, linked references and corners', () => {
+  it('draw no glyph for dimensions, patterns, linked references, corners and generators', () => {
     expect(CAD_SKETCH_RELATION_KINDS.filter(kind => !CAD_SKETCH_RELATION_PRESENTATION[kind].glyph)).toEqual(['linear-pattern', 'reference-dimension', 'external-reference',
-      'line-angle', 'radial-size', 'distance', 'point-line-distance', 'axis-distance', 'fillet-corner', 'chamfer-corner']);
+      'line-angle', 'radial-size', 'distance', 'point-line-distance', 'axis-distance', 'fillet-corner', 'chamfer-corner', 'generator']);
   });
 });

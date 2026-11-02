@@ -11,14 +11,20 @@ import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 import type { CadPathSegment, CadProfile, CadSketchFeature } from './cadDocument';
 import { CadError } from './cadError';
 import { CadDxfImportSourceSchema, CadDxfUnitsSchema, parseCadDxfImportSource, type CadDxfUnits } from './cadDxfSource';
-import { CadFeatureSchema, createCadDocument, createCadSketchProfile, parseCadDocument } from './cadSchema';
-import { cadPathClosureTolerance } from './cadSketchGeometry';
+import { CadFeatureSchema, createCadDocument, parseCadDocument } from './cadSchema';
+import { cadPathClosureTolerance, checkCadSketchShapesApart } from './cadSketchGeometry';
+import type { CadSketchGenerator } from './cadSketchGraph';
 import { isCadImportData } from './cadImportData';
+import { storedCadSketchGraph } from './sketch-generators/cadSketchGenerators';
 
 export interface CadDxfImportInput {
   readonly fileName: string; readonly text: string; readonly units?: CadDxfUnits;
   readonly sketchId?: string; readonly name?: string;
 }
+/**
+ * A DXF imported as a sketch: each closed contour is a path or circle generator `contour_<n>`, stored alone, which a parse expands to
+ * its lines, arcs and circle. The sketch holds no saved profile and no geometry of its own.
+ */
 export interface CadDxfImportResult {
   readonly sketch: CadSketchFeature; readonly unitDeclaration: DxfUnitDeclaration;
   readonly scaleToMillimeters: number; readonly sourceEntityCount: number; readonly contourCount: number;
@@ -50,8 +56,10 @@ export function parseCadDxfImportInput(value: unknown): CadDxfImportInput {
 export function isCadDxfImportResult(value: unknown): value is CadDxfImportResult {
   try {
     if (!isCadImportData(value) || !Value.Check(resultSchema, value) || value.sketch.kind !== 'sketch' || !value.sketch.source
-      || value.sketch.plane !== 'XY' || value.sketch.offset !== 0 || cadFeatureSuppressionFlag(value.sketch) || value.contourCount !== value.sketch.profiles.length
-      || value.sketch.profiles.some(profile => profile.construction || profile.role !== undefined)) return false;
+      || value.sketch.plane !== 'XY' || value.sketch.offset !== 0 || cadFeatureSuppressionFlag(value.sketch) || value.sketch.profiles.length || !value.sketch.graph
+      || value.sketch.graph.points.length || value.sketch.graph.entities.length || value.contourCount !== value.sketch.graph.relations.length
+      || value.sketch.graph.relations.some(relation => relation.kind !== 'generator' || relation.construction
+        || (relation.geometry.kind !== 'path' && relation.geometry.kind !== 'circle'))) return false;
     const source = parseCadDxfImportSource(value.sketch.source);
     const declaration = value.unitDeclaration;
     let declared: number | null = null;
@@ -63,7 +71,7 @@ export function isCadDxfImportResult(value: unknown): value is CadDxfImportResul
     }
     const chosen = source.units === undefined ? null : scales[source.units];
     if (declared !== null && chosen !== null && declared !== chosen || (declared ?? chosen) !== value.scaleToMillimeters) return false;
-    parseCadDocument({ ...createCadDocument('Imported DXF', 'cad_import_validation'), features: [value.sketch] });
+    parseCadDocument({ ...createCadDocument('Imported DXF', 'cad_import_validation'), schemaVersion: 2, features: [value.sketch] });
     return true;
   } catch { return false; }
 }
@@ -134,7 +142,7 @@ export function importCadDxfSketch(input: CadDxfImportInput): CadDxfImportResult
     throw new CadError('dxf-open-contour', 'DXF must contain closed, unbranched contours without bridging or repairing gaps.');
   }
   const byId = new Map(segments.map(segment => [segment.id, segment]));
-  const profiles = chains.chains.map((chain, index) => {
+  const contours = chains.chains.map((chain, index): CadSketchGenerator => {
     const first = byId.get(chain.segmentRefs[0]?.segmentId);
     if (!first) throw new CadError('dxf-inexact', 'A DXF contour references missing geometry.');
     let geometry: CadProfile;
@@ -155,11 +163,14 @@ export function importCadDxfSketch(input: CadDxfImportInput): CadDxfImportResult
       });
       geometry = { kind: 'path', segments: path };
     }
-    return createCadSketchProfile({ id: `contour_${index + 1}`, name: `Contour ${index + 1}`, geometry });
+    return { id: `contour_${index + 1}`, kind: 'generator', idPrefix: `contour-${index + 1}`, name: `Contour ${index + 1}`, construction: false, geometry };
   });
+  // Each contour stays whole and apart from the others, as one closed region boundary.
+  checkCadSketchShapesApart(contours.map(contour => ({ name: contour.name!, geometry: contour.geometry as CadProfile })));
   const sketch: CadSketchFeature = { kind: 'sketch', id: input.sketchId ?? `sketch_${crypto.randomUUID()}`, name: input.name ?? (source.fileName.replace(/\.dxf$/i, '').trim().slice(0, 160) || 'Imported sketch'),
-    suppressed: false, plane: 'XY', offset: 0, profiles, source };
-  const validated = parseCadDocument({ ...createCadDocument(sketch.name), features: [sketch] }).features[0];
-  if (validated.kind !== 'sketch') throw new CadError('dxf-inexact', 'The DXF import did not produce a sketch.');
-  return { sketch: validated, unitDeclaration: parsed.unitDeclaration, scaleToMillimeters, sourceEntityCount: parsed.entities.length, contourCount: profiles.length };
+    suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [], entities: [], relations: contours }, source };
+  const validated = parseCadDocument({ ...createCadDocument(sketch.name), schemaVersion: 2, features: [sketch] }).features[0];
+  if (validated.kind !== 'sketch' || !validated.graph) throw new CadError('dxf-inexact', 'The DXF import did not produce a sketch.');
+  return { sketch: { ...validated, graph: storedCadSketchGraph(validated.graph) }, unitDeclaration: parsed.unitDeclaration, scaleToMillimeters,
+    sourceEntityCount: parsed.entities.length, contourCount: contours.length };
 }

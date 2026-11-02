@@ -4,8 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import type { CadDocument } from '@/domain/cad/cadDocument';
+import type { CadSketchOffsetSource } from '@/domain/cad/cadSketchOffset';
 import { CadSession } from './cadSession';
-import { CadSketchOffsetEditor } from './CadSketchOffsetEditor';
+import { CadSketchOffsetEditor, cadSketchOffsetSource } from './CadSketchOffsetEditor';
 import type { CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadEditCompletion } from './useCadEditSubmission';
 
@@ -26,14 +27,14 @@ async function input(value: string) {
   await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field(), value); field().dispatchEvent(new Event('input', { bubbles: true })); });
 }
 async function settle() { await act(async () => new Promise(resolve => setTimeout(resolve, 125))); }
-async function mount(overrides: { edit?(edits: readonly CadEdit[], signal?: AbortSignal): CadEditCompletion; prepare?: CadPrepareEdits } = {}) {
-  const source = sourceDocument(), session = new CadSession(source), preview = vi.fn<(document: CadDocument | null) => void>(), accepted = vi.fn(), cancelled = vi.fn();
+async function mount(overrides: { edit?(edits: readonly CadEdit[], signal?: AbortSignal): CadEditCompletion; prepare?: CadPrepareEdits; document?: CadDocument; source?: CadSketchOffsetSource } = {}) {
+  const source = overrides.document ?? sourceDocument(), session = new CadSession(source), preview = vi.fn<(document: CadDocument | null) => void>(), accepted = vi.fn(), cancelled = vi.fn();
   const prepare = overrides.prepare ?? vi.fn<CadPrepareEdits>(async (edits, signal) => { signal.throwIfAborted(); return applyCadEdits(source, edits); });
   const edit = vi.fn((edits: readonly CadEdit[], signal?: AbortSignal) => overrides.edit ? overrides.edit(edits, signal) : session.edit(edits));
   function Harness() {
     const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot), [open, setOpen] = useState(true), sketch = snapshot.document.features[0];
     if (sketch.kind !== 'sketch') throw new Error('Missing sketch');
-    return open ? <CadSketchOffsetEditor document={snapshot.document} documentVersion={snapshot.version} sketch={sketch} source={{ kind: 'profile', profileId: 'bore' }}
+    return open ? <CadSketchOffsetEditor document={snapshot.document} documentVersion={snapshot.version} sketch={sketch} source={overrides.source ?? { kind: 'profile', profileId: 'bore' }}
       interactionLocked={false} onEditMany={edit} onPrepareEdits={prepare} onPreviewDocument={preview} onPendingChange={open => session.setWorkflowOpen(open)}
       onAccepted={ids => { accepted(ids); setOpen(false); }} onCancel={() => { cancelled(); setOpen(false); }} /> : null;
   }
@@ -90,4 +91,46 @@ it('cancels on a same-ID source/version replacement and discards a late prepared
   await act(async () => release(h.source));
   expect(h.preview).toHaveBeenLastCalledWith(null); expect(h.edit).not.toHaveBeenCalled(); expect(h.accepted).not.toHaveBeenCalled();
   expect(h.session.getSnapshot().document).toBe(replacement);
+});
+
+it('links an offset of a loop of sketch curves to a generator whose edges follow a later parameter edit', async () => {
+  const corners = [[0, 0], [10, 0], [10, 10], [0, 10]] as const, chain = [0, 1, 2, 3].map(index => ({ entityId: `l${index}`, reversed: false }));
+  const square = parseCadDocument({ ...createCadDocument('Plate', 'offset-plate'), schemaVersion: 2, parameters: { clearance: 2 }, features: [{
+    id: 'sketch', kind: 'sketch', name: 'Plate', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+      points: corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] })),
+      entities: corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` })),
+      relations: [] } }] });
+  const h = await mount({ document: square, source: { kind: 'graph-cycle', sourceRefs: chain } });
+  expect(button('Independent').getAttribute('aria-pressed')).toBe('true');
+  await click('Linked'); await input('clearance'); await settle();
+  await click('Apply');
+  const [edit] = h.edit.mock.calls[0][0];
+  if (edit.kind !== 'set-sketch-generator') throw new Error('Expected a generator');
+  const id = edit.generator.id;
+  expect(id).toMatch(/^offset-[0-9a-f]{16}$/);
+  expect(edit.generator).toEqual({ id, kind: 'generator', idPrefix: id, construction: false, geometry: { kind: 'offset', chain, distance: 'clearance' } });
+  expect(h.accepted).toHaveBeenCalledExactlyOnceWith(chain.map(link => `${id}_e_${link.entityId}`));
+  const joint = () => {
+    const sketch = h.session.getSnapshot().document.features[0];
+    return sketch.kind === 'sketch' ? sketch.graph?.points.find(point => point.id === `${id}_j_l3`)?.position : undefined;
+  };
+  expect(joint()).toEqual([-2, -2]);
+  await act(async () => h.session.edit([{ kind: 'set-parameter', name: 'clearance', value: 3 }]));
+  expect(joint()).toEqual([-3, -3]);
+});
+
+it('names the exact loop of a generated shape picked as a whole, and none for a construction shape or a branched outline', () => {
+  const sketchOf = (relations: readonly unknown[], points: readonly unknown[] = [], entities: readonly unknown[] = []) => {
+    const sketch = parseCadDocument({ ...createCadDocument('Plate', 'offset-source'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Plate',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points, entities, relations } }] }).features[0];
+    if (sketch.kind !== 'sketch') throw new Error('Missing sketch'); return sketch;
+  };
+  const plate = (construction: boolean) => ({ id: 'plate', kind: 'generator', idPrefix: 'plate', construction, geometry: { kind: 'rectangle', x: 0, y: 0, width: 40, height: 20, cornerRadius: 0 } });
+  const edges = (source: CadSketchOffsetSource | null) => source?.kind === 'graph-cycle' ? source.sourceRefs.map(ref => ref.entityId).sort() : source;
+  expect(edges(cadSketchOffsetSource(sketchOf([plate(false)]), {}, [], 'plate'))).toEqual(['plate_e0', 'plate_e1', 'plate_e2', 'plate_e3']);
+  expect(cadSketchOffsetSource(sketchOf([plate(true)]), {}, [], 'plate')).toBeNull();
+  // A free line between opposite corners branches them, so the sketch has no loop for the shape to name.
+  const split = sketchOf([plate(false), { id: 'from', kind: 'coincident', pointIds: ['m', 'plate_p0'] }, { id: 'to', kind: 'coincident', pointIds: ['n', 'plate_p2'] }],
+    [{ id: 'm', position: [0, 0] }, { id: 'n', position: [40, 20] }], [{ id: 'cut', kind: 'line', construction: false, startPointId: 'm', endPointId: 'n' }]);
+  expect(edges(cadSketchOffsetSource(split, {}, [], 'plate'))).toBeNull();
 });

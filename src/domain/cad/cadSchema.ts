@@ -12,7 +12,9 @@ import type { CadResolvedFrame } from './cadDatumPlanes';
 import { cadFeatureInputs, cadFeatureProducesBody } from './cadFeatureInputs';
 import { createCadBodyLineage } from './cadBodies';
 import { validateCadSketchConstraints } from './cadSketchConstraints';
-import { assertNoReservedCadSketchIds, cadSketchGraphWithPlacements } from './cadSketchGraph';
+import { assertNoReservedCadSketchIds, cadSketchGraphWithPlacements, isAcceptedCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
+import { withoutGeneratedCadSketchMembers } from './sketch-generators/cadSketchGenerators';
+import { assertCadSketchGraphGeneratorCounts } from './sketch-generators/cadSketchGeneratorKinds';
 import { sameCadSketchGeometryParameters } from './cadSketchParameterReads';
 import { cadFeatureActive } from './features/cadFeatureActivity';
 import type { CadFeatureCheckContext, CadFeatureScalar, CadFeatureTrait } from './features/cadFeatureDefinitionTypes';
@@ -135,14 +137,37 @@ function refuseOutOfRange(scalar: CadFeatureScalar, size: number) {
   if (!cadFeatureScalarAccepts(scalar, size)) throw new CadError('invalid-dimension', scalar.refusal ?? 'Dimension is out of range.');
 }
 
+/**
+ * `value` with the members of each edited sketch's generators left out where they are exactly what generation keeps for their inputs, as
+ * a settled edit leaves them, so the copy below does not clone them and the sketch check regenerates the same objects. Any other sketch,
+ * and every accepted feature, is left as it is.
+ */
+function withoutGeneratedMembers(value: unknown): unknown {
+  const { features, parameters } = value as { readonly features: readonly unknown[]; readonly parameters: Readonly<Record<string, number>> };
+  let changed = false;
+  const next = features.map(feature => {
+    if (isAcceptedFeature(feature) || (feature as { readonly kind?: unknown }).kind !== 'sketch') return feature;
+    const graph = (feature as { readonly graph?: unknown }).graph, stored = graph === undefined ? graph : withoutGeneratedCadSketchMembers(graph, parameters);
+    if (stored === graph) return feature;
+    changed = true;
+    return { ...feature as object, graph: stored };
+  });
+  return changed ? { ...value as object, features: next } : value;
+}
+
 /** Strict boundary parser. Never rewrites IDs, geometry, units or saved expressions. */
 export function parseCadDocument(value: unknown): CadDocument {
   if (typeof value === 'object' && value !== null && acceptedDocuments.has(value as CadDocument)) return value as CadDocument;
   if (!isCadImportData(value, isAcceptedFeature)) throw new CadError('invalid-document', 'CAD documents must contain their own complete JSON data fields.');
-  // A sketch storing a reserved id is refused with that reason, which the schema check below would not give.
+  // A sketch storing a reserved id, or a generator listing fewer or more entries than its kind takes, is refused with that reason, which
+  // the schema check below would not give.
   const features = (value as { readonly features?: unknown }).features;
   if (Array.isArray(features)) for (const feature of features as readonly unknown[]) {
-    if (typeof feature === 'object' && feature !== null && (feature as { readonly kind?: unknown }).kind === 'sketch') assertNoReservedCadSketchIds((feature as { readonly graph?: unknown }).graph);
+    if (typeof feature === 'object' && feature !== null && (feature as { readonly kind?: unknown }).kind === 'sketch') {
+      const graph = (feature as { readonly graph?: unknown }).graph;
+      assertNoReservedCadSketchIds(graph);
+      assertCadSketchGraphGeneratorCounts(graph);
+    }
   }
   if (!matchesCadDocumentSchema(value)) {
     const error = Value.Errors(CadDocumentSchema, value).First();
@@ -151,7 +176,7 @@ export function parseCadDocument(value: unknown): CadDocument {
   // A boundary input may have inherited fields or accessors. Validate semantics
   // against its detached own-data snapshot, never against changing getters.
   let snapshot: Static<typeof CadDocumentSchema>;
-  try { snapshot = detachCadDocument(value) as Static<typeof CadDocumentSchema>; }
+  try { snapshot = detachCadDocument(withoutGeneratedMembers(value)) as Static<typeof CadDocumentSchema>; }
   catch { throw new CadError('invalid-document', 'CAD document must contain portable declarative data.'); }
   if (!matchesCadDocumentSchema(snapshot)) throw new CadError('invalid-document', 'CAD document must contain its own complete JSON fields.');
   const document: CadDocument = snapshot;
@@ -246,7 +271,7 @@ export function parseCadDocument(value: unknown): CadDocument {
   // edit payload nor a UI/tool snapshot can mutate an accepted revision later.
   function freeze(value: unknown): void {
     // An accepted feature is frozen through already.
-    if (value === null || typeof value !== 'object' || acceptedFeatures.has(value)) return;
+    if (value === null || typeof value !== 'object' || acceptedFeatures.has(value) || isAcceptedCadSketchGraph(value as CadSketchGraph)) return;
     Object.values(value).forEach(freeze);
     Object.freeze(value);
   }

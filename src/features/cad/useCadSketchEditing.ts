@@ -125,7 +125,7 @@ export function useCadSketchEditing<Inspection>(host: Host<Inspection>) {
     const owned = requireOwner(); requireIdle(owned);
     return owned.draft.inspectAreaRepairs(session.getSnapshot());
   };
-  const finish = async (signal?: AbortSignal, repairs?: CadSketchAreaRepairs) => {
+  const finish = async (signal?: AbortSignal, repairs?: CadSketchAreaRepairs, removedRelationIds?: readonly string[]) => {
     const owned = requireOwner(), source = session.getSnapshot(), consumerEdits: CadEdit[] = [];
     if (repairs !== undefined) {
       owned.draft.assertCurrent(source, repairs.localVersion);
@@ -140,7 +140,7 @@ export function useCadSketchEditing<Inspection>(host: Host<Inspection>) {
         consumerEdits.push({ kind: 'update-feature', feature: { ...consumer.feature, regionSelection: entry.selection } });
       }
     }
-    const prepared = owned.draft.finishEdits(source, consumerEdits);
+    const prepared = owned.draft.finishEdits(source, consumerEdits, removedRelationIds);
     if (prepared.noOp) { release(owned); return; }
     owned.pending = true; owned.finishing = true; setWorking(true);
     const combined = signal ? AbortSignal.any([signal, owned.abort.signal]) : owned.abort.signal;
@@ -161,7 +161,8 @@ export function useCadSketchEditing<Inspection>(host: Host<Inspection>) {
     if (current.current) current.current.draft.setWorkflowOpen(open); else session.setWorkflowOpen(open);
   }, [session]);
   return { sketchId: owner?.draft.pin.sketchId ?? null, snapshot, working,
-    analysisReady: !working && !local.workflowOpen && !host.locked,
+    // A locked workspace, as while the draft is saved or captured, only pauses analysis: what it shows stays live.
+    analysisReady: !working && !local.workflowOpen, analysisPaused: host.locked,
     begin, cancel, finish, edit, prepare, inspect, inspectAreaRepairs, setWorkflowOpen,
     undo: () => { const owned = requireOwner(); requireIdle(owned); owned.draft.undo(); },
     redo: () => { const owned = requireOwner(); requireIdle(owned); owned.draft.redo(); } };

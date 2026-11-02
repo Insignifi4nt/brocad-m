@@ -7,7 +7,8 @@ import type { CadEdit } from '@/domain/cad/cadOperations';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
 import { withCadSketchCarriedPlacement } from '@/domain/cad/cadSketchPlacedDimensions';
 import { resolveCadSketchPointLineDistanceOperands } from '@/domain/cad/cadSketchPointLineDistanceRelations';
-import { cadSketchLinearPatternForSelection, cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchLinearPatternForSelection } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
 import { cadSketchExternalReferenceForSelection } from '@/domain/cad/cadSketchExternalReferences';
 import { CadScalarEditContext, ScalarField } from './CadFields';
 import { CadContextHelp } from './CadContextHelp';
@@ -19,6 +20,7 @@ import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import type { CadSketchGeometryEditorProps } from './CadSketchGeometryEditors';
 import './cad-sketch-profile.css';
 import { useCadSketchDraft } from './useCadSketchDraft';
+import { cadSketchGeneratorName, cadSketchGeneratorOwner } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 
 type Measurement = CadSketchReferenceDimension['measurement'];
 
@@ -48,13 +50,15 @@ export function cadSketchReferenceEdits(graph: CadSketchGraph, sketchId: string,
  * What the inspector shows for selected sketch geometry: what it is, its measurements, the pattern or linked reference it belongs to, a
  * reference measurement, and the expressions on its coordinates or circle radius. Relations come from the icon row beside the selection.
  */
-export function CadSketchSelectionInspector({ selection, onApply, onEditPattern, onSelectPatternSeed, ...props }: Omit<CadSketchGeometryEditorProps, 'onClose'> & {
+export function CadSketchSelectionInspector({ selection, onApply, onEditPattern, onSelectPatternSeed, onEditGenerator, ...props }: Omit<CadSketchGeometryEditorProps, 'onClose'> & {
   /** The selected points and edges, without the origin and the axes. */
   readonly selection: readonly CadSketchGraphSelection[];
   /** Applies a one-step edit, such as a reference measurement or a detach, at once. */
   onApply(edits: readonly CadEdit[]): void;
   onEditPattern?(relationId: string, detach?: true): void;
   onSelectPatternSeed?(entityId: string): void;
+  /** Opens the configuration of the generator `generatorId`, as its profile's was. */
+  onEditGenerator?(generatorId: string): void;
 }) {
   const { graph, sketch, document: cadDocument } = props;
   const singleton = selection.length === 1 ? selection[0] : null;
@@ -75,7 +79,8 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
   const curvePair = selection.length === 2 && kinds.every(kind => kind === 'arc' || kind === 'circle');
   const pointLine = pointLineOperands(graph, selection);
   const pattern = singleton ? cadSketchLinearPatternForSelection(graph, singleton) : null;
-  const patternLock = selection.map(atom => cadSketchLinearPatternLockReason(graph, atom)).find(Boolean) ?? null;
+  const patternLock = selection.map(atom => cadSketchOwnedGeometryLockReason(graph, atom)).find(Boolean) ?? null;
+  const generator = selection.map(atom => cadSketchGeneratorOwner(graph, atom.id)).find(Boolean);
   const reference = singleton ? cadSketchExternalReferenceForSelection(graph, singleton) : undefined;
   const referenceSource = reference ? cadDocument.features.find(feature => feature.id === reference.sourceSketchId)?.name : null;
   const radialDriver = entity ? cadSketchRadialRelationForEntity(graph, entity.id) : undefined;
@@ -106,6 +111,11 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
         {pattern.index > 0 && <Button type="button" disabled={draft.pending || !onSelectPatternSeed} onClick={() => onSelectPatternSeed?.(pattern.relation.seed.entityId)}>Select seed</Button>}
         <Button type="button" disabled={draft.pending || !onEditPattern} title="Detach all occurrences and retain their current geometry" onClick={() => onEditPattern?.(pattern.relation.id, true)}>Detach pattern</Button>
         <CadContextHelp label="Pattern ownership">Copies follow the seed and pitch. Edit the pattern to omit or restore copies; detach before moving or resizing one independently.</CadContextHelp></div>}
+      {generator && <div className="cad-sketch-profile-actions"><span>{cadSketchGeneratorName(generator)}</span>
+        <Button type="button" disabled={draft.pending || !onEditGenerator} onClick={() => onEditGenerator?.(generator.id)}>Edit shape</Button>
+        <Button type="button" disabled={draft.pending} title="Keep the generated geometry as ordinary sketch geometry"
+          onClick={() => onApply([{ kind: 'detach-sketch-generator', sketchId: sketch.id, generatorId: generator.id }])}>Detach</Button>
+        <CadContextHelp label="Generated geometry">This geometry follows its shape's inputs and parameters. Edit the shape to change it; detach it to move or trim its edges on their own.</CadContextHelp></div>}
       {!draft.pending && <CadSketchSelectionMeasurements graph={graph} parameters={cadDocument.parameters} selection={selection} pointPair={pointPair} />}
       {reference && <div className="cad-sketch-profile-heading"><LinkIcon size={13} /><span className="min-w-0 truncate">{referenceSource}</span>
         <CadContextHelp label="Linked reference">This construction edge follows its source sketch. Its position and size are read-only; use it for snaps or to constrain other geometry. Detach retains the current shape and local relations.</CadContextHelp>
@@ -124,6 +134,7 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
       </CadScalarEditContext.Provider>
     </fieldset>
     {draft.issue && <p className="cad-error" role="alert">{draft.issue}</p>}
+    {draft.notice && <div className="cad-form-hint" role="status">{draft.notice}</div>}
     {draft.pending && <div className="cad-form-actions"><Button type="button" disabled={draft.applying} onClick={draft.reset}><CloseIcon size={13} /> Cancel</Button>
       <Button variant="primary" type="submit" disabled={!draft.canApply}><ConfirmIcon size={13} /> Apply</Button></div>}
   </form>;

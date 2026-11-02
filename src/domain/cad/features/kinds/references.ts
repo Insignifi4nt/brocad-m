@@ -1,11 +1,12 @@
 import { Type } from '@sinclair/typebox';
 import type { CadDatumPlaneFeature, CadPathSegment, CadSketchPlane, CadSketchProfile } from '../../cadDocument';
 import { CadError } from '../../cadError';
-import { CadPluginProfileSchema } from '../../plugins/cadPlugins';
-import { CadIdentifierSchema, CadLabelSchema, CadPathSegmentSchema, CadPlaneSchema, CadPoint2Schema, CadScalarSchema, CadSketchPlaneSchema } from '../../cadPrimitives';
+import { CadProfileSchema } from '../../cadProfileSchema';
+import { CadIdentifierSchema, CadLabelSchema, CadPathSegmentSchema, CadPlaneSchema, CadScalarSchema, CadSketchPlaneSchema } from '../../cadPrimitives';
 import { CadDxfImportSourceSchema, parseCadDxfImportSource } from '../../cadDxfSource';
 import { CadSketchDimensionConstraintSchema, validateCadSketchConstraints } from '../../cadSketchConstraints';
-import { CadSketchGraphSchema, parseCadSketchGraph, type CadSketchGraph } from '../../cadSketchGraph';
+import { CadSketchGraphSchema, type CadSketchGraph } from '../../cadSketchGraph';
+import { expandCadSketchGenerators } from '../../sketch-generators/cadSketchGenerators';
 import { assertCadSketchExternalReferences } from '../../cadSketchExternalReferences';
 import { resolveCadSketchPlacement, resolveCadWorldDatum } from '../../cadDatumPlanes';
 import { resolveCadCurveGeometry } from '../../cadCurve';
@@ -15,17 +16,8 @@ import { CAD_PATH_SEGMENT_QUANTITIES, CAD_PROFILE_QUANTITIES, cadQuantitiesUnder
   mapCadSketchGraphScalars } from '../cadFeatureScalarMaps';
 
 const strict = { additionalProperties: false };
-const scalar = CadScalarSchema;
-const point2 = CadPoint2Schema;
+export { CadProfileSchema };
 
-export const CadProfileSchema = Type.Union([
-  CadPluginProfileSchema,
-  Type.Object({ kind: Type.Literal('rectangle'), x: scalar, y: scalar, width: scalar, height: scalar, cornerRadius: scalar }, strict),
-  Type.Object({ kind: Type.Literal('circle'), x: scalar, y: scalar, radius: scalar }, strict),
-  Type.Object({ kind: Type.Literal('polygon'), points: Type.Array(point2, { minItems: 3 }) }, strict),
-  Type.Object({ kind: Type.Literal('path'), segments: Type.Array(CadPathSegmentSchema, { minItems: 1 }) }, strict),
-  Type.Object({ kind: Type.Literal('slot'), x: scalar, y: scalar, length: scalar, width: scalar, angle: scalar }, strict)
-]);
 export const CadSketchProfileSchema = Type.Object({ id: CadIdentifierSchema, name: CadLabelSchema, construction: Type.Boolean(),
   role: Type.Optional(Type.Union([Type.Literal('outer'), Type.Literal('hole')])), geometry: CadProfileSchema,
   constraints: Type.Optional(Type.Array(CadSketchDimensionConstraintSchema, { maxItems: 6 })) }, strict);
@@ -85,8 +77,8 @@ export const sketch = {
     'invalid-sketch-graph', 'invalid-sketch-graph-geometry', 'sketch-graph-precision', 'missing-sketch-entity', 'missing-sketch-point', 'invalid-sketch-cycle',
     'non-canonical-sketch-relation', 'fixed-sketch-relation', 'overconstrained-sketch-dimension', 'already-driven-sketch-radius',
     'unsupported-sketch-dimension', 'unsupported-sketch-operand', 'invalid-sketch-operand', 'invalid-sketch-angle', 'invalid-sketch-angle-ray',
-    'invalid-sketch-line-pair', 'invalid-sketch-midpoint', 'invalid-sketch-pattern', 'owned-sketch-pattern', 'invalid-sketch-point-line-distance',
-    'invalid-sketch-point-on-curve', 'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair',
+    'invalid-sketch-line-pair', 'invalid-sketch-midpoint', 'invalid-sketch-pattern', 'owned-sketch-pattern', 'invalid-sketch-generator', 'owned-sketch-generator', 'stale-sketch-generator', 'unsupported-sketch-offset',
+    'invalid-sketch-point-line-distance', 'invalid-sketch-point-on-curve', 'invalid-sketch-point-on-line', 'invalid-sketch-radial-entity', 'invalid-sketch-radius-pair',
     'invalid-sketch-reference-dimension', 'invalid-sketch-symmetry', 'invalid-sketch-tangent', 'invalid-sketch-tangent-joint', 'invalid-sketch-annotation',
     // Its regions.
     'invalid-region-selection', 'stale-sketch-region', 'invalid-sketch-cells', 'invalid-sketch-cell-id', 'unsupported-sketch-cells',
@@ -98,9 +90,9 @@ export const sketch = {
     context.scalar(feature, 'offset');
     if (feature.graph) {
       if (document.schemaVersion !== 2) throw new CadError('unsupported-sketch-format', 'Stable sketch entities require CAD schema 2. Preserve the schema 1 original when saving an upgrade.');
-      // Keep the parser's accepted graph, so later parses of it are free. An accepted feature
-      // is frozen and holds its accepted graph already.
-      const graph = parseCadSketchGraph(feature.graph);
+      // Keep the parser's accepted graph, with its generators' members, so later parses of it are free. An accepted feature
+      // is frozen and holds its accepted graph already, whose members a parse with other parameters must not find stale.
+      const graph = expandCadSketchGenerators(feature.graph, document.parameters);
       if (graph !== feature.graph) (feature as { graph: CadSketchGraph }).graph = graph;
       assertCadSketchExternalReferences({ sketch: feature, parameters: document.parameters, previous: context.previous });
     }

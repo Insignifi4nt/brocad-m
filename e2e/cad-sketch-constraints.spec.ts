@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from './fixtures/native-sketch-solver';
-import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, enableGridSnap, historyRow, relationOffer, relationRow, openSketchRelations } from './cad-tool-helpers';
+import { prepareCadTools, callCadTool as call, rawCadToolCall as rawCall, cadContext as context, enableGridSnap, historyRow, importCadDraft, relationOffer, relationRow, openSketchRelations } from './cad-tool-helpers';
 
 test('resizes a free circle directly, cancels cleanly and preserves explicit size ownership through extrusion and reopen', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
@@ -696,9 +696,8 @@ test('draws from a legacy slot position without inventing a joint, then moves th
   const sketch = { id: 'legacy', kind: 'sketch', name: 'Legacy reference', suppressed: false, plane: 'XY', offset: 0, profiles: [{
     id: 'slot', name: 'Reference slot', construction: true, geometry: { kind: 'slot', x: ' slotX ', y: 3.2, length: 20, width: 6, angle: 30 }
   }] };
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'set-parameter', name: 'slotX', value: 2.1 }, { kind: 'add-feature', feature: sketch }
-  ] }); let current = await context(page);
+  // Saved legacy profiles still load, but an edit can no longer add one, so the journey opens the sketch as a saved draft would.
+  let current = await importCadDraft(page, [sketch], { parameters: { slotX: 2.1 } });
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: current.version }))
     .toMatchObject({ ok: true, data: { view: { available: true, referenceVersion: current.version } } });
   await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'edit-sketch', sketchId: sketch.id } });
@@ -1390,7 +1389,8 @@ test('draws and constrains fresh geometry through the UI, then extrudes, exports
 
 test('moves one shared graph point over an enclosing profile, with cancel, undo and keyboard editing', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [{ kind: 'add-feature', feature: {
+  // A legacy profile under shared graph points, opened as a saved draft, since an edit can no longer add one.
+  await importCadDraft(page, [{
     id: 'outline', kind: 'sketch', name: 'Outline', suppressed: false, plane: 'XY', offset: 0,
     profiles: [{ id: 'outer', name: 'Outer', construction: false, geometry: { kind: 'rectangle', x: -5, y: -10, width: 40, height: 30, cornerRadius: 0 } }],
     graph: { points: [{ id: 'a', position: ['0', '0'] }, { id: 'b', position: [20, 0] }, { id: 'c', position: [20, 10] }, { id: 'd', position: [0, 10] }],
@@ -1400,7 +1400,7 @@ test('moves one shared graph point over an enclosing profile, with cancel, undo 
         { id: 'cd', kind: 'line', construction: false, startPointId: 'c', endPointId: 'd' },
         { id: 'da', kind: 'line', construction: false, startPointId: 'd', endPointId: 'a' }
       ], relations: [] }
-  } }] });
+  }]);
   const initial = await context(page);
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: initial.version }))
     .toMatchObject({ ok: true, data: { view: { available: true, referenceVersion: initial.version } } });
@@ -1648,15 +1648,15 @@ test('turns a line green once its dimensions and relations fully define it, unde
 
 test('previews and applies a linked size across legacy and solved sketch geometry, with cancel and undo', async ({ page }) => {
   await prepareCadTools(page); await call(page, 'cad_open_workspace');
-  await call(page, 'cad_edit_document', { expectedVersion: (await context(page)).version, edits: [
-    { kind: 'set-parameter', name: 'width', value: 20 },
-    { kind: 'add-feature', feature: { id: 'outline', kind: 'sketch', name: 'Linked geometry', suppressed: false, plane: 'XY', offset: 0,
+  // A legacy profile dimension beside solved geometry, opened as a saved draft, since an edit can no longer add a profile.
+  await importCadDraft(page, [
+    { id: 'outline', kind: 'sketch', name: 'Linked geometry', suppressed: false, plane: 'XY', offset: 0,
       profiles: [{ id: 'plate', name: 'Plate', construction: false, constraints: [{ id: 'width-dimension', kind: 'dimension', quantity: 'width' }],
         geometry: { kind: 'rectangle', x: 40, y: 0, width: ' width ', height: 5, cornerRadius: 0 } }],
       graph: { points: [{ id: 'a', position: ['0', '0'] }, { id: 'b', position: [20, 0] }],
         entities: [{ id: 'ab', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }],
-        relations: [{ id: 'horizontal', kind: 'horizontal', pointIds: ['a', 'b'] }, { id: 'length', kind: 'distance', pointIds: ['a', 'b'], value: 'width' }] } } }
-  ] });
+        relations: [{ id: 'horizontal', kind: 'horizontal', pointIds: ['a', 'b'] }, { id: 'length', kind: 'distance', pointIds: ['a', 'b'], value: 'width' }] } }
+  ], { parameters: { width: 20 } });
   const initial = await context(page);
   await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: initial.version }))
     .toMatchObject({ ok: true, data: { view: { available: true, referenceVersion: initial.version } } });

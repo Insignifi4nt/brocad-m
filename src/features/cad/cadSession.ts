@@ -1,6 +1,7 @@
 import type { CadDocument } from '@/domain/cad/cadDocument';
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
 import type { SavedCadDocument } from '@/domain/cad/cadStorage';
 
 export interface CadSessionSnapshot {
@@ -40,7 +41,7 @@ export class CadSession {
   constructor(document = createCadDocument()) {
     this.snapshot = Object.freeze({ document: parseCadDocument(document), version: crypto.randomUUID(), savedVersion: null,
       dirty: true, canUndo: false, canRedo: false, workflowOpen: false });
-    this.currentText = JSON.stringify(this.snapshot.document);
+    this.currentText = storedCadDocumentText(this.snapshot.document);
   }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -79,7 +80,7 @@ export class CadSession {
     return this.acceptEdit(next);
   };
   private acceptEdit(next: CadDocument) {
-    const text = JSON.stringify(next);
+    const text = storedCadDocumentText(next);
     if (text === this.currentText) return this.snapshot;
     this.pushPast(this.currentEntry());
     this.future = [];
@@ -101,20 +102,20 @@ export class CadSession {
   };
   replace(document: CadDocument, saved: SavedCadDocument | null = null) {
     const parsed = parseCadDocument(document);
-    if (saved && JSON.stringify(parseCadDocument(saved.document)) !== JSON.stringify(parsed)) {
+    if (saved && storedCadDocumentText(parseCadDocument(saved.document)) !== storedCadDocumentText(parsed)) {
       throw new CadSessionError('INVALID_SAVE_RECEIPT', 'The saved CAD receipt does not describe the document being opened.');
     }
     this.workflows.clear();
     this.workflowRevision++;
     this.past = []; this.future = []; this.pastTextLength = 0;
-    this.currentText = JSON.stringify(parsed);
+    this.currentText = storedCadDocumentText(parsed);
     this.savedText = saved ? this.currentText : null;
     this.publish({ document: parsed, version: crypto.randomUUID(), savedVersion: saved?.savedVersion ?? null,
       dirty: !saved, canUndo: false, canRedo: false, workflowOpen: false });
   }
   markSaved(saved: SavedCadDocument, expectedVersion: string) {
     this.assertVersion(expectedVersion);
-    const savedText = JSON.stringify(parseCadDocument(saved.document));
+    const savedText = storedCadDocumentText(parseCadDocument(saved.document));
     if (savedText !== this.currentText) throw new CadSessionError('INVALID_SAVE_RECEIPT', 'The saved CAD receipt does not describe the reviewed draft.');
     this.savedText = savedText;
     this.publish({ ...this.snapshot, savedVersion: saved.savedVersion, dirty: false });
@@ -134,7 +135,7 @@ export class CadSession {
       if (removed) this.pastTextLength -= removed.textLength;
     }
   }
-  private changed(document: CadDocument, text = JSON.stringify(document)) {
+  private changed(document: CadDocument, text = storedCadDocumentText(document)) {
     this.currentText = text;
     this.publish({ ...this.snapshot, document, version: crypto.randomUUID(), dirty: text !== this.savedText,
       canUndo: this.past.length > 0, canRedo: this.future.length > 0 });

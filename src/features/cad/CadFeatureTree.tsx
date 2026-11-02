@@ -3,7 +3,7 @@ import { cadFeatureActive, cadFeatureSuppressionFlag } from '@/domain/cad/featur
 import { Tooltip } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
-import { AdjustIcon, BooleanIcon, ChamferIcon, CircleIcon, CircularPatternIcon, ClosedPathIcon, CurveIcon, DatumPlaneIcon, ExpandRightIcon, FileBodyIcon, FilletIcon, ImportedBodyIcon, LayersIcon, LinearPatternIcon, LinkIcon, LoftIcon, MirrorIcon, Move3dIcon, PadIcon, PluginIcon, PocketIcon, RectangleIcon, RevolveIcon, ShellIcon, SketchIcon, SlotIcon, SweepIcon, WarningIcon, type WorkbenchIconComponent } from '@wire-edm/icons-react';
+import { AdjustIcon, BooleanIcon, ChamferIcon, CircleIcon, CircularPatternIcon, ClosedPathIcon, CurveIcon, DatumPlaneIcon, ExpandRightIcon, FileBodyIcon, FilletIcon, ImportedBodyIcon, LayersIcon, LinearPatternIcon, LinkIcon, LoftIcon, MirrorIcon, Move3dIcon, OffsetIcon, PadIcon, PluginIcon, PocketIcon, RectangleIcon, RevolveIcon, ShellIcon, SketchIcon, SlotIcon, SweepIcon, WarningIcon, type WorkbenchIconComponent } from '@wire-edm/icons-react';
 import type { CadBuildResult, CadCurveFeature, CadDocument, CadFeature, CadPlane, CadSketchFeature, CadSketchPlane, CadSketchProfile } from '@/domain/cad/cadDocument';
 import { cadFeatureDependencies } from '@/domain/cad/cadFeatureInputs';
 import { featureLabels } from './CadFeatureEditor';
@@ -12,6 +12,8 @@ import { CadTreeRename } from './CadTreeRename';
 import { cadFeatureTreeRelationships } from './cadFeatureTreeModel';
 import type { CadEditCompletion } from './useCadEditSubmission';
 import './cad-feature-tree.css';
+import { cadSketchOutlineViews, cadSketchProfileViews, cadSketchShapeName, cadSketchViewlessGenerators, cadSketchWholeGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 
 const icons: Record<CadFeature['kind'], WorkbenchIconComponent> = {
   'datum-plane': DatumPlaneIcon, sketch: SketchIcon, curve: CurveIcon, imported: ImportedBodyIcon, extrude: PadIcon, pocket: PocketIcon, revolve: RevolveIcon,
@@ -21,6 +23,8 @@ const icons: Record<CadFeature['kind'], WorkbenchIconComponent> = {
 const profileIcons: Record<CadSketchProfile['geometry']['kind'], WorkbenchIconComponent> = {
   rectangle: RectangleIcon, circle: CircleIcon, slot: SlotIcon, polygon: ClosedPathIcon, path: ClosedPathIcon, plugin: PluginIcon,
 };
+/** A generator with no profile view, listed by the shape it makes. */
+const shapeIcons: Partial<Record<CadSketchGenerator['geometry']['kind'], WorkbenchIconComponent>> = { 'regular-polygon': ClosedPathIcon, 'circular-pattern': CircularPatternIcon, offset: OffsetIcon };
 type TreeTarget = { kind: 'feature'; featureId: string } | { kind: 'profile'; featureId: string; profileId: string };
 type TreeBranch = 'part' | 'model' | 'reference' | 'parameters';
 export interface CadFeatureTreeProps {
@@ -168,7 +172,9 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
     setMenu({ document, featureId, profileId, parameters, anchor });
   };
   const menuFeature = menuCurrent?.featureId ? relationships.byId.get(menuCurrent.featureId) : undefined;
-  const menuProfile = menuFeature?.kind === 'sketch' ? menuFeature.profiles.find(profile => profile.id === menuCurrent?.profileId) : undefined;
+  const menuProfile = menuFeature?.kind === 'sketch' ? cadSketchProfileViews(menuFeature).find(profile => profile.id === menuCurrent?.profileId) : undefined;
+  // A generator with no profile view, configured by its inputs whether or not it draws anything now.
+  const menuShape = !menuProfile && menuFeature?.kind === 'sketch' && menuCurrent?.profileId !== undefined ? cadSketchWholeGenerator(menuFeature, menuCurrent.profileId) : undefined;
   const menuItems: CadContextMenuItem[] = [];
   if (menuCurrent?.parameters) menuItems.push(...(parameterMenu ?? []).map(item => ({ ...item, onSelect: () => {
     setTreeView(previous => previous.branches.has('parameters') ? previous : { ...previous, branches: new Set([...previous.branches, 'parameters']) });
@@ -184,6 +190,14 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
       if (onRename) menuItems.push({ label: 'Rename profile', onSelect: () => beginRename({ kind: 'profile', featureId: sketch.id, profileId: profile.id }) });
       if (onUpdateProfile) menuItems.push({ label: profile.construction ? 'Use as geometry' : 'Use as construction', onSelect: () => onUpdateProfile(sketch, { ...profile, construction: !profile.construction }) });
       if (onDeleteProfile) menuItems.push({ kind: 'separator' }, { label: 'Delete profile', danger: true, onSelect: () => onDeleteProfile(sketch, profile.id) });
+    } else if (menuShape && menuFeature.kind === 'sketch') {
+      const sketch = menuFeature, shape = menuShape;
+      menuItems.push({ label: 'Edit shape', onSelect: () => onSelectProfile(sketch, shape.id) }, { label: 'Edit sketch', onSelect: () => onEditSketch(sketch) });
+      // A regular polygon or linked offset that draws one closed outline copies it; a pattern's copies are not one outline.
+      if (onCopyProfile && cadFeatureActive(sketch, document) && cadSketchOutlineViews(sketch, document.parameters).some(outline => outline.id === shape.id)) {
+        menuItems.push({ label: 'Copy outline to editable sketch', onSelect: () => onCopyProfile(sketch, shape.id) });
+      }
+      if (onDeleteProfile) menuItems.push({ kind: 'separator' }, { label: 'Delete shape', danger: true, onSelect: () => onDeleteProfile(sketch, shape.id) });
     } else {
       const feature = menuFeature;
       menuItems.push(feature.kind === 'sketch' ? { label: 'Edit sketch', onSelect: () => onEditSketch(feature) }
@@ -193,7 +207,7 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
       if (feature.kind === 'datum-plane' && cadFeatureActive(feature, document) && onSectionView) menuItems.push({ label: 'Section view', help: 'Cut the model view by this plane.', onSelect: () => onSectionView({ kind: 'datum-plane', featureId: feature.id }) });
       if (onRename) menuItems.push({ label: 'Rename feature', onSelect: () => beginRename({ kind: 'feature', featureId: feature.id }) });
       const inputs = cadFeatureDependencies(feature).flatMap(id => { const source = relationships.byId.get(id); return source ? [source] : []; });
-      if (relationships.children.get(feature.id)?.length || relationships.shared.get(feature.id)?.length || feature.kind === 'sketch' && feature.profiles.length) {
+      if (relationships.children.get(feature.id)?.length || relationships.shared.get(feature.id)?.length || feature.kind === 'sketch' && (cadSketchProfileViews(feature).length || cadSketchViewlessGenerators(feature).length)) {
         menuItems.push({ label: expanded.has(feature.id) ? 'Collapse details' : 'Expand details', onSelect: () => toggle(feature.id) });
       }
       if (inputs.length) menuItems.push({ kind: 'separator' }, ...inputs.map(source => ({ label: `Select input · ${source.name}`, onSelect: () => onSelect(source.id) })));
@@ -212,10 +226,10 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
     const Icon = icons[feature.kind], selected = selectedId === feature.id, position = relationships.position.get(feature.id) ?? 0;
     const nested = relationships.children.get(feature.id) ?? [], shared = relationships.shared.get(feature.id) ?? [];
     const missing = [...new Set(cadFeatureDependencies(feature))].filter(id => !relationships.byId.has(id));
-    const profiles = feature.kind === 'sketch' ? feature.profiles : [];
-    const profileSelected = selected && profiles.some(profile => profile.id === selectedProfileId);
+    const profiles = feature.kind === 'sketch' ? cadSketchProfileViews(feature) : [], shapes = feature.kind === 'sketch' ? cadSketchViewlessGenerators(feature) : [];
+    const profileSelected = selected && [...profiles, ...shapes].some(entry => entry.id === selectedProfileId);
     const content = sketchContent?.sketchId === feature.id ? sketchContent.content : null;
-    const expandable = nested.length > 0 || shared.length > 0 || missing.length > 0 || profiles.length > 0 || content !== null;
+    const expandable = nested.length > 0 || shared.length > 0 || missing.length > 0 || profiles.length > 0 || shapes.length > 0 || content !== null;
     const open = expanded.has(feature.id), detailsId = `${treeId}-${position}`;
     const diagnostic = diagnostics.find(diagnostic => diagnostic.featureId === feature.id);
     const datumPlane = feature.kind === 'datum-plane', planeHovered = datumPlane && typeof hoveredReferencePlane === 'object' && hoveredReferencePlane?.featureId === feature.id;
@@ -235,13 +249,22 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
       {expandable && open && <div id={detailsId} className="cad-feature-details">
         {nested.length > 0 && <ol className="cad-feature-list cad-feature-nested" aria-label={`${feature.name} definition`}>{nested.map(renderNode)}</ol>}
         {shared.map(sharedRow)}
-        {feature.kind === 'sketch' && feature.profiles.map(profile => {
+        {feature.kind === 'sketch' && cadSketchProfileViews(feature).map(profile => {
           const ProfileIcon = profileIcons[profile.geometry.kind];
           return renameCurrent?.target.kind === 'profile' && renameCurrent.target.featureId === feature.id && renameCurrent.target.profileId === profile.id ? <div key={profile.id}>{renameEditor(feature, profile)}</div> : <Button type="button" key={profile.id} data-cad-profile-id={profile.id} className={`cad-tree-row cad-tree-profile${selected && selectedProfileId === profile.id ? ' is-selected' : ''}`} disabled={locked || selectionOnly || Boolean(renameCurrent)}
           aria-label={`${profile.name} profile`} aria-pressed={selected && selectedProfileId === profile.id} title={`${profile.construction ? 'Construction profile' : 'Closed profile'} · ${profile.name}`} onClick={() => onSelectProfile(feature, profile.id)}
           onContextMenu={event => openMenu(event, feature.id, profile.id)} onKeyDown={event => openMenu(event, feature.id, profile.id)}>
           <ProfileIcon size={11} /><span>{profile.name}</span>{profile.construction && <small>ref</small>}
         </Button>;
+        })}
+        {feature.kind === 'sketch' && shapes.map(generator => {
+          const ShapeIcon = shapeIcons[generator.geometry.kind] ?? ClosedPathIcon, name = cadSketchShapeName(generator), current = selected && selectedProfileId === generator.id;
+          // Selecting the row opens the shape's inputs; it has no profile to rename.
+          return <Button type="button" key={generator.id} data-cad-profile-id={generator.id} className={`cad-tree-row cad-tree-profile${current ? ' is-selected' : ''}`} disabled={locked || selectionOnly || Boolean(renameCurrent)}
+            aria-label={`${name} shape`} aria-pressed={current} title={`${generator.construction ? 'Construction shape' : 'Generated shape'} · ${name}`} onClick={() => onSelectProfile(feature, generator.id)}
+            onContextMenu={event => openMenu(event, feature.id, generator.id)} onKeyDown={event => { if (event.key !== 'F2') openMenu(event, feature.id, generator.id); }}>
+            <ShapeIcon size={11} /><span>{name}</span>{generator.construction && <small>ref</small>}
+          </Button>;
         })}
         {content}
         {missing.map(id => <Tooltip content={`Missing feature ${id}`} key={id}><span className="cad-feature-missing-reference">{id} (missing)</span></Tooltip>)}
@@ -288,5 +311,5 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
     {document.features.filter(feature => !relationships.owner.has(feature.id)).map(renderNode)}
       </ol>}
     </div>}
-  </div>{menuCurrent && menuItems.length > 0 && <CadContextMenu anchor={menuCurrent.anchor} title={menuCurrent.parameters ? 'Parameters' : menuProfile?.name ?? menuFeature?.name ?? 'Body'} items={menuItems} onClose={() => setMenu(null)} />}</>;
+  </div>{menuCurrent && menuItems.length > 0 && <CadContextMenu anchor={menuCurrent.anchor} title={menuCurrent.parameters ? 'Parameters' : menuProfile?.name ?? (menuShape && cadSketchShapeName(menuShape)) ?? menuFeature?.name ?? 'Body'} items={menuItems} onClose={() => setMenu(null)} />}</>;
 }

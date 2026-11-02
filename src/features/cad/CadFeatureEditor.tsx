@@ -3,7 +3,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ContextType } from 'react';
 import { CloseIcon, ConfirmIcon, SelectIcon } from '@wire-edm/icons-react';
-import type { CadDocument, CadFeature, CadPoint3, CadScalar, CadSketchProfile } from '@/domain/cad/cadDocument';
+import type { CadDocument, CadFeature, CadPoint3, CadProfile, CadScalar, CadSketchProfile } from '@/domain/cad/cadDocument';
 import { CadError } from '@/domain/cad/cadError';
 import { resolveCadProfile } from '@/domain/cad/cadSketchGeometry';
 import { cadSketchSourceAvailability } from '@/domain/cad/cadSketchSources';
@@ -38,6 +38,10 @@ import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmis
 import { cadPreviewMarks, useCadPreparedPreview, type CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
 import { CadInspectorTitle } from './CadInspectorTitle';
+import { cadSketchProfileEdits, cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import type { CadEdit } from '@/domain/cad/cadOperations';
+import { cadGeneratorRemovalPrompt, cadGeneratorRemovals, sameCadGeneratorRemovals, type CadGeneratorRemovals } from './cadGeneratorRemovals';
+import { useCadGeneratorRemovalConfirmation } from './useCadGeneratorRemovalConfirmation';
 
 /** Each kind's name in the history and the inspector, as its definition titles its form. */
 export const featureLabels = Object.fromEntries(cadFeatureKinds().map(kind => [kind, cadFeaturePresentation(kind).form.title])) as Record<CadFeature['kind'], string>;
@@ -53,9 +57,12 @@ interface CadFeatureEditorProps {
   feature: CadFeature;
   document: CadDocument;
   isNew: boolean;
-  onApply(feature: CadFeature, parameters: Readonly<Record<string, number>>, signal?: AbortSignal): CadEditCompletion;
+  /** Applies the feature and parameters, confirming that the first parameter removes the relations `removedRelationIds`. */
+  onApply(feature: CadFeature, parameters: Readonly<Record<string, number>>, signal?: AbortSignal, removedRelationIds?: readonly string[]): CadEditCompletion;
   onCancel(): void;
   onPendingChange(pending: boolean): void;
+  /** Parameter values the editor opens with, as a Length dragged to a value that removes relations opens its Pad's editor to ask. */
+  initialParameters?: Readonly<Record<string, number>>;
   currentBodyIds?: readonly string[];
   documentVersion?: string;
   onFeaturePreview?(command: CadFeaturePreviewCommand): void;
@@ -73,7 +80,7 @@ export function CadFeatureEditor(props: CadFeatureEditorProps) {
   return <CadFeatureEditorForm key={`${props.feature.id}/${props.feature.kind}`} {...props} />;
 }
 
-function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onPendingChange, currentBodyIds, documentVersion, onFeaturePreview, featurePreview, previewEnabled = true, onReferencePick, topologyPickingEnabled = false, onDepthInteractionReady }: CadFeatureEditorProps) {
+function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onPendingChange, initialParameters, currentBodyIds, documentVersion, onFeaturePreview, featurePreview, previewEnabled = true, onReferencePick, topologyPickingEnabled = false, onDepthInteractionReady }: CadFeatureEditorProps) {
   const submission = useCadEditSubmission();
   const cancel = () => { submission.cancel(); onCancel(); };
   const previewOwner = useId(), previewCallback = useRef(onFeaturePreview);
@@ -105,7 +112,9 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
     wasPicking.current = Boolean(pickCurrent);
   }, [pickCurrent]);
   const [draft, setDraft] = useState(feature);
-  const [parameterEdits, setParameterEdits] = useState<Readonly<Record<string, number>>>({});
+  const [parameterEdits, setParameterEdits] = useState<Readonly<Record<string, number>>>(initialParameters ?? {});
+  // The values it opened with stay the draft's while the feature and the part it was opened on do.
+  const opening = useRef({ feature, accepted, parameters: initialParameters ?? {} });
   const [valueDrafts, setValueDrafts] = useState<Readonly<Record<string, CadScalarValueDraft>>>({});
   const [fieldIssues, setFieldIssues] = useState<Readonly<Record<string, string>>>({});
   const [relationPending, setRelationPendingFields] = useState<Readonly<Record<string, boolean>>>({});
@@ -146,8 +155,13 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
   const scalarContext = { parameters: effectiveDocument.parameters, acceptedScalars, relationEdits, valueDrafts, setValueDraft, setIssue, setRelationPending, markRelationEdited, changeParameter };
   const [error, setError] = useState<string | null>(null);
   const [capturedEdges, setCapturedEdges] = useState(feature.kind === 'fillet' || feature.kind === 'chamfer' ? feature.selection : null);
-  const candidateEdits = useMemo(() => cadFeatureCandidateEdits({ feature: draft, isNew, parameters: parameterEdits }), [draft, isNew, parameterEdits]);
-  useEffect(() => { draftSource.current = feature; setDraft(feature); setCapturedEdges(feature.kind === 'fillet' || feature.kind === 'chamfer' ? feature.selection : null); setParameterEdits({}); setValueDrafts({}); setRelationEdits({}); setError(null); setPicker(null); pickToken.current = null; regionStart.current = null; }, [feature, accepted]);
+  const builtEdits = useMemo(() => cadFeatureCandidateEdits({ feature: draft, isNew, parameters: parameterEdits }), [draft, isNew, parameterEdits]);
+  // A parameter that removes relations as a generator regenerates asks first; the preview and Apply then confirm them with the parameter.
+  const confirmation = useCadGeneratorRemovalConfirmation(document, builtEdits), { hold } = confirmation, confirmedIds = confirmation.removals?.relationIds;
+  const candidateEdits = useMemo(() => confirmedIds ? cadFeatureCandidateEdits({ feature: draft, isNew, parameters: parameterEdits, removedRelationIds: confirmedIds }) : builtEdits,
+    [confirmedIds, builtEdits, draft, isNew, parameterEdits]);
+  useEffect(() => { draftSource.current = feature; setDraft(feature); setCapturedEdges(feature.kind === 'fillet' || feature.kind === 'chamfer' ? feature.selection : null);
+    setParameterEdits(opening.current.feature === feature && opening.current.accepted === accepted ? opening.current.parameters : {}); setValueDrafts({}); setRelationEdits({}); setError(null); setPicker(null); pickToken.current = null; regionStart.current = null; }, [feature, accepted]);
   useLayoutEffect(() => { onPendingChange(isNew || draftSource.current === feature && (changed || scalarPending || Boolean(pickCurrent) || depthGestureActive)); }, [isNew, feature, changed, scalarPending, pickCurrent, depthGestureActive, onPendingChange]);
   useLayoutEffect(() => { onReferencePick?.(pickCurrent ?? { kind: 'clear', owner: previewOwner }); }, [onReferencePick, pickCurrent, previewOwner]);
   useLayoutEffect(() => () => pickerCallback.current?.({ kind: 'clear', owner: previewOwner }), [previewOwner]);
@@ -164,6 +178,8 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
   const preview = featurePreview && featurePreview.kind !== 'idle' && featurePreview.owner === previewOwner && featurePreview.baseVersion === documentVersion ? featurePreview : null;
   const currentPreviewReady = useMemo(() => !scalarPending && preview?.kind === 'ready' && preview.definitionKey === cadFeatureCandidateKey(candidateEdits), [preview, candidateEdits, scalarPending]);
   const waitingForPreview = Boolean(onFeaturePreview && documentVersion && !currentPreviewReady);
+  const found = preview?.kind === 'error' && preview.definitionKey === cadFeatureCandidateKey(candidateEdits) ? preview.removals : undefined;
+  useEffect(() => { hold(found); }, [found, hold]);
   const depthModel = useMemo(() => {
     if (!onDepthInteractionReady || !documentVersion) return null;
     try { return inspectCadExtrudeDepth(effectiveDocument, draft); } catch { return null; }
@@ -383,23 +399,31 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
       }
     };
   }, [onReferencePick, documentVersion, staleDraft, preceding, depthGestureActive, previewOwner, document, draft]);
-  return <form hidden={pickCurrent?.kind === 'pick-topology'} className="cad-property-form" aria-busy={submission.applying || undefined} onKeyDown={event => { if (pickCurrent && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); endPick(); } }} onSubmit={(event) => { event.preventDefault(); if (pickCurrent || staleDraft || scalarPending || areasMissing || depthGestureActive || submission.applying) return; if (waitingForPreview) { setError('Wait for a valid preview of this edit.'); return; } submission.submit(signal => onApply(draft, parameterEdits, signal), () => setError(null), cause => setError(userFacingMessage(cause, 'Unable to apply this feature.'))); }}>
+  return <form hidden={pickCurrent?.kind === 'pick-topology'} className="cad-property-form" aria-busy={submission.applying || undefined} onKeyDown={event => { if (pickCurrent && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); endPick(); } }} onSubmit={(event) => { event.preventDefault(); if (pickCurrent || staleDraft || scalarPending || areasMissing || depthGestureActive || submission.applying) return; if (waitingForPreview) { setError('Wait for a valid preview of this edit.'); return; } if (confirmation.issue) return; const asked = builtEdits;
+      submission.submit(signal => confirmedIds ? onApply(draft, parameterEdits, signal, confirmedIds) : onApply(draft, parameterEdits, signal), () => setError(null), cause => {
+        // An Apply that finds removals the preview had not shown asks for them as the preview would.
+        if (!hold(cadGeneratorRemovals(cause), asked)) setError(userFacingMessage(cause, 'Unable to apply this feature.'));
+      }); }}>
     <CadInspectorTitle>{isNew ? 'Create' : 'Edit'} {featureLabels[draft.kind].toLowerCase()}<CadContextHelp label={featureLabels[draft.kind]}>{cadFeatureHelp[draft.kind]}</CadContextHelp></CadInspectorTitle>
     <fieldset className="cad-feature-fields" disabled={Boolean(pickCurrent) || staleDraft || depthGestureActive || submission.applying}>
     <CadFeatureReferencePickingContext.Provider value={pickingContext}>{fields}</CadFeatureReferencePickingContext.Provider></fieldset>
     {pickCurrent?.kind === 'pick' && <div className="cad-reference-pick-status" role="status">Pick {pickCurrent.label.toLowerCase()} in the model or history<Button type="button" aria-label="Cancel source selection" onClick={() => endPick()}><CloseIcon size={13} /></Button></div>}
-    {preview?.kind === 'error' && <p className="cad-error" role="alert">{preview.message}</p>}
-    {error && <p className="cad-error" role="alert">{error}</p>}
+    {preview?.kind === 'error' && !preview.removals && <p className="cad-error" role="alert">{preview.message}</p>}
+    {(error || confirmation.issue) && <p className="cad-error" role="alert">{error || confirmation.issue}</p>}
+    {!error && confirmation.notice && <div className="cad-form-hint" role="status">{confirmation.notice}</div>}
     {staleDraft && <p className="cad-error" role="alert">The part changed. Cancel this edit and reopen the current feature.</p>}
     {areasMissing && !pickCurrent && !staleDraft && <div className="cad-form-hint" role="status">Choose the closed areas to {draft.kind === 'pocket' ? 'cut' : 'pad'} before Apply</div>}
     {(isNew || changed || scalarPending || staleDraft || depthGestureActive) && <div className="cad-form-actions"><Button type="button" onClick={cancel}><CloseIcon size={13} /> Cancel</Button><Button variant="primary" type="submit" className="cad-primary" disabled={!isNew && !changed || scalarPending || areasMissing || waitingForPreview || Boolean(pickCurrent) || staleDraft || depthGestureActive || submission.applying}><ConfirmIcon size={13} /> Apply</Button></div>}
   </form>;
 }
 
-export function CadProfileEditor({ profile, document, onApply, onCancel, onPendingChange, onInspectInput, onPreviewProfile, onPreviewParameters, onPrepareEdits, onPreviewDocument }: {
+export function CadProfileEditor({ profile, initialGeometry, document, onApply, onCancel, onPendingChange, onInspectInput, onPreviewProfile, onPreviewParameters, onPrepareEdits, onPreviewDocument }: {
   profile: CadSketchProfile;
+  /** The shape the draft opens at instead of the profile's, such as one a grip moved a generator to, which Apply confirms as any draft. */
+  initialGeometry?: CadProfile;
   document: CadDocument;
-  onApply(profile: CadSketchProfile, parameters: Readonly<Record<string, number>>, signal?: AbortSignal): CadEditCompletion;
+  /** Applies `profile` after `parameters`, confirming that a generator's regeneration removes `removedRelationIds`. */
+  onApply(profile: CadSketchProfile, parameters: Readonly<Record<string, number>>, signal?: AbortSignal, removedRelationIds?: readonly string[]): CadEditCompletion;
   onCancel(): void;
   onPendingChange(pending: boolean): void;
   onInspectInput?(name: string | null): void;
@@ -409,17 +433,23 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   onPreviewDocument?(document: CadDocument | null, marks?: CadSketchDiagnosisMarks | null): void;
 }) {
   const submission = useCadEditSubmission();
-  const [draft, setDraft] = useState(profile);
-  const [changed, setChanged] = useState(false);
+  const [draft, setDraft] = useState(() => initialGeometry ? { ...profile, geometry: initialGeometry } : profile);
+  const [changed, setChanged] = useState(Boolean(initialGeometry));
   const [error, setError] = useState<string | null>(null);
   const [parameterDrafts, setParameterDrafts] = useState<Record<string, string>>({});
   const [bindingPending, setBindingPending] = useState(false);
-  // Each revision of the part that holds the profile accepts it again, also where it kept its object.
+  // Each revision of the part that holds the profile accepts it again, also where it kept its object. A generator is held as its view.
   const baseline = useRef({ profile, document });
   if (baseline.current.profile !== profile || baseline.current.document !== document
-    && document.features.some(feature => feature.kind === 'sketch' && feature.profiles.includes(profile))) baseline.current = { profile, document };
+    && document.features.some(feature => feature.kind === 'sketch' && cadSketchProfileViews(feature).includes(profile))) baseline.current = { profile, document };
   const accepted = baseline.current;
-  useEffect(() => { setDraft(profile); setChanged(false); setError(null); setParameterDrafts({}); }, [profile, accepted]);
+  // The opening shape holds for the revision the editor opened on; a later revision of the profile resets the draft to it.
+  const opening = useRef<{ readonly geometry: CadProfile; on?: object } | null>(initialGeometry ? { geometry: initialGeometry } : null);
+  useEffect(() => {
+    const open = opening.current && (opening.current.on ??= accepted) === accepted ? opening.current : null;
+    if (!open) opening.current = null;
+    setDraft(open ? { ...profile, geometry: open.geometry } : profile); setChanged(Boolean(open)); setError(null); setParameterDrafts({});
+  }, [profile, accepted]);
   useLayoutEffect(() => { onPendingChange(changed || bindingPending); }, [changed, bindingPending, onPendingChange]);
   const update = (next: CadSketchProfile) => { setDraft(next); setChanged(true); setError(null); };
   const parameterEdits = useMemo(() => Object.fromEntries(Object.entries(parameterDrafts).filter(([, text]) => text.trim() && Number.isFinite(Number(text)) && Math.abs(Number(text)) <= 1e9).map(([name, text]) => [name, Number(text)])), [parameterDrafts]);
@@ -430,11 +460,19 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   const pluginInspection = useMemo(() => geometry.kind === 'plugin' ? inspectCadPluginProfile(geometry, effectiveParameters) : undefined, [geometry, effectiveParameters]);
   const pluginIssues = [...pluginInspection?.issues ?? [], ...parameterIssues];
   const previewValid = useMemo(() => { if (pluginInspection) return !pluginInspection.issues.length; try { resolveCadProfile(geometry, effectiveParameters); return true; } catch { return false; } }, [geometry, effectiveParameters, pluginInspection]);
-  const previewEdits = useMemo(() => {
-    const owner = document.features.find(feature => feature.kind === 'sketch' && feature.profiles.includes(profile));
-    return owner?.kind === 'sketch' ? cadFeatureCandidateEdits({ feature: { ...owner, profiles: owner.profiles.map(entry => entry.id === profile.id ? draft : entry) }, isNew: false, parameters: parameterEdits }) : null;
-  }, [document, profile, draft, parameterEdits]);
+  const owner = useMemo(() => document.features.find(feature => feature.kind === 'sketch' && cadSketchProfileViews(feature).includes(profile)), [document, profile]);
+  const draftEdits = useMemo(() => owner?.kind === 'sketch' ? cadSketchProfileEdits(owner, draft, parameterEdits) : null, [owner, draft, parameterEdits]);
+  // Relations a generator's regeneration removes, which the preview finds and then shows the edit with, as a trim shows its piece; Apply
+  // confirms exactly those. Any other draft finds them anew.
+  const [confirmation, setConfirmation] = useState<{ readonly edits: readonly CadEdit[]; readonly removals: CadGeneratorRemovals } | null>(null);
+  const removals = confirmation && confirmation.edits === draftEdits ? confirmation.removals : undefined;
+  const previewEdits = useMemo(() => removals && owner?.kind === 'sketch' ? cadSketchProfileEdits(owner, draft, parameterEdits, removals.relationIds) : draftEdits,
+    [removals, owner, draft, parameterEdits, draftEdits]);
   const preparedPreview = useCadPreparedPreview(document, previewEdits, onPrepareEdits, changed && !bindingPending && !pluginIssues.length && previewValid && !submission.applying);
+  const found = preparedPreview.kind === 'error' ? preparedPreview.removals : undefined;
+  useEffect(() => {
+    if (found && draftEdits && !sameCadGeneratorRemovals(found, removals)) setConfirmation({ edits: draftEdits, removals: found });
+  }, [found, draftEdits, removals]);
   useLayoutEffect(() => {
     const candidate = preparedPreview.kind === 'ready' ? preparedPreview.document : null;
     onPreviewDocument?.(candidate, cadPreviewMarks(preparedPreview));
@@ -456,8 +494,11 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   return <form className={`cad-property-form ${geometry.kind === 'plugin' ? 'cad-plugin-form' : ''}`} aria-busy={submission.applying || undefined} onSubmit={(event) => {
     event.preventDefault();
     if (pluginIssues.length || submission.applying) return;
-    const { role: _legacyRole, ...next } = draft;
-    submission.submit(signal => onApply(next, parameterEdits, signal), () => { setChanged(false); setError(null); setParameterDrafts({}); }, cause => {
+    const { role: _legacyRole, ...next } = draft, confirmed = removals?.relationIds, applied = draftEdits;
+    submission.submit(signal => confirmed ? onApply(next, parameterEdits, signal, confirmed) : onApply(next, parameterEdits, signal), () => { setChanged(false); setError(null); setParameterDrafts({}); setConfirmation(null); }, cause => {
+      // An Apply that finds removals the preview had not yet shown asks for them as the preview would.
+      const asked = cadGeneratorRemovals(cause);
+      if (asked && applied) { setConfirmation({ edits: applied, removals: asked }); return; }
       setError(cause instanceof CadError && cause.code === 'open-profile'
         ? `${cause.message} Match adjacent endpoints, including the last and first segment, before applying.`
         : userFacingMessage(cause, 'Unable to apply this profile.'));
@@ -471,7 +512,8 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
     </fieldset>
     {pluginIssues.length > 0 && <div role="alert" className="cad-error">{pluginIssues.map((issue, index) => <p key={index}>{issue}</p>)}</div>}
     {error && <p role="alert" className="cad-error">{error}</p>}
-    {!error && preparedPreview.kind === 'error' && <div className="cad-form-hint" role="status"><span>Preview unavailable</span><CadContextHelp label="Preview unavailable">{preparedPreview.message}</CadContextHelp></div>}
+    {!error && removals && <div className="cad-form-hint" role="status">{cadGeneratorRemovalPrompt(document, removals)}</div>}
+    {!error && preparedPreview.kind === 'error' && !preparedPreview.removals && <div className="cad-form-hint" role="status"><span>Preview unavailable</span><CadContextHelp label="Preview unavailable">{preparedPreview.message}</CadContextHelp></div>}
     {changed && <div className="cad-form-actions"><Button type="button" onClick={() => { submission.cancel(); onCancel(); }}><CloseIcon size={13} /> Cancel</Button><Button variant="primary" type="submit" className="cad-primary" disabled={!changed || bindingPending || pluginIssues.length > 0 || submission.applying}><ConfirmIcon size={13} /> Apply</Button></div>}
   </form>;
 }

@@ -20,7 +20,7 @@ import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmis
 import { useCadContinuousPreview, type CadPrepareEdits } from './useCadPreparedPreview';
 import { cadSketchGeometryPickAllows, cadSketchPickScopeHasEdges, cadSketchPickScopeHasPoints, type CadSketchGeometryPick, type CadSketchGraphPickScope } from './cadSketchGraphSelection';
 import { cadSketchSnapTargetLabel, type CadSketchSnapCandidate } from './cadSketchGeometrySnaps';
-import { cadSketchLinearPatternLockReason } from '@/domain/cad/cadSketchLinearPattern';
+import { cadSketchOwnedGeometryLockReason } from '@/domain/cad/cadSketchOwnedGeometry';
 import { CadSketchSnapHint } from './CadSketchSnapHint';
 import { CadSketchHighlightOverlay } from './CadSketchHighlightOverlay';
 import { createCadSketchHighlightStore, NO_SKETCH_DIMENSION_IDS, type CadSketchDimensionPick, type CadSketchHighlightStore } from './cadSketchDimensionSelection';
@@ -167,7 +167,7 @@ const GraphPointRow = memo(function GraphPointRow({ point, original, graph, degr
   // Numeric coordinates allow a move request; they do not establish this point's freedom. `fixed` does: the shown
   // version's analysis proved both coordinates determined.
   const coordinateDriven = !original.freeAxes.some(Boolean), canRequestMove = degreesOfFreedom !== 0 && !coordinateDriven && !fixed;
-  const movementHint = cadSketchLinearPatternLockReason(graph, { kind: 'point', id: point.id }) ?? (coordinateDriven ? 'Coordinates follow dimensions or expressions' : degreesOfFreedom === 0 || fixed
+  const movementHint = cadSketchOwnedGeometryLockReason(graph, { kind: 'point', id: point.id }) ?? (coordinateDriven ? 'Coordinates follow dimensions or expressions' : degreesOfFreedom === 0 || fixed
     ? FULLY_DEFINED_HINT : `Movement follows dimensions and relations${original.freeAxes.every(Boolean) ? '' : ` · ${original.freeAxes[0] ? 'Y' : 'X'} coordinate is driven`}`);
   const x = point.position[0] - center[0], y = point.position[1] - center[1];
   return <g data-cad-sketch-point={point.id} data-cad-reference-corner={referenceCorner || undefined} role="button" aria-label={`${referenceCorner ? 'Reference corner' : 'Point'} ${index + 1} in ${sketchName}`} aria-pressed={selected} aria-disabled={!interactive || undefined} pointerEvents={active ? undefined : 'none'}

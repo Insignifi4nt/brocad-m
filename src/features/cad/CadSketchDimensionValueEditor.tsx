@@ -184,6 +184,7 @@ export function CadSketchDimensionValueEditor({ document: cadDocument, sketch, g
       {flip && <Button type="button" aria-disabled={!flip.to.relation || undefined} title={flip.to.reason ?? flip.title} onClick={() => { if (flip.to.relation) change(flip.to.relation); }}>{flip.label}</Button>}
     </fieldset>
     {draft.issue && <p className="cad-error" role="alert">{draft.issue}</p>}
+    {draft.notice && <div className="cad-form-hint" role="status">{draft.notice}</div>}
     <div className="cad-form-actions">
       <Button type="button" disabled={draft.applying} onClick={onClose}><CloseIcon size={13} /> Cancel</Button>
       <Button variant="primary" type="submit" disabled={!draft.canApply}><ConfirmIcon size={13} /> Apply</Button>

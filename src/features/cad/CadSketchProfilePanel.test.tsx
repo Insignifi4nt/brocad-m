@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CadDocument, CadSketchProfile } from '@/domain/cad/cadDocument';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadEdit } from '@/domain/cad/cadOperations';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CadSession } from './cadSession';
 import { CadSketchProfilePanel } from './CadSketchProfilePanel';
 
@@ -177,5 +179,40 @@ describe('explicit sketch intent panel', () => {
     await click('Unlink expression'); expect(container.querySelector('[role="alert"]')?.textContent).toContain('The part changed');
     expect(session.getSnapshot()).toBe(accepted); expect(profile(session)).toEqual(rounded);
     await click('Cancel'); expect(session.getSnapshot()).toBe(accepted);
+  });
+
+  it('asks before a parameter-bound dimension removes relations as a generator regenerates, applies the confirmed removal as one edit, and Cancel keeps them', async () => {
+    // The width and a five-sided polygon both read n, and a user point sits on the polygon's fifth corner: four removes "c4".
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'g-poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'g-poly_v4')!.position;
+    const source = parseCadDocument({ ...createCadDocument(), schemaVersion: 2, parameters: { n: 5 }, features: [{ id: 'sketch', name: 'Part section', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
+      profiles: [{ ...rectangle, constraints: [{ id: 'width-n', kind: 'dimension', quantity: 'width' }], geometry: { kind: 'rectangle', x: 40, y: 0, width: ' n ', height: 15, cornerRadius: 0 } }],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'c4', kind: 'coincident', pointIds: ['u', 'g-poly_v4'] }] } }] });
+    const session = new CadSession(source);
+    // The first Apply reaches a part that drops the confirmation, so it is refused as an unconfirmed removal would be.
+    let calls = 0;
+    const edit = vi.fn((edits: readonly CadEdit[]) => session.edit(calls++ ? edits : edits.map(entry => entry.kind === 'set-parameter' ? { kind: entry.kind, name: entry.name, value: entry.value } : entry)));
+    function Harness() {
+      const state = useSyncExternalStore(session.subscribe, session.getSnapshot), sketch = state.document.features[0];
+      if (sketch.kind !== 'sketch') throw new Error('Missing sketch');
+      return <CadSketchProfilePanel document={state.document} sketch={sketch} profile={sketch.profiles[0]} onEditMany={edit} onPendingChange={() => undefined} interactionLocked={false} cancelSignal={0} />;
+    }
+    await act(async () => root.render(<Harness />));
+    const asked = () => container.querySelector('.cad-form-hint[role="status"]')?.textContent ?? null;
+    const prompt = /^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*. Apply removes it, or Cancel keeps it.$/;
+    await click('Configure Width dimension'); await input('Dimension value', '4');
+    expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull();
+    await click('Apply');
+    expect(asked()).toMatch(prompt); expect(container.querySelector('[role="alert"]')).toBeNull(); expect(container.textContent).not.toContain('removedRelationIds');
+    expect(session.getSnapshot().document).toBe(source);
+    await click('Apply');
+    expect(edit).toHaveBeenLastCalledWith([{ kind: 'set-parameter', name: 'n', value: 4, removedRelationIds: ['c4'] }], expect.any(AbortSignal));
+    const sketch = session.getSnapshot().document.features[0];
+    expect(sketch.kind === 'sketch' && sketch.graph?.relations.filter(relation => !relation.id.startsWith('g-poly_')).map(relation => relation.id)).toEqual(['poly']);
+    await act(async () => session.undo()); expect(session.getSnapshot().document).toBe(source);
+    await click('Configure Width dimension'); await input('Dimension value', '4'); expect(asked()).toMatch(prompt);
+    await click('Cancel');
+    expect(asked()).toBeNull(); expect(session.getSnapshot().document).toBe(source); expect(edit).toHaveBeenCalledTimes(2);
   });
 });

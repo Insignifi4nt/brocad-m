@@ -27,7 +27,7 @@ describe('DXF editable sketches through the native BRep kernel', () => {
     const original = parseCadDocument({ ...createCadDocument('Original', 'cad_dxf_native'), features: [{ kind: 'sketch', id: 'original', name: 'Original', suppressed: false, plane: 'XY', offset: 0,
       profiles: geometry.map((profile, index) => createCadSketchProfile({ id: `contour_${index}`, geometry: profile })) }] });
     const imported = importCadDxfSketch({ fileName: 'original.dxf', text: cadSketchToDxf(original, 'original'), sketchId: 'imported' });
-    const model = buildCadKernelModel(parseCadDocument({ ...original, features: [imported.sketch,
+    const model = buildCadKernelModel(parseCadDocument({ ...original, schemaVersion: 2, features: [imported.sketch,
       { kind: 'extrude', id: 'body', name: 'Body', suppressed: false, sketchId: 'imported', distance: 5, symmetric: false, operation: 'new', targetId: null }] }));
     try {
       expect(model.result.diagnostics).toEqual([]);

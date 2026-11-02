@@ -20,8 +20,10 @@ import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 import { CAD_SKETCH_ELEMENT_ID_PATTERN, CadSketchPositions, cadSketchVirtualAxis } from './sketch-relations/cadSketchVirtualElements';
 
+/** The most edges one Mirror copy takes. */
+export const CAD_SKETCH_MIRROR_ENTITIES_MAX = 64;
 export const CadSketchMirrorRequestSchema = Type.Object({
-  entityIds: Type.Array(CadIdentifierSchema, { minItems: 1, maxItems: 64, uniqueItems: true }),
+  entityIds: Type.Array(CadIdentifierSchema, { minItems: 1, maxItems: CAD_SKETCH_MIRROR_ENTITIES_MAX, uniqueItems: true }),
   /** A graph line, or the H or V axis. */
   axisLineId: Type.String({ pattern: CAD_SKETCH_ELEMENT_ID_PATTERN }),
   idPrefix: Type.String({ pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }),
@@ -117,7 +119,7 @@ export function prepareCadSketchMirror({ sketch, parameters, ...request }: CadSk
     for (const id of members.slice(1)) relations.push({ id: `${request.idPrefix}_j${relations.length}`, kind: 'coincident', pointIds: [mappedId(members[0]), mappedId(id)] });
   }
   const addition = parseCadSketchGraph({ points, entities, relations });
-  const copiedGeometry = compileCadSketchGraph(addition, {});
+  const copiedGeometry = compileCadSketchGraph(addition, parameters);
   const vector = (from: string, to: string, values = positions) => ({ x: position(to, values).x - position(from, values).x, y: position(to, values).y - position(from, values).y });
   const checkVector = (from: string, to: string) => {
     const old = vector(from, to), next = vector(from, to, reflected), offset = 2 * dot(old, normal);

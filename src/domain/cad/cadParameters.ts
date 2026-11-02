@@ -6,6 +6,9 @@ import { evaluateCadScalar } from './cadExpression';
 import { createCadPluginProfile, inspectCadPluginProfile, type CadPluginPackage } from './plugins/cadPlugins';
 import { cadFeatureActive } from './features/cadFeatureActivity';
 import { cadFeatureLayout } from './features/cadFeatureRegistry';
+import type { CadSketchGenerator } from './cadSketchGraph';
+import { cadSketchGeneratorPrefixFor, setCadSketchGenerator } from './sketch-generators/cadSketchGeneratorEdits';
+import { cadSketchProfileViews } from './sketch-generators/cadSketchProfileViews';
 
 const strict = { additionalProperties: false };
 export const CadParameterNameSchema = Type.String({ pattern: '^[A-Za-z_][A-Za-z0-9_]{0,63}$' });
@@ -71,13 +74,16 @@ export interface CadPluginInputBinding {
   readonly parameterNames: readonly string[]; readonly linked: boolean; readonly effective: boolean; readonly editable: boolean;
 }
 
-/** Current expression links and downstream history; reads never attach metadata. */
+/**
+ * Current expression links and downstream history; reads never attach metadata. A plugin's inputs are read from a legacy plugin profile
+ * or from a plugin generator, through the sketch's profile views.
+ */
 export function inspectCadParameters(document: CadDocument) {
   const usages = new Map<string, CadParameterUsage[]>(Object.keys(document.parameters).map(name => [name, []]));
   const pluginInputs: CadPluginInputBinding[] = [];
   for (const feature of document.features) {
     const active = cadFeatureActive(feature, document);
-    if (feature.kind === 'sketch') for (const profile of feature.profiles) if (profile.geometry.kind === 'plugin') {
+    if (feature.kind === 'sketch') for (const profile of cadSketchProfileViews(feature)) if (profile.geometry.kind === 'plugin') {
       const inspection = inspectCadPluginProfile(profile.geometry, document.parameters);
       for (const input of profile.geometry.package.inputs) {
         const field = inspection.fields.find(field => field.name === input.name), expression = profile.geometry.inputs[input.name];
@@ -96,9 +102,9 @@ export function inspectCadParameters(document: CadDocument) {
     }
     mapCadFeatureScalars(feature, (value, path) => {
       if (typeof value !== 'string') return value;
-      const match = feature.kind === 'sketch' ? /^profiles\.(\d+)\.geometry(?:\.inputs\.([A-Za-z_][A-Za-z_0-9]*))?/.exec(path) : null;
-      const profile = match && feature.kind === 'sketch' ? feature.profiles[Number(match[1])] : undefined;
-      const binding = match?.[2] ? pluginInputs.find(binding => binding.featureId === feature.id && binding.profileId === profile?.id && binding.inputName === match[2]) : undefined;
+      const match = feature.kind === 'sketch' ? /^(profiles|graph\.relations)\.(\d+)\.geometry(?:\.inputs\.([A-Za-z_][A-Za-z_0-9]*))?/.exec(path) : null;
+      const profile = match && feature.kind === 'sketch' ? (match[1] === 'profiles' ? feature.profiles : feature.graph?.relations ?? [])[Number(match[2])] : undefined;
+      const binding = match?.[3] ? pluginInputs.find(binding => binding.featureId === feature.id && binding.profileId === profile?.id && binding.inputName === match[3]) : undefined;
       const effective = active && binding?.effective !== false;
       for (const name of cadScalarParameterNames(value)) usages.get(name)?.push({ featureId: feature.id, featureName: feature.name,
         ...(profile ? { profileId: profile.id } : {}), ...(binding ? { inputName: binding.inputName } : {}), path, expression: value, active: effective,
@@ -117,11 +123,16 @@ export function inspectCadParameters(document: CadDocument) {
   }) };
 }
 
-/** New plugin instances get new dimensions, never similarly named existing values. */
+/**
+ * New plugin instances get new dimensions, never similarly named existing values. The instance is a plugin generator with the id
+ * `profileId`, which regenerates its shape whenever those dimensions change; saved plugin profiles keep loading as they were.
+ */
 export function addCadPluginProfile(document: CadDocument, input: { sketchId: string; profileId: string; name: string; package: CadPluginPackage; groupId: string }): CadDocument {
   const sketch = document.features.find(feature => feature.id === input.sketchId);
   if (sketch?.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch for the plugin profile.');
-  if (document.features.some(feature => feature.id === input.profileId || feature.kind === 'sketch' && feature.profiles.some(profile => profile.id === input.profileId))) throw new CadError('duplicate-id', 'Plugin profile ID already exists.');
+  const used = (feature: CadFeature) => feature.id === input.profileId || feature.kind === 'sketch' && (feature.profiles.some(profile => profile.id === input.profileId)
+    || Boolean(feature.graph && [feature.graph.points, feature.graph.entities, feature.graph.relations].some(items => items.some(item => item.id === input.profileId))));
+  if (document.features.some(used)) throw new CadError('duplicate-id', 'Plugin profile ID already exists.');
   if (document.parameterGroups?.some(group => group.id === input.groupId)) throw new CadError('duplicate-parameter-group', 'New plugin parameter group ID already exists.');
   const geometry = createCadPluginProfile(input.package), inspected = inspectCadPluginProfile(geometry, document.parameters);
   const parameters = { ...document.parameters }, metadata = { ...document.parameterMetadata };
@@ -140,7 +151,9 @@ export function addCadPluginProfile(document: CadDocument, input: { sketchId: st
     metadata[name] = { groupId: input.groupId, source: { kind: 'plugin', featureId: sketch.id, profileId: input.profileId,
       inputName: field.name, packageId: geometry.package.id, packageVersion: geometry.package.version } };
   }
-  const updated = { ...sketch, profiles: [...sketch.profiles, { id: input.profileId, name: input.name, construction: false, geometry }] };
+  const generator: CadSketchGenerator = { id: input.profileId, kind: 'generator', idPrefix: cadSketchGeneratorPrefixFor(sketch, input.profileId),
+    ...(input.name.trim() ? { name: input.name.trim().slice(0, 160) } : {}), construction: false, geometry };
+  const updated = setCadSketchGenerator(sketch, generator);
   return { ...document, parameters, parameterMetadata: metadata, parameterGroups: [...document.parameterGroups ?? [], { id: input.groupId, name: groupName }],
     features: document.features.map(feature => feature.id === sketch.id ? updated : feature) };
 }

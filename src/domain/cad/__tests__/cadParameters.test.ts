@@ -5,10 +5,18 @@ import { applyCadEdits, CadEditSchema, type CadEdit } from '../cadOperations';
 import { cadScalarParameterNames, inspectCadParameters } from '../cadParameters';
 import { CAD_GEAR_V2_PLUGIN, CAD_GEAR_V3_PLUGIN, CAD_STAR_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugins';
 import { resolveCadProfile } from '../cadSketchGeometry';
+import type { CadFeature } from '../cadDocument';
+import { cadSketchProfileViews } from '../sketch-generators/cadSketchProfileViews';
 import { CadSession } from '@/features/cad/cadSession';
 
 const blankSketch = { kind: 'sketch', id: 'sketch', name: 'Sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [] } as const;
 const initial = () => parseCadDocument({ ...createCadDocument('Part', 'cad_parameters'), features: [blankSketch] });
+// A plugin instance is a generator, seen as the profile it was.
+const pluginOf = (feature: CadFeature) => {
+  const view = feature.kind === 'sketch' ? cadSketchProfileViews(feature)[0] : undefined;
+  if (view?.geometry.kind !== 'plugin') throw new Error('Plugin missing');
+  return { ...view, geometry: view.geometry };
+};
 const addGear: CadEdit = { kind: 'add-plugin-profile', sketchId: 'sketch', profileId: 'gear', name: 'Gear', package: CAD_GEAR_V2_PLUGIN, groupId: 'gear_dimensions' };
 
 describe('named CAD dimension groups and ownership', () => {
@@ -16,13 +24,18 @@ describe('named CAD dimension groups and ownership', () => {
     const before = parseCadDocument({ ...initial(), parameters: { module: 99, p_gear_module: 77 } });
     const session = new CadSession(before); session.edit([addGear], session.getSnapshot().version);
     const after = session.getSnapshot().document, sketch = after.features[0];
-    if (sketch.kind !== 'sketch' || sketch.profiles[0].geometry.kind !== 'plugin') throw new Error('Plugin missing');
+    const instance = pluginOf(sketch);
+    // The instance is a plugin generator: its record keeps the pinned package and inputs, and the parse regenerates its shape.
+    if (sketch.kind !== 'sketch' || !sketch.graph) throw new Error('Expected a graph');
+    expect(sketch.profiles).toEqual([]);
+    expect(sketch.graph.relations.find(relation => relation.id === 'gear')).toMatchObject({ kind: 'generator', idPrefix: 'gear', name: 'Gear' });
+    expect(sketch.graph.entities.length).toBeGreaterThan(100);
     expect(after.parameters).toMatchObject({ module: 99, p_gear_module: 77, p_gear_module_2: 3, p_gear_teeth: 18, p_gear_pressureAngle: 20, p_gear_backlash: 0 });
     expect(Object.keys(after.parameters)).toHaveLength(6);
-    expect(sketch.profiles[0].geometry.inputs).toMatchObject({ module: 'p_gear_module_2', teeth: 'p_gear_teeth', profileShift: 0, tolerance: 0.005, x: 0, y: 0, angle: 0 });
+    expect(instance.geometry.inputs).toMatchObject({ module: 'p_gear_module_2', teeth: 'p_gear_teeth', profileShift: 0, tolerance: 0.005, x: 0, y: 0, angle: 0 });
     expect(after.parameterGroups).toEqual([{ id: 'gear_dimensions', name: 'Gear' }]);
     expect(after.parameterMetadata?.p_gear_module_2).toEqual({ groupId: 'gear_dimensions', source: { kind: 'plugin', featureId: 'sketch', profileId: 'gear', inputName: 'module', packageId: CAD_GEAR_V2_PLUGIN.id, packageVersion: '2.0.0' } });
-    expect(sketch.profiles[0].geometry.package).toEqual(CAD_GEAR_V2_PLUGIN);
+    expect(instance.geometry.package).toEqual(CAD_GEAR_V2_PLUGIN);
     expect(before.parameters).toEqual({ module: 99, p_gear_module: 77 });
     session.undo(); expect(session.getSnapshot().document).toEqual(before);
     session.redo(); expect(session.getSnapshot().document).toEqual(after);
@@ -52,9 +65,9 @@ describe('named CAD dimension groups and ownership', () => {
     expect(renamed.parameters).toHaveProperty('pitch_module', 3); expect(renamed.parameters).not.toHaveProperty('p_gear_module');
     expect(renamed.parameters.p_gear_module_extra).toBe(5);
     const sketch = renamed.features[0];
-    if (sketch.kind !== 'sketch' || sketch.profiles[0].geometry.kind !== 'plugin') throw new Error('Plugin missing');
-    expect(sketch.profiles[0].geometry.inputs.module).toBe('pitch_module'); expect(sketch.profiles[0].id).toBe('gear');
-    expect(sketch.profiles[0].geometry.package).toEqual(CAD_GEAR_V2_PLUGIN);
+    const instance = pluginOf(sketch);
+    expect(instance.geometry.inputs.module).toBe('pitch_module'); expect(instance.id).toBe('gear');
+    expect(instance.geometry.package).toEqual(CAD_GEAR_V2_PLUGIN);
     expect(renamed.parameterMetadata?.pitch_module).toEqual(grouped.parameterMetadata?.p_gear_module);
   });
   it('moves values and renames/removes groups without erasing historical provenance or shared values', () => {
@@ -72,11 +85,11 @@ describe('named CAD dimension groups and ownership', () => {
       { kind: 'rename-parameter', name: 'p_gear_teeth', newName: 'pi' }]);
     const original = before.features[0], renamed = after.features[0];
     if (original.kind !== 'sketch' || renamed.kind !== 'sketch') throw new Error('Expected sketches');
-    expect(resolveCadProfile(renamed.profiles[0].geometry, after.parameters)).toEqual(resolveCadProfile(original.profiles[0].geometry, before.parameters));
+    expect(resolveCadProfile(pluginOf(renamed).geometry, after.parameters)).toEqual(resolveCadProfile(pluginOf(original).geometry, before.parameters));
     expect(after.parameters.sin).toBe(3); expect(after.parameters.pi).toBe(18);
-    if (renamed.profiles[0].geometry.kind !== 'plugin') throw new Error('Expected plugin');
-    expect(renamed.profiles[0].geometry.package).toEqual(CAD_GEAR_V2_PLUGIN);
-    expect(renamed.profiles[0].geometry.inputs).toMatchObject({ module: 'sin', teeth: 'pi' });
+    const instance = pluginOf(renamed);
+    expect(instance.geometry.package).toEqual(CAD_GEAR_V2_PLUGIN);
+    expect(instance.geometry.inputs).toMatchObject({ module: 'sin', teeth: 'pi' });
   });
   it('rejects invalid groups, metadata, duplicate names and invalid geometry without changing its input', () => {
     const before = applyCadEdits(initial(), [addGear]); const text = JSON.stringify(before);
@@ -103,7 +116,7 @@ describe('named CAD dimension groups and ownership', () => {
     expect(after.parameterMetadata?.p_gear_module).toMatchObject({ groupId: 'gear_dimensions', source: { kind: 'plugin', profileId: 'gear', inputName: 'module' } });
     const sketch = after.features[0];
     if (sketch.kind !== 'sketch') throw new Error('Expected sketch');
-    expect(resolveCadProfile(sketch.profiles[0].geometry, after.parameters)).toEqual(resolveCadProfile(createCadPluginProfile(CAD_GEAR_V2_PLUGIN), {}));
+    expect(resolveCadProfile(pluginOf(sketch).geometry, after.parameters)).toEqual(resolveCadProfile(createCadPluginProfile(CAD_GEAR_V2_PLUGIN), {}));
     expect(parseCadDocument(JSON.parse(JSON.stringify(after)))).toEqual(after); expect(JSON.stringify(before)).toBe(original);
   });
   it('strict edit discovery agrees with executed group and plugin operations', () => {

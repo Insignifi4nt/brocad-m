@@ -1,5 +1,6 @@
 import type { CadBuildResult, CadDocument } from '../../../domain/cad/cadDocument';
 import { parseCadDocument } from '../../../domain/cad/cadSchema';
+import { storedCadDocument } from '../../../domain/cad/cadStoredDocument';
 import { parseCadSectionRequest, type CadSectionRequest, type CadSectionResult } from '../../../domain/cad/cadSection';
 import { isCadKernelEnvelope, isCadKernelReply, type CadKernelReply, type CadKernelRequest } from './cadKernelProtocol';
 import { CadError } from '../../../domain/cad/cadError';
@@ -122,7 +123,8 @@ export function createCadKernelClient(makeWorker: () => CadWorkerTransport = () 
     const validated = command.kind === 'import-solid' ? { ...command, source: parseCadSolidImportSource(command.source) }
       : command.kind === 'import-dxf' ? { ...command, input: parseCadDxfImportInput(command.input) }
       : command.kind === 'import-dxf-curve' ? { ...command, input: parseCadDxfCurveImportInput(command.input) }
-      : { ...command, document: parseCadDocument(command.document) };
+      // The worker regenerates sketch generators' members from their records, so only the stored form crosses.
+      : { ...command, document: storedCadDocument(parseCadDocument(command.document)) };
     return new Promise((resolve, reject) => {
       // Boundary parsers already capture immutable input. postMessage performs the
       // worker crossing; another full clone here duplicates large imported originals.

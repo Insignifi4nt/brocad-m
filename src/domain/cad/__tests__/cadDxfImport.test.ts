@@ -7,6 +7,8 @@ import { measureCadSketch } from '../cadMeasurements';
 import { importCadDxfSketch, isCadDxfImportResult, parseCadDxfImportInput } from '../cadDxfImport';
 import { parseCadDxfImportSource } from '../cadDxfSource';
 import { CadError } from '../cadError';
+import type { CadSketchGraph } from '../cadSketchGraph';
+import { cadSketchProfileViews, withCadSketchProfile } from '../sketch-generators/cadSketchProfileViews';
 
 function part(geometries: readonly CadProfile[]): CadDocument {
   const sketch: CadSketchFeature = { kind: 'sketch', id: 'sketch', name: 'Drawing', suppressed: false, plane: 'XY', offset: 0,
@@ -14,8 +16,12 @@ function part(geometries: readonly CadProfile[]): CadDocument {
   return parseCadDocument({ ...createCadDocument('Drawing', 'cad_drawing'), features: [sketch] });
 }
 function fromSketch(sketch: CadSketchFeature): CadDocument {
-  return parseCadDocument({ ...createCadDocument('Imported', 'cad_imported_dxf'), features: [sketch] });
+  return parseCadDocument({ ...createCadDocument('Imported', 'cad_imported_dxf'), schemaVersion: 2, features: [sketch] });
 }
+/** The imported sketch as a document holds it, with each contour generator's lines, arcs and circle. */
+function loaded(sketch: CadSketchFeature): CadSketchFeature { return fromSketch(sketch).features[0] as CadSketchFeature; }
+/** Each imported contour: the generator's shape, seen as the profile it replaces. */
+const contours = (sketch: CadSketchFeature) => cadSketchProfileViews(sketch);
 const concave: CadProfile = { kind: 'path', segments: [
   { kind: 'line', start: [0, 0], end: [10, 0] }, { kind: 'line', start: [10, 0], end: [10, 10] },
   { kind: 'line', start: [10, 10], end: [7, 10] }, { kind: 'arc', center: [5, 10], radius: 2, startAngle: 0, sweep: -180 },
@@ -46,14 +52,14 @@ describe('exact standalone CAD DXF round trip', () => {
     const document = fromSketch(imported.sketch), measurements = measureCadSketch(document, imported.sketch.id);
     expect(measurements.materialAreaMm2).toBeCloseTo(count * radius ** 2 * Math.sin(2 * Math.PI / count) / 2, 6);
     const exported = cadSketchToDxf(document, imported.sketch.id), roundtrip = importCadDxfSketch({ fileName: 'again.dxf', text: exported });
-    expect(roundtrip.sourceEntityCount).toBe(count); expect(roundtrip.sketch.profiles).toHaveLength(1);
+    expect(roundtrip.sourceEntityCount).toBe(count); expect(contours(roundtrip.sketch)).toHaveLength(1);
     // Direct polygon authoring uses the same geometry capacity contract as the imported path.
     expect(part([{ kind: 'polygon', points: vertices.map(vertex => [vertex.x, vertex.y]) }]).features).toHaveLength(1);
   }, 30_000);
   it('retains every independent analytic profile beyond the former 256-contour ceiling', () => {
     const count = 257, text = dxf(Array.from({ length: count }, (_, index) => ['0', 'CIRCLE', '10', index * 4, '20', 0, '40', 1]).flat());
     const imported = importCadDxfSketch({ fileName: 'profiles.dxf', text });
-    expect(imported.contourCount).toBe(count); expect(imported.sketch.profiles).toHaveLength(count); expect(isCadDxfImportResult(imported)).toBe(true);
+    expect(imported.contourCount).toBe(count); expect(contours(imported.sketch)).toHaveLength(count); expect(isCadDxfImportResult(imported)).toBe(true);
     expect(measureCadSketch(fromSketch(imported.sketch), imported.sketch.id).materialAreaMm2).toBeCloseTo(count * Math.PI, 7);
   });
   it.each([
@@ -72,13 +78,16 @@ describe('exact standalone CAD DXF round trip', () => {
     const result = fromSketch(imported.sketch);
     expect(imported).toMatchObject({ scaleToMillimeters: 1, contourCount: 1 });
     expect(imported.sketch).toMatchObject({ plane: 'XY', offset: 0, source: { text, fileName: 'drawing.DXF' } });
-    expect(imported.sketch.profiles.every(profile => !('role' in profile))).toBe(true);
+    // The contour is a path or circle generator stored alone, with no saved profile and no CAM role.
+    expect(imported.sketch.profiles).toEqual([]);
+    expect(imported.sketch.graph).toMatchObject({ points: [], entities: [], relations: [{ id: 'contour_1', kind: 'generator', idPrefix: 'contour-1', name: 'Contour 1', construction: false }] });
+    expect(imported.sketch.graph!.relations.every(relation => !('role' in relation))).toBe(true);
     const before = measureCadSketch(original, 'sketch'); const after = measureCadSketch(result, 'imported');
     expect(after.materialAreaMm2).toBeCloseTo(before.materialAreaMm2, 9);
     expect(after.boundaryLengthMm).toBeCloseTo(before.boundaryLengthMm, 9);
     const beforeSketch = original.features[0]; if (beforeSketch.kind !== 'sketch') throw new Error('Expected sketch');
     const types = (feature: CadSketchFeature) => cadSketchToEntities(feature, {}).map(entity => entity.type).sort();
-    expect(types(imported.sketch)).toEqual(types(beforeSketch));
+    expect(types(loaded(imported.sketch))).toEqual(types(beforeSketch));
     expect(cadSketchToCam(result, 'imported').contours).toHaveLength(1);
     const again = importCadDxfSketch({ fileName: 'again.dxf', text: cadSketchToDxf(result, 'imported') });
     expect(measureCadSketch(fromSketch(again.sketch), again.sketch.id).materialAreaMm2).toBeCloseTo(before.materialAreaMm2, 9);
@@ -86,17 +95,18 @@ describe('exact standalone CAD DXF round trip', () => {
   it('reconstructs nested material and islands from shuffled source entities without importing CAM roles', () => {
     const original = part([{ kind: 'circle', x: 0, y: 0, radius: 2 }, { kind: 'circle', x: 0, y: 0, radius: 10 }, { kind: 'circle', x: 0, y: 0, radius: 5 }]);
     const imported = importCadDxfSketch({ fileName: 'nested.dxf', text: cadSketchToDxf(original, 'sketch') });
-    expect(resolveCadSketchRegions(imported.sketch, {})).toHaveLength(2);
+    expect(resolveCadSketchRegions(loaded(imported.sketch), {})).toHaveLength(2);
     expect(measureCadSketch(fromSketch(imported.sketch), imported.sketch.id).materialAreaMm2).toBeCloseTo(79 * Math.PI, 10);
-    expect(imported.sketch.profiles.every(profile => profile.geometry.kind === 'circle' && !('role' in profile))).toBe(true);
+    expect(contours(imported.sketch).every(profile => profile.geometry.kind === 'circle')).toBe(true);
+    expect(imported.sketch.graph!.relations.every(relation => !('role' in relation))).toBe(true);
   });
   it('expands bulged closed polylines into exact circular arcs with no tessellation', () => {
     const text = dxf(['0', 'LWPOLYLINE', '8', 'PART', '90', '2', '70', '1', '10', '-5', '20', '0', '42', '1', '10', '5', '20', '0', '42', '1']);
     const imported = importCadDxfSketch({ fileName: 'bulge.dxf', text });
-    const geometry = imported.sketch.profiles[0].geometry;
+    const geometry = contours(imported.sketch)[0].geometry;
     expect(geometry).toMatchObject({ kind: 'path', segments: [{ kind: 'arc', radius: 5 }, { kind: 'arc', radius: 5 }] });
     expect(measureCadSketch(fromSketch(imported.sketch), imported.sketch.id).materialAreaMm2).toBeCloseTo(25 * Math.PI, 10);
-    expect(cadSketchToEntities(imported.sketch, {}).every(entity => entity.type === 'arc')).toBe(true);
+    expect(cadSketchToEntities(loaded(imported.sketch), {}).every(entity => entity.type === 'arc')).toBe(true);
   });
   it.each([false, true])('preserves a concave bulged polyline with reversed winding=%s through DXF export', reversed => {
     const vertices = reversed ? [[0, 0, 0], [0, 10, 0], [3, 10, 1], [7, 10, 0], [10, 10, 0], [10, 0, 0]]
@@ -104,11 +114,11 @@ describe('exact standalone CAD DXF round trip', () => {
     const text = dxf(['0', 'LWPOLYLINE', '90', vertices.length, '70', '1', ...vertices.flatMap(([x, y, bulge]) => ['10', x, '20', y, '42', bulge])]);
     let sketch = importCadDxfSketch({ fileName: 'concave-bulge.dxf', text }).sketch;
     for (let iteration = 0; iteration < 2; iteration++) {
-      const geometry = resolveCadProfile(sketch.profiles[0].geometry, {});
+      const geometry = resolveCadProfile(contours(sketch)[0].geometry, {});
       expect(cadProfileContainsPoint(geometry, { x: 5, y: 9 })).toBe(false);
       expect(cadProfileContainsPoint(geometry, { x: 5, y: 7 })).toBe(true);
       expect(measureCadSketch(fromSketch(sketch), sketch.id).materialAreaMm2).toBeCloseTo(100 - 2 * Math.PI, 10);
-      expect(cadSketchToEntities(sketch, {}).filter(entity => entity.type === 'arc')).toMatchObject([{ clockwise: true, sweepRadians: -Math.PI }]);
+      expect(cadSketchToEntities(loaded(sketch), {}).filter(entity => entity.type === 'arc')).toMatchObject([{ clockwise: true, sweepRadians: -Math.PI }]);
       sketch = importCadDxfSketch({ fileName: 'again.dxf', text: cadSketchToDxf(fromSketch(sketch), sketch.id) }).sketch;
     }
   });
@@ -118,14 +128,14 @@ describe('DXF units, exact source lineage and import rejection', () => {
   it.each([{ code: 1, factor: 25.4 }, { code: 4, factor: 1 }, { code: 5, factor: 10 }, { code: 6, factor: 1000 }])('applies declared units code $code exactly once', ({ code, factor }) => {
     const imported = importCadDxfSketch({ fileName: 'units.dxf', text: dxf(circleBody, code) });
     expect(imported.scaleToMillimeters).toBe(factor);
-    expect(imported.sketch.profiles[0].geometry).toMatchObject({ kind: 'circle', radius: 2 * factor });
-    expect(importCadDxfSketch({ fileName: 'again.dxf', text: cadSketchToDxf(fromSketch(imported.sketch), imported.sketch.id) }).sketch.profiles[0].geometry).toMatchObject({ radius: 2 * factor });
+    expect(contours(imported.sketch)[0].geometry).toMatchObject({ kind: 'circle', radius: 2 * factor });
+    expect(contours(importCadDxfSketch({ fileName: 'again.dxf', text: cadSketchToDxf(fromSketch(imported.sketch), imported.sketch.id) }).sketch)[0].geometry).toMatchObject({ radius: 2 * factor });
   });
   it.each([null, 0, 999, 'malformed'])('requires explicit units for declaration %s without borrowing CAM preferences', units => {
     const text = dxf(circleBody, units);
     expect(() => importCadDxfSketch({ fileName: 'units.dxf', text })).toThrow('Choose mm, inch, cm or m explicitly');
     const imported = importCadDxfSketch({ fileName: 'units.dxf', text, units: 'inch' });
-    expect(imported.sketch.profiles[0].geometry).toMatchObject({ radius: 50.8 });
+    expect(contours(imported.sketch)[0].geometry).toMatchObject({ radius: 50.8 });
     expect(imported.sketch.source).toMatchObject({ text, units: 'inch' });
   });
   it('rejects a conflicting declared-unit override and preserves BOM/CRLF source bytes through geometry edits', () => {
@@ -133,7 +143,8 @@ describe('DXF units, exact source lineage and import rejection', () => {
     expect(() => importCadDxfSketch({ fileName: 'part.dxf', text, units: 'inch' })).toThrow('conflict');
     const imported = importCadDxfSketch({ fileName: 'part.dxf', text });
     const sketch = imported.sketch;
-    const edited = parseCadDocument({ ...fromSketch(sketch), features: [{ ...sketch, profiles: [createCadSketchProfile({ id: 'edited', geometry: { kind: 'circle', x: 0, y: 0, radius: 3 } })] }] });
+    const edited = parseCadDocument({ ...fromSketch(sketch), features: [withCadSketchProfile(sketch, { ...contours(sketch)[0], geometry: { kind: 'circle', x: 0, y: 0, radius: 3 } })] });
+    expect(contours(edited.features[0] as CadSketchFeature)[0].geometry).toMatchObject({ radius: 3 });
     expect(edited.features[0]).toMatchObject({ source: { text } });
     expect(sketch.source?.text).toBe(text);
   });
@@ -150,6 +161,12 @@ describe('DXF units, exact source lineage and import rejection', () => {
     { name: 'crossing circles', body: [...circleBody, '0', 'CIRCLE', '10', '1', '20', '0', '40', '2'] }
   ])('rejects $name instead of importing a partial or repaired sketch', ({ body }) => {
     expect(() => importCadDxfSketch({ fileName: 'reject.dxf', text: dxf(body) })).toThrow(CadError);
+  });
+  it('refuses contours that cross or touch, although generated curves may cross in a sketch', () => {
+    for (const x of ['1', '4']) {
+      expect(() => importCadDxfSketch({ fileName: 'apart.dxf', text: dxf([...circleBody, '0', 'CIRCLE', '10', x, '20', '0', '40', '2']) }))
+        .toThrow(expect.objectContaining({ code: 'profile-intersection', message: 'Profiles "Contour 1" and "Contour 2" overlap or touch.' }));
+    }
   });
   it('rejects a physical closing gap and branching paths instead of bridging them', () => {
     const line = (x: number, y: number, ex: number, ey: number) => ['0', 'LINE', '10', x, '20', y, '11', ex, '21', ey];
@@ -214,12 +231,20 @@ describe('DXF worker boundary', () => {
     expect(() => parseCadDxfImportSource(sourceGetter)).toThrow(CadError); expect(reads).toBe(0);
   });
   it('rejects mismatched metadata, invalid geometry and nonportable response data', () => {
-    const valid = importCadDxfSketch(input);
+    const valid = importCadDxfSketch(input), contour = valid.sketch.graph!.relations[0];
+    const withGraph = (change: Partial<Record<keyof CadSketchGraph, readonly unknown[]>>) => ({ ...valid, sketch: { ...valid.sketch, graph: { ...valid.sketch.graph!, ...change } } });
+    expect(isCadDxfImportResult(withGraph({}))).toBe(true);
     for (const value of [{ ...valid, extra: 1 }, { ...valid, contourCount: 2 }, { ...valid, sourceEntityCount: 0 }, { ...valid, scaleToMillimeters: 25.4 },
       { ...valid, unitDeclaration: { status: 'recognized', units: { source: 'dxf-insunits', code: 4, label: 'inches', scaleToMillimeters: 25.4 } } },
       { ...valid, sketch: { ...valid.sketch, plane: 'XZ' } }, { ...valid, sketch: { ...valid.sketch, offset: 1 } },
-      { ...valid, sketch: { ...valid.sketch, source: undefined } }, { ...valid, sketch: { ...valid.sketch, profiles: [{ ...valid.sketch.profiles[0], role: 'outer' }] } },
-      { ...valid, sketch: { ...valid.sketch, profiles: [{ ...valid.sketch.profiles[0], geometry: { kind: 'circle', x: 0, y: 0, radius: -1 } }] } }, Object.create(valid)]) {
+      { ...valid, sketch: { ...valid.sketch, source: undefined } }, { ...valid, sketch: { ...valid.sketch, graph: undefined } },
+      // A saved profile, a contour that is not an exact path or circle, construction or a CAM role, and geometry of the sketch's own.
+      { ...valid, sketch: { ...valid.sketch, profiles: [createCadSketchProfile({ id: 'legacy', geometry: { kind: 'circle', x: 0, y: 0, radius: 2 } })] } },
+      withGraph({ relations: [{ ...contour, role: 'outer' }] }), withGraph({ relations: [{ ...contour, construction: true }] }),
+      withGraph({ relations: [{ ...contour, geometry: { kind: 'circle', x: 0, y: 0, radius: -1 } }] }),
+      withGraph({ relations: [{ ...contour, geometry: { kind: 'rectangle', x: 0, y: 0, width: 2, height: 2, cornerRadius: 0 } }] }),
+      withGraph({ points: [{ id: 'stray', position: [9, 9] }] }), withGraph({ relations: [contour, { id: 'fixed', kind: 'fixed', pointIds: ['contour-1_c'] }] }),
+      Object.create(valid)]) {
       expect(isCadDxfImportResult(value)).toBe(false);
     }
     let reads = 0; const getter = { ...valid };

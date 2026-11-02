@@ -36,11 +36,13 @@ const NOT_REFUSALS: Readonly<Record<string, string>> = {
 
 /**
  * Where the walk takes a caught `CadError`'s code, which the `CadError` its `try` block raised gave: a loft section's inspection and a
- * section pair's pass it on as their refusal, and the rebuild reports it. A new site is read by hand before it is listed here.
+ * section pair's pass it on as their refusal, a linked offset names the reason its chain cannot be offset for itself, and the rebuild
+ * reports it. A new site is read by hand before it is listed here.
  */
 const TAKEN = [
   'src/domain/cad/cadLoft.ts: error.code',
   'src/domain/cad/cadLoftPlacement.ts: error.code',
+  'src/domain/cad/sketch-generators/cadSketchGeneratorKinds.ts: error.code',
   `${KERNEL}: error.code`
 ];
 

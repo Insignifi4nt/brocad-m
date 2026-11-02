@@ -376,6 +376,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       codesOf(file, value.expression, [keyText(file, value.argumentExpression) ?? ELEMENT, ...path], at);
       return;
     }
+    // `Array.from(source, map)` holds what `map` returns.
+    if (ts.isCallExpression(value) && path[0] === ELEMENT && value.arguments.length === 2 && value.expression.getText() === 'Array.from') {
+      codesOf(file, value.arguments[1], [CALL, ...path.slice(1)], at);
+      return;
+    }
     if (ts.isCallExpression(value)) { codesOf(file, value.expression, [CALL, ...path], at); return; }
     if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) { called(file, value, path); return; }
     if (ts.isArrayLiteralExpression(value) && path[0] === ELEMENT) {

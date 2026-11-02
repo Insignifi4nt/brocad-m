@@ -1,11 +1,13 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 import type { CadDocument, CadSketchFeature } from '@/domain/cad/cadDocument';
+import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 import type { CadEdit } from '@/domain/cad/cadOperations';
 import { applyCadEdits } from '@/domain/cad/cadOperations';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { prepareCadSketchCells } from '@/domain/cad/cadSketchRegionInspection';
-import { CAD_STAR_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
+import { CAD_GEAR_V3_PLUGIN, CAD_STAR_PLUGIN, createCadPluginProfile } from '@/domain/cad/plugins/cadPlugins';
+import { expandCadSketchGenerators, storedCadSketchGraph } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { dxf, stock } from '@/domain/cad/__tests__/cadSketchRegionFixtures';
 import { prepareCadEdits } from './cadEditPreparation';
 import { CadSession } from './cadSession';
@@ -358,6 +360,142 @@ describe('owned consumed-sketch draft', () => {
     expect(final.parameterGroups).toEqual(base.document.parameterGroups);
     expect(final.features.slice(2)).toEqual(base.document.features.slice(2));
     expect(sketchOf(final).source).toEqual(sketchOf(base.document).source); expect(main.getSnapshot()).toBe(base);
+  });
+
+  it('creates, edits and detaches a generator of the owned sketch through preview, local undo/redo and Finish, and keeps its plugin package', async () => {
+    const star: CadSketchGenerator = { id: 'star', kind: 'generator', idPrefix: 'star', construction: true, geometry: createCadPluginProfile(CAD_STAR_PLUGIN) };
+    const original = source(), owned = sketchOf(original);
+    const document = parseCadDocument({ ...original, features: original.features.map(feature => feature.id === 'sketch'
+      ? { ...owned, graph: { ...owned.graph!, relations: [...owned.graph!.relations, star] } } : feature) });
+    const main = new CadSession(document), base = main.getSnapshot(), draft = new CadSketchEditDraft(base, 'sketch');
+    const hole = (radius: number): CadSketchGenerator => ({ id: 'hole', kind: 'generator', idPrefix: 'hole', construction: false, geometry: { kind: 'circle', x: 10, y: 5, radius } });
+    const steps: CadEdit[][] = [[{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: hole(2) }],
+      [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: hole(3) }], [{ kind: 'detach-sketch-generator', sketchId: 'sketch', generatorId: 'hole' }]];
+    const states = [draft.getSnapshot()];
+    for (const edits of steps) {
+      // The preview the sketch editor shows prepares the same edits against the draft, and the edit accepts exactly that.
+      draft.validateEdits(edits);
+      const preview = await prepare(draft.getSnapshot().document, edits);
+      await draft.editPrepared(edits, prepare);
+      expect(draft.getSnapshot().document).toEqual(preview);
+      states.push(draft.getSnapshot());
+    }
+    const graph = (index: number) => sketchOf(states[index].document).graph!;
+    expect(graph(1).entities.find(entity => entity.id === 'hole_c0')).toMatchObject({ kind: 'circle' });
+    expect(graph(2).relations.find(relation => relation.id === 'hole')).toMatchObject({ geometry: { radius: 3 } });
+    expect(graph(3).relations.some(relation => relation.id === 'hole')).toBe(false);
+    expect(graph(3).entities.find(entity => entity.id === 'hole_c0')).toMatchObject({ kind: 'circle' });
+    draft.undo(); expect(draft.getSnapshot().document).toBe(states[2].document);
+    draft.undo(); expect(draft.getSnapshot().document).toBe(states[1].document);
+    draft.redo(); draft.redo(); expect(draft.getSnapshot().document).toBe(states[3].document);
+    // Only the owned sketch's generators, and a plugin keeps the package it was placed with.
+    for (const edits of [[{ kind: 'set-sketch-generator', sketchId: 'later', generator: hole(2) }], [{ kind: 'detach-sketch-generator', sketchId: 'later', generatorId: 'plugin' }],
+      [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...star, geometry: { ...star.geometry, package: { ...(star.geometry as { package: object }).package, name: 'Replaced package' } } } }]] as CadEdit[][])
+      await expect(draft.editPrepared(edits, prepare)).rejects.toMatchObject({ code: 'SKETCH_DRAFT_SCOPE' });
+    expect(draft.getSnapshot().document).toBe(states[3].document);
+    const finish = draft.finishEdits(base), final = await prepare(base.document, finish.edits);
+    expect(finish.edits.map(edit => edit.kind === 'update-feature' ? edit.feature.id : edit.kind)).toEqual(['sketch']);
+    expect(sketchOf(final)).toEqual(sketchOf(states[3].document));
+    expect(main.getSnapshot()).toBe(base);
+  });
+
+  it('lets an earlier generator regenerate under a changed parameter, removing only the relations the draft confirms, through Finish', async () => {
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
+    const original = source(), document = parseCadDocument({ ...original, parameters: { ...original.parameters, n: 6 },
+      parameterMetadata: { ...original.parameterMetadata, n: { source: { kind: 'manual' } } },
+      features: [{ id: 'earlier', kind: 'sketch', name: 'Earlier polygon', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+        graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v5'] }] } },
+        ...original.features] });
+    const main = new CadSession(document), base = main.getSnapshot(), draft = new CadSketchEditDraft(base, 'sketch');
+    const ids = (snapshot: { document: CadDocument }) => sketchOf(snapshot.document, 'earlier').graph!.points.map(point => point.id);
+    const stored = (snapshot: { document: CadDocument }) => storedCadSketchGraph(sketchOf(snapshot.document, 'earlier').graph!);
+    // Seven sides add a corner and an edge to the earlier polygon, which keeps its record and the relation on the sixth corner.
+    await draft.editPrepared([{ kind: 'set-parameter', name: 'n', value: 7 }], prepare);
+    const seven = draft.getSnapshot();
+    expect(ids(seven)).toContain('poly_v6');
+    expect(stored(seven).relations).toEqual(stored(base).relations);
+    // Five sides lose that corner: the draft refuses until its edit confirms the relation it removes, then removes only that one.
+    await expect(draft.editPrepared([{ kind: 'set-parameter', name: 'n', value: 5 }], prepare))
+      .rejects.toMatchObject({ code: 'unconfirmed-sketch-generator-removals', relationIds: ['tie'] });
+    expect(draft.getSnapshot()).toBe(seven);
+    await draft.editPrepared([{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }], prepare);
+    const five = draft.getSnapshot();
+    expect(ids(five)).not.toContain('poly_v5');
+    expect(stored(five).relations.map(relation => relation.id)).toEqual(['poly']);
+    draft.undo(); expect(draft.getSnapshot().document).toBe(seven.document);
+    draft.redo(); expect(draft.getSnapshot().document).toBe(five.document);
+    // A prepared prefix may not drop an earlier relation, change an earlier generator's record though its members match it, or add a feature.
+    const earlierOf = (value: CadDocument) => sketchOf(value, 'earlier');
+    const withEarlier = (value: CadDocument, graph: CadSketchFeature['graph']) => parseCadDocument({ ...value, features: value.features.map(feature => feature.id === 'earlier' ? { ...earlierOf(value), graph } : feature) });
+    const unsanctioned = [
+      async (value: CadDocument, edits: readonly CadEdit[]) => { const next = await prepare(value, edits), graph = stored({ document: next });
+        return withEarlier(next, { ...graph, relations: graph.relations.filter(relation => relation.id !== 'tie') }); },
+      async (value: CadDocument, edits: readonly CadEdit[]) => { const next = await prepare(value, edits), graph = stored({ document: next });
+        return withEarlier(next, { ...graph, relations: graph.relations.map(relation => relation.kind === 'generator' ? { ...relation, construction: true } : relation) }); },
+      async (value: CadDocument, edits: readonly CadEdit[]) => { const next = await prepare(value, edits);
+        return parseCadDocument({ ...next, features: [...next.features, { id: 'extra', kind: 'sketch', name: 'Extra', suppressed: false, plane: 'XY', offset: 0, profiles: [] }] }); }];
+    draft.undo();
+    for (const preparation of unsanctioned)
+      await expect(draft.editPrepared([{ kind: 'set-parameter', name: 'span', value: 25 }], preparation)).rejects.toMatchObject({ code: 'SKETCH_DRAFT_SCOPE' });
+    expect(draft.getSnapshot().document).toBe(seven.document);
+    draft.redo();
+    // Finish publishes the parameter and the regenerated earlier sketch, which the full part accepts as the draft showed it.
+    const finish = draft.finishEdits(base);
+    expect(finish.edits.map(edit => edit.kind === 'update-feature' ? edit.feature.id : edit.kind)).toEqual(['set-parameter', 'earlier']);
+    const final = await prepare(base.document, finish.edits);
+    expect(sketchOf(final, 'earlier')).toEqual(sketchOf(five.document, 'earlier'));
+    expect(final.features.slice(1)).toEqual(base.document.features.slice(1));
+    expect(main.getSnapshot()).toBe(base);
+  });
+
+  it('finishes a parameter that later sketches\' generators lose relations with only once Finish confirms them, as one undo step', async () => {
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 40, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 6 }).points.find(point => point.id === 'poly_v5')!.position;
+    const follower = (id: string) => ({ id, kind: 'sketch', name: id, suppressed: false, plane: 'XY', offset: 0, profiles: [],
+      graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v5'] }] } });
+    const original = source(), document = parseCadDocument({ ...original, parameters: { ...original.parameters, n: 6 },
+      parameterMetadata: { ...original.parameterMetadata, n: { source: { kind: 'manual' } } }, features: [...original.features, follower('second'), follower('third')] });
+    const main = new CadSession(document), base = main.getSnapshot(), draft = new CadSketchEditDraft(base, 'sketch');
+    // The draft holds neither later sketch, so its own parameter edit removes nothing.
+    await draft.editPrepared([{ kind: 'set-parameter', name: 'n', value: 5 }], prepare);
+    const edited = draft.getSnapshot(), finish = draft.finishEdits(base);
+    expect(finish.edits).toEqual([{ kind: 'set-parameter', name: 'n', value: 5 }]);
+    // Preparing Finish against the whole part lists the relation in both later sketches at once, and changes nothing.
+    await expect(main.editPrepared(finish.baseVersion, value => prepare(value, finish.edits))).rejects.toMatchObject({ code: 'unconfirmed-sketch-generator-removals',
+      relationIds: ['tie'], relations: [{ sketchId: 'second', relationId: 'tie' }, { sketchId: 'third', relationId: 'tie' }] });
+    expect(main.getSnapshot()).toBe(base); expect(draft.getSnapshot()).toBe(edited);
+    // Declining keeps the draft as it was, still open for edits.
+    draft.assertCurrent(base, edited.version);
+    // Confirming puts the IDs on the parameter edit; the part commits what the same confirmed parameter edit makes of it, in one undo step.
+    const confirmed = draft.finishEdits(base, [], ['tie']);
+    expect(confirmed.edits).toEqual([{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }]);
+    await main.editPrepared(confirmed.baseVersion, value => prepare(value, confirmed.edits));
+    const committed = main.getSnapshot().document;
+    expect(committed).toEqual(await prepare(base.document, [{ kind: 'set-parameter', name: 'n', value: 5, removedRelationIds: ['tie'] }]));
+    for (const id of ['second', 'third']) expect(storedCadSketchGraph(sketchOf(committed, id).graph!).relations.map(relation => relation.id)).toEqual(['poly']);
+    main.undo(); expect(main.getSnapshot().document).toBe(base.document);
+    // IDs with no parameter edit to carry them are stale.
+    expect(() => new CadSketchEditDraft(base, 'sketch').finishEdits(base, [], ['tie'])).toThrow(expect.objectContaining({ code: 'stale-sketch-generator-removals' }));
+  });
+
+  it('lets an earlier gear whose teeth follow a parameter change its member count during a later sketch\'s draft', async () => {
+    const plugin = createCadPluginProfile(CAD_GEAR_V3_PLUGIN);
+    const gear: CadSketchGenerator = { id: 'gear', kind: 'generator', idPrefix: 'g', construction: false,
+      geometry: { ...plugin, inputs: { ...plugin.inputs, teeth: 't' } } as CadSketchGenerator['geometry'] };
+    const original = source(), document = parseCadDocument({ ...original, parameters: { ...original.parameters, t: 18 },
+      features: [{ id: 'earlier', kind: 'sketch', name: 'Earlier gear', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+        graph: { points: [], entities: [], relations: [gear] } }, ...original.features] });
+    const main = new CadSession(document), base = main.getSnapshot(), draft = new CadSketchEditDraft(base, 'sketch');
+    const count = (value: CadDocument) => sketchOf(value, 'earlier').graph!.entities.length;
+    await draft.editPrepared([{ kind: 'set-parameter', name: 't', value: 17 },
+      { kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'horizontal', kind: 'horizontal', pointIds: ['a', 'b'] } }], prepare);
+    expect(count(draft.getSnapshot().document)).toBeLessThan(count(base.document));
+    const finish = draft.finishEdits(base), final = await prepare(base.document, finish.edits);
+    expect(sketchOf(final, 'earlier')).toEqual(sketchOf(draft.getSnapshot().document, 'earlier'));
+    expect(sketchOf(final)).toEqual(sketchOf(draft.getSnapshot().document));
   });
 
   it('does not touch main redo on Cancel or an unchanged Finish, including restored local geometry', async () => {
