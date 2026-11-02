@@ -1189,9 +1189,9 @@ function keyReader(body: CadBodyPartsView) {
   };
   const keysOf = (state: KeyReading) => state.keys ??= state.lists.length === 1 ? state.lists[0] : [...new Set(state.lists.flat())];
   return {
-    start: (root: string) => reading(leads.has(root) ? [single(root)] : []),
-    keysOf,
-    step(state: KeyReading, step: string): KeyReading {
+    rootReading: (root: string) => reading(leads.has(root) ? [single(root)] : []),
+    readingKeys: keysOf,
+    nextReading(state: KeyReading, step: string): KeyReading {
       const split = /^split\((\d+)\)$/.exec(step), at = split ? Number(split[1]) : -1, lists: (readonly string[])[] = [];
       for (const twin of keysOf(state)) {
         const next = `${twin}/${step}`;
@@ -1250,14 +1250,14 @@ function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: re
       if (known.has(key)) return known.get(key);
       let ends: readonly string[] | undefined;
       if (at === choices.length) {
-        const was = before.keysOf(beforeRead);
-        ends = !now.keysOf(nowRead).some(namedNow) && !was.some(continues) && was.some(namedBefore) ? [''] : NONE;
+        const was = before.readingKeys(beforeRead);
+        ends = !now.readingKeys(nowRead).some(namedNow) && !was.some(continues) && was.some(namedBefore) ? [''] : NONE;
       } else {
         const found: string[] = [];
         for (const choice of choices[at]) {
-          work += now.keysOf(nowRead).length + before.keysOf(beforeRead).length + 1;
+          work += now.readingKeys(nowRead).length + before.readingKeys(beforeRead).length + 1;
           if (work > MAX_CAD_BODY_ORDER_WORK) return undefined;
-          const rest = follow(at + 1, now.step(nowRead, choice), before.step(beforeRead, choice));
+          const rest = follow(at + 1, now.nextReading(nowRead, choice), before.nextReading(beforeRead, choice));
           if (!rest) return undefined;
           for (const end of rest) found.push(`/${choice}${end}`);
           if (found.length > MAX_CAD_BODY_LIST) return undefined;
@@ -1267,7 +1267,7 @@ function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: re
       known.set(key, ends);
       return ends;
     };
-    const ends = follow(0, now.start(steps[0]), before.start(steps[0]));
+    const ends = follow(0, now.rootReading(steps[0]), before.rootReading(steps[0]));
     if (!ends) return undefined;
     for (const end of ends) if (steps[0].length + end.length <= MAX_CAD_BODY_KEY_LENGTH) lost.add(`${steps[0]}${end}` as CadBodyKey);
     if (lost.size > MAX_CAD_BODY_LIST) return undefined;
