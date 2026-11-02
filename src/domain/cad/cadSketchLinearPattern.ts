@@ -7,6 +7,7 @@ import type { CadSketchGraphSelection } from './cadSketchGraphSelection';
 import { cadSketchEntityPointIds, cadSketchRelationEntityIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
 import { cadSketchDriverTolerance } from './cadSketchPrecision';
 import { cadSupportedLength } from '../precision/cadPrecision';
+import { copiedCadSketchRelations, copyCadSketchRelations, remapCadSketchRelations } from './sketch-relations/cadSketchRelationRemap';
 
 const invalid = (message: string): never => { throw new CadError('invalid-sketch-pattern', message); };
 const locked = () => new CadError('owned-sketch-pattern', 'Edit the seed or detach its linear pattern before editing generated geometry.');
@@ -115,9 +116,15 @@ export function checkCadSketchLinearPattern(graph: CadSketchGraph, parameters: R
 }
 function sameBinding(a: CadSketchLinearPattern, b: CadSketchLinearPattern) { return a.id === b.id && a.idPrefix === b.idPrefix && Value.Equal(a.seed, b.seed); }
 
-/** Explicit owner edit: seed all surviving/new members, never claim IDs by prefix. */
-export function reconcileCadSketchLinearPattern({ graph, parameters, relation, previous }: {
+/**
+ * Explicit owner edit: seed all surviving/new members, never claim IDs by prefix. With `copyRelations`, each occurrence it creates copies
+ * the seed's reference dimensions as `<idPrefix>_i<index>_r<n>`, a translation by the shared rule (see `copyCadSketchRelations`). The
+ * seed's driving relations are not copied, since the pattern owns its occurrences and drives them through the seed, and neither is a
+ * reference reaching other geometry. Occurrences it keeps keep their relations as they are.
+ */
+export function reconcileCadSketchLinearPattern({ graph, parameters, relation, previous, copyRelations = false }: {
   graph: CadSketchGraph; parameters: Readonly<Record<string, number>>; relation: CadSketchLinearPattern; previous?: CadSketchLinearPattern;
+  copyRelations?: boolean;
 }): CadSketchGraph {
   const actual = graph.relations.find(other => other.id === relation.id);
   if (previous ? !Value.Equal(actual, previous) : actual !== undefined) return invalid('Reconcile a pattern against its actual predecessor owner.');
@@ -126,18 +133,29 @@ export function reconcileCadSketchLinearPattern({ graph, parameters, relation, p
   const old = previous ? members(graph, previous) : [], retained = new Set(old.flatMap(member => [member.pointId, member.entityId]));
   const next = values(graph, parameters, relation), active = new Set(next.positions.flatMap(member => [member.pointId, member.entityId]));
   const removed = new Set([...retained].filter(id => !active.has(id)));
-  for (const other of graph.relations) if (other.id !== previous?.id && (cadSketchRelationEntityIds(other).some(id => removed.has(id))
-    || cadSketchRelationPointIds(graph, other).some(id => removed.has(id)))) return invalid('Remove dependent relations before omitting a pattern occurrence.');
-  const occupied = new Set([...graph.points, ...graph.entities, ...graph.relations].map(item => item.id));
+  // An omitted occurrence leaves with its centre: every other relation on either blocks the omission (see `remapCadSketchRelations`).
+  const leaving = old.filter(member => removed.has(member.entityId));
+  const outcomes = leaving.length ? remapCadSketchRelations(graph, { curves: new Map(leaving.map(member => [member.entityId, []])),
+    points: new Map(leaving.map(member => [member.pointId, null])) }) : [];
+  if (outcomes.some(item => item.kind === 'blocked' && item.relation.id !== previous?.id)) return invalid('Remove dependent relations before omitting a pattern occurrence.');
+  // A new owner's own id is taken as well, so neither an occurrence nor a copied relation may reuse it.
+  const occupied = new Set([...graph.points, ...graph.entities, ...graph.relations, relation].map(item => item.id));
   for (const id of active) if (occupied.has(id) && !retained.has(id)) return invalid('A pattern occurrence identity already belongs to other geometry.');
   const positions = new Map(next.positions.map(member => [member.pointId, member.position]));
   const points = graph.points.filter(point => !removed.has(point.id)).map(point => positions.has(point.id) ? { ...point, position: positions.get(point.id)! } : point);
   const entities = graph.entities.filter(entity => !removed.has(entity.id)).map(entity => retained.has(entity.id) && entity.kind === 'circle' ? { ...entity, radius: next.radius } : entity);
-  for (const member of next.positions) if (!retained.has(member.entityId)) {
+  const created = next.positions.filter(member => !retained.has(member.entityId));
+  for (const member of created) {
     points.push({ id: member.pointId, position: member.position });
     entities.push({ id: member.entityId, kind: 'circle', construction: false, centerPointId: member.pointId, radius: next.radius });
   }
-  return parseCadSketchGraph({ points, entities, relations: previous ? graph.relations.map(other => other.id === previous.id ? relation : other) : [...graph.relations, relation] });
+  const copied = copyRelations ? created.flatMap(member => copiedCadSketchRelations(copyCadSketchRelations(graph, { kind: 'pattern',
+    curves: new Map([[relation.seed.entityId, { entityId: member.entityId, interval: [0, 1], orientation: 'same' }]]),
+    points: new Map([[relation.seed.centerPointId, member.pointId]]),
+    relationId: (_source, index) => `${relation.idPrefix}_i${member.index}_r${index}` }))) : [];
+  for (const copy of copied) if (occupied.has(copy.id)) return invalid('A copied occurrence relation identity already belongs to other geometry.');
+  const relations = previous ? graph.relations.map(other => other.id === previous.id ? relation : other) : [...graph.relations, relation];
+  return parseCadSketchGraph({ points, entities, relations: [...relations, ...copied] });
 }
 
 /** A complete source snapshot may carry solved members, but cannot edit one member backward into its seed. */

@@ -1597,8 +1597,9 @@ describe('CAD controller asynchronous guards', () => {
       expect(inspectCadSketchRegions(accepted.document, 'graph').items[0].reference).toEqual(reference);
       expect(accepted.document.parameters).toEqual({ span: 30, retained: 7 });
       expect(await read.execute({ expectedVersion: before.version, sketchId: 'graph', boundaryProfileId: reference.boundaryProfileId, proposal })).toMatchObject({ ok: false, error: { code: 'STALE_STATE' } });
+      // The first split's collinear support lies on the same carrier as both new pieces, so it stays with the piece keeping the id.
       expect(await inspect.execute({ expectedVersion: accepted.version, sketchId: 'graph', proposal: { split: { ...split, splitPointId: 'joint-2', newEntityId: 'new-2', supportRelationId: 'straight-2' } } }))
-        .toMatchObject({ ok: false, error: { code: 'dependent-sketch-split', details: { relationIds: ['straight'], relationCount: 1, omittedRelationCount: 0 } } });
+        .toMatchObject({ ok: true, data: { proposed: true } });
       await act(async () => h.cad().undo(accepted.version)); expect(h.session.getSnapshot().document).toBe(before.document); expect(h.session.getSnapshot().canUndo).toBe(false);
       await act(async () => h.cad().redo(h.session.getSnapshot().version)); expect(h.session.getSnapshot().document).toBe(accepted.document);
     } finally { vi.useRealTimers(); }

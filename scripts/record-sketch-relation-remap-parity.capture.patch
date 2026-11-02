@@ -1,0 +1,225 @@
+diff --git a/src/domain/cad/cadSketchLinearPattern.ts b/src/domain/cad/cadSketchLinearPattern.ts
+index 9b05c721..c1053954 100644
+--- a/src/domain/cad/cadSketchLinearPattern.ts
++++ b/src/domain/cad/cadSketchLinearPattern.ts
+@@ -1,3 +1,4 @@
++import { captureCadSketchRemapParity } from './cadSketchRemapParityCapture';
+ import { Value } from '@sinclair/typebox/value';
+ import type { CadSketchFeature } from './cadDocument';
+ import { CadError } from './cadError';
+@@ -116,7 +117,7 @@ export function checkCadSketchLinearPattern(graph: CadSketchGraph, parameters: R
+ function sameBinding(a: CadSketchLinearPattern, b: CadSketchLinearPattern) { return a.id === b.id && a.idPrefix === b.idPrefix && Value.Equal(a.seed, b.seed); }
+ 
+ /** Explicit owner edit: seed all surviving/new members, never claim IDs by prefix. */
+-export function reconcileCadSketchLinearPattern({ graph, parameters, relation, previous }: {
++function reconcileCadSketchLinearPatternUncaptured({ graph, parameters, relation, previous }: {
+   graph: CadSketchGraph; parameters: Readonly<Record<string, number>>; relation: CadSketchLinearPattern; previous?: CadSketchLinearPattern;
+ }): CadSketchGraph {
+   const actual = graph.relations.find(other => other.id === relation.id);
+@@ -181,3 +182,5 @@ export function cadSketchPatternSnapshotNeedsExact(previous: CadSketchFeature, c
+   return owners.some(owner => !Value.Equal(previous.graph!.points.find(point => point.id === owner.seed.centerPointId), candidate.graph?.points.find(point => point.id === owner.seed.centerPointId))
+     || !Value.Equal(previous.graph!.entities.find(entity => entity.id === owner.seed.entityId), candidate.graph?.entities.find(entity => entity.id === owner.seed.entityId)));
+ }
++
++export const reconcileCadSketchLinearPattern = captureCadSketchRemapParity('pattern-reconcile', reconcileCadSketchLinearPatternUncaptured);
+diff --git a/src/domain/cad/cadSketchMirror.ts b/src/domain/cad/cadSketchMirror.ts
+index 87f1ef99..f0ecd81a 100644
+--- a/src/domain/cad/cadSketchMirror.ts
++++ b/src/domain/cad/cadSketchMirror.ts
+@@ -1,3 +1,4 @@
++import { captureCadSketchRemapParity } from './cadSketchRemapParityCapture';
+ import { Type, type Static } from '@sinclair/typebox';
+ import { cadFeatureActive } from './features/cadFeatureActivity';
+ import { Value } from '@sinclair/typebox/value';
+@@ -56,7 +57,7 @@ function checkOverlaps(copies: readonly PathSegment[], originals: readonly PathS
+ }
+ 
+ /** Evaluated independent geometry; only declared internal joints are retained. */
+-export function prepareCadSketchMirror({ sketch, parameters, ...request }: CadSketchMirrorRequest & {
++function prepareCadSketchMirrorUncaptured({ sketch, parameters, ...request }: CadSketchMirrorRequest & {
+   readonly sketch: CadSketchFeature; readonly parameters: Readonly<Record<string, number>>;
+ }): CadSketchMirrorPreparation {
+   if (!isCadImportData(request) || !Value.Check(CadSketchMirrorRequestSchema, request))
+@@ -147,3 +148,5 @@ export function prepareCadSketchMirror({ sketch, parameters, ...request }: CadSk
+   if (result.sketch.graph) compileCadSketchGraph(result.sketch.graph, parameters);
+   deepFreezeCadData(result); return result;
+ }
++
++export const prepareCadSketchMirror = captureCadSketchRemapParity('mirror', prepareCadSketchMirrorUncaptured);
+diff --git a/src/domain/cad/cadSketchOffset.ts b/src/domain/cad/cadSketchOffset.ts
+index b1191532..c0ef16d8 100644
+--- a/src/domain/cad/cadSketchOffset.ts
++++ b/src/domain/cad/cadSketchOffset.ts
+@@ -1,3 +1,4 @@
++import { captureCadSketchRemapParity } from './cadSketchRemapParityCapture';
+ import { Type, type Static } from '@sinclair/typebox';
+ import { cadFeatureActive } from './features/cadFeatureActivity';
+ import { Value } from '@sinclair/typebox/value';
+@@ -116,7 +117,7 @@ function checkOffsetEdge(source: Edge, result: Edge, distance: number): void {
+ }
+ 
+ /** One exact detached copy. Positive distance is outward, independent of source winding. */
+-export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSketchOffsetRequest & {
++function prepareCadSketchOffsetUncaptured({ sketch, parameters, ...request }: CadSketchOffsetRequest & {
+   readonly sketch: CadSketchFeature; readonly parameters: Readonly<Record<string, number>>;
+ }): CadSketchOffsetPreparation {
+   if (!isCadImportData(request) || !Value.Check(CadSketchOffsetRequestSchema, request))
+@@ -179,3 +180,5 @@ export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSk
+   deepFreezeCadData(preparation);
+   return preparation;
+ }
++
++export const prepareCadSketchOffset = captureCadSketchRemapParity('offset', prepareCadSketchOffsetUncaptured);
+diff --git a/src/domain/cad/cadSketchProfileCopy.ts b/src/domain/cad/cadSketchProfileCopy.ts
+index 0ac40ecf..a4694491 100644
+--- a/src/domain/cad/cadSketchProfileCopy.ts
++++ b/src/domain/cad/cadSketchProfileCopy.ts
+@@ -1,3 +1,4 @@
++import { captureCadSketchRemapParity } from './cadSketchRemapParityCapture';
+ import { Type, type Static } from '@sinclair/typebox';
+ import { cadFeatureActive } from './features/cadFeatureActivity';
+ import { Value } from '@sinclair/typebox/value';
+@@ -62,7 +63,7 @@ function checkSupport(source: PathSegment, result: PathSegment): void {
+ }
+ 
+ /** One evaluated outline in a new graph sketch, retaining only its placement dependency. */
+-export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: CadSketchProfileCopyRequest & {
++function prepareCadSketchProfileCopyUncaptured({ sketch, parameters, ...request }: CadSketchProfileCopyRequest & {
+   readonly sketch: CadSketchFeature; readonly parameters: Readonly<Record<string, number>>;
+ }): CadSketchProfileCopyPreparation {
+   if (!isCadImportData(request) || !Value.Check(CadSketchProfileCopyRequestSchema, request))
+@@ -128,3 +129,5 @@ export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }:
+     plane: structuredClone(sketch.plane), offset, profiles: [], graph }, sourceSegments, resultEntityIds: entities.map(entity => entity.id) };
+   deepFreezeCadData(result); return result;
+ }
++
++export const prepareCadSketchProfileCopy = captureCadSketchRemapParity('profile-copy', prepareCadSketchProfileCopyUncaptured);
+diff --git a/src/domain/cad/cadSketchRemapParityCapture.ts b/src/domain/cad/cadSketchRemapParityCapture.ts
+new file mode 100644
+index 00000000..ad872fb1
+--- /dev/null
++++ b/src/domain/cad/cadSketchRemapParityCapture.ts
+@@ -0,0 +1,42 @@
++// Relation remap parity capture: with WIREEDM_CAPTURE_REMAP_PARITY naming a directory, each call of a geometry-changing sketch operation
++// is appended to a JSON Lines file there for each process and thread, with what the operation gave: its result's relations, or its
++// error. Inputs with more than 300 relations, or that are not plain data, are skipped.
++type Proc = { env?: Record<string, string | undefined>; pid?: number; getBuiltinModule?: (name: string) => any };
++const seen = new Set<string>();
++function describe(error: unknown) {
++  if (!(error instanceof Error)) return { thrown: String(error) };
++  const e = error as Error & { code?: string; relationIds?: readonly string[]; pointIds?: readonly string[] };
++  return { code: e.code ?? e.name, message: e.message, ...(e.relationIds ? { relationIds: [...e.relationIds] } : {}), ...(e.pointIds ? { pointIds: [...e.pointIds] } : {}) };
++}
++const graphOf = (graph: any) => graph ? { relations: graph.relations, points: graph.points.map((point: { id: string }) => point.id) } : null;
++function summarize(operation: string, result: any): unknown {
++  switch (operation) {
++    case 'trim-prepare': case 'extend-prepare': return { target: result.target };
++    case 'trim': case 'extend': case 'split': return graphOf(result.graph);
++    case 'pattern-reconcile': return graphOf(result);
++    default: return { graph: graphOf(result.sketch?.graph) };
++  }
++}
++function relationCount(args: any): number {
++  const graph = args?.graph ?? args?.sketch?.graph;
++  return graph?.relations?.length ?? 0;
++}
++export function captureCadSketchRemapParity<A, R>(operation: string, run: (args: A) => R): (args: A) => R {
++  return (args: A) => {
++    const proc = (globalThis as { process?: Proc }).process, directory = proc?.env?.WIREEDM_CAPTURE_REMAP_PARITY;
++    if (!directory || !proc?.getBuiltinModule || relationCount(args) > 300) return run(args);
++    let input: string;
++    try { input = JSON.stringify(args); } catch { return run(args); }
++    const fs = proc.getBuiltinModule('node:fs'), crypto = proc.getBuiltinModule('node:crypto'), threads = proc.getBuiltinModule('node:worker_threads');
++    const hash = crypto.createHash('sha256').update(operation + '\n' + input).digest('hex');
++    const write = (outcome: unknown) => {
++      if (seen.has(hash)) return;
++      seen.add(hash);
++      fs.appendFileSync(directory + '/remap-' + proc.pid + '-' + threads.threadId + '.jsonl', JSON.stringify({ hash, operation, input: JSON.parse(input), outcome }) + '\n');
++    };
++    let result: R;
++    try { result = run(args); } catch (error) { write({ error: describe(error) }); throw error; }
++    write({ ok: summarize(operation, result) });
++    return result;
++  };
++}
+diff --git a/src/domain/cad/cadSketchSplit.ts b/src/domain/cad/cadSketchSplit.ts
+index 3a243160..f0cc1c55 100644
+--- a/src/domain/cad/cadSketchSplit.ts
++++ b/src/domain/cad/cadSketchSplit.ts
+@@ -1,3 +1,4 @@
++import { captureCadSketchRemapParity } from './cadSketchRemapParityCapture';
+ import { Type, type Static } from '@sinclair/typebox';
+ import { Value } from '@sinclair/typebox/value';
+ import { CadIdentifierSchema } from './cadPrimitives';
+@@ -34,7 +35,7 @@ export class CadSketchSplitDependencyError extends CadError {
+ }
+ 
+ /** One source-oriented cut, with no coordinate welding or whole-entity relation transfer beyond the retained piece's support. */
+-export function splitCadSketchEntity({ graph: input, parameters, split }: {
++function splitCadSketchEntityUncaptured({ graph: input, parameters, split }: {
+   readonly graph: CadSketchGraph; readonly parameters: Readonly<Record<string, number>>; readonly split: CadSketchSplitTarget;
+ }): CadSketchSplitResult {
+   if (!isCadImportData(split) || !Value.Check(CadSketchSplitTargetSchema, split))
+@@ -74,3 +75,5 @@ export function splitCadSketchEntity({ graph: input, parameters, split }: {
+   }
+   return Object.freeze({ graph: candidate, retainedEntityId: entity.id, newEntityId: split.newEntityId, splitPointId: split.splitPointId });
+ }
++
++export const splitCadSketchEntity = captureCadSketchRemapParity('split', splitCadSketchEntityUncaptured);
+diff --git a/src/domain/cad/cadSketchTrimExtend.ts b/src/domain/cad/cadSketchTrimExtend.ts
+index 2e1922d7..3d68a38e 100644
+--- a/src/domain/cad/cadSketchTrimExtend.ts
++++ b/src/domain/cad/cadSketchTrimExtend.ts
+@@ -1,3 +1,4 @@
++import { captureCadSketchRemapParity } from './cadSketchRemapParityCapture';
+ import { Type, type Static } from '@sinclair/typebox';
+ import { Value } from '@sinclair/typebox/value';
+ import { CadIdentifierSchema, CadNumberSchema } from './cadPrimitives';
+@@ -562,7 +563,7 @@ const removals = ({ relationIds }: { readonly relationIds: readonly string[] })
+  * One clicked span between its nearest cuts; only the relations of the removed piece go with it. Drawn edges cut, and the H and V axes
+  * only where `axes` names them.
+  */
+-export function prepareCadSketchTrim({ graph: input, parameters, entityId, parameter: pick, axes }: Source & {
++function prepareCadSketchTrimUncaptured({ graph: input, parameters, entityId, parameter: pick, axes }: Source & {
+   readonly entityId: string; readonly parameter: number; readonly axes?: readonly string[];
+ }): CadSketchTrimPreparation {
+   if (!Number.isFinite(pick) || pick < 0 || pick > 1) throw new CadError('invalid-sketch-trim', 'Choose a finite source parameter from zero to one.');
+@@ -639,7 +640,7 @@ export function prepareCadSketchTrim({ graph: input, parameters, entityId, param
+  * Recheck the exact preview witness and removals; never retarget a changed source to another intersection. An axis the target names as
+  * a boundary cuts in that check.
+  */
+-export function trimCadSketchEntity({ graph: input, parameters, trim }: Source & { readonly trim: CadSketchTrimTarget }): CadSketchTrimResult {
++function trimCadSketchEntityUncaptured({ graph: input, parameters, trim }: Source & { readonly trim: CadSketchTrimTarget }): CadSketchTrimResult {
+   if (!isCadImportData(trim) || !Value.Check(CadSketchTrimTargetSchema, trim)) throw new CadError('invalid-sketch-trim', 'Choose one complete trim request.');
+   const axes = namedAxes(trim.kind === 'delete' ? [] : trim.kind === 'end' ? [trim.boundary] : trim.boundaries);
+   const graph = parseCadSketchGraph(input), prepared = prepareCadSketchTrim({ graph, parameters, entityId: trim.entityId, parameter: trim.parameter, axes });
+@@ -744,7 +745,7 @@ export function trimCadSketchEntity({ graph: input, parameters, trim }: Source &
+  * Extend one endpoint along its exact source support; cutters remain finite and untouched. Drawn edges bound it, and the H and V axes
+  * only where `axes` names them.
+  */
+-export function prepareCadSketchExtend({ graph: input, parameters, entityId, end, axes: named }: Source & {
++function prepareCadSketchExtendUncaptured({ graph: input, parameters, entityId, end, axes: named }: Source & {
+   readonly entityId: string; readonly end: 'start' | 'end'; readonly axes?: readonly string[];
+ }): CadSketchExtendPreparation {
+   if (end !== 'start' && end !== 'end') throw new CadError('invalid-sketch-extend', 'Choose the start or end of one edge.');
+@@ -793,7 +794,7 @@ function prepareLineExtend(graph: CadSketchGraph, parameters: Readonly<Record<st
+     boundary: event.boundary, point: [event.point.x, event.point.y] };
+   deepFreezeCadData(result); return result;
+ }
+-export function extendCadSketchEntity({ graph: input, parameters, extend }: Source & { readonly extend: CadSketchExtendTarget }): CadSketchExtendResult {
++function extendCadSketchEntityUncaptured({ graph: input, parameters, extend }: Source & { readonly extend: CadSketchExtendTarget }): CadSketchExtendResult {
+   if (!isCadImportData(extend) || !Value.Check(CadSketchExtendTargetSchema, extend)) throw new CadError('invalid-sketch-extend', 'Choose one complete line or arc extension request.');
+   const graph = parseCadSketchGraph(input), source = graph.entities.find(entity => entity.id === extend.entityId);
+   if (!source || source.kind !== extend.kind) throw new CadError('invalid-sketch-extend-target', 'The extension source must retain its requested kind.');
+@@ -816,3 +817,11 @@ export function extendCadSketchEntity({ graph: input, parameters, extend }: Sour
+   }
+   return Object.freeze({ graph: candidate, retainedEntityId: extend.entityId, endPointId });
+ }
++
++export const prepareCadSketchTrim = captureCadSketchRemapParity('trim-prepare', prepareCadSketchTrimUncaptured);
++
++export const trimCadSketchEntity = captureCadSketchRemapParity('trim', trimCadSketchEntityUncaptured);
++
++export const prepareCadSketchExtend = captureCadSketchRemapParity('extend-prepare', prepareCadSketchExtendUncaptured);
++
++export const extendCadSketchEntity = captureCadSketchRemapParity('extend', extendCadSketchEntityUncaptured);

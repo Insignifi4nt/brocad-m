@@ -43,6 +43,7 @@ export const coincident: CadSketchRelationDefinition<'coincident'> = {
   }),
   // Points joined in one place close a path, so they meet within its closure tolerance.
   check: (_, relation, points) => checkCadSketchPointPair(relation, points, (a, b) => Math.hypot(a.x - b.x, a.y - b.y), cadPathClosureTolerance),
+  remap: { roles: ['point', 'point'], copy: { mirror: 'unjoined', offset: 'centres', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two points share one position. Between two arc or circle centres it reads as Concentric.',
     meaning: 'Keeps two distinct source points at the same location.' }
 };
@@ -63,6 +64,7 @@ export const midpoint: CadSketchRelationDefinition<'midpoint'> = {
     });
   },
   check: (graph, relation, points) => checkCadSketchMidpoint(graph, relation, points),
+  remap: { roles: ['point', 'extent'], apart: [[0, 1]], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A point stays at the middle of a line.',
     meaning: 'Keeps one distinct graph point halfway between a graph line’s endpoints, including construction lines. Does not join material boundaries.' }
 };
@@ -81,6 +83,7 @@ export const pointOnLine: CadSketchRelationDefinition<'point-on-line'> = {
     context.onSupport(relation.pointId, context.support(line));
   },
   check: (graph, relation, points) => checkCadSketchPointOnLineRelation(graph, relation, points),
+  remap: { roles: ['point', 'carrier'], apart: [[0, 1]], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A point stays on the infinite line through a line.',
     meaning: 'Keeps a point on the infinite supporting line of the named guide, with sliding freedom unless other dimensions constrain it. Does not join material boundaries, fix the guide or drive a circle radius.' }
 };
@@ -96,6 +99,7 @@ export const pointOnCurve: CadSketchRelationDefinition<'point-on-curve'> = {
   // The full supporting circle: the point's spoke matches an arc's start spoke, or a circle's radius.
   lower: (relation, context) => context.onCircle(relation.pointId, resolveCadSketchPointOnCurveOperands(context.graph, relation).curve),
   check: (graph, relation, points, parameters) => checkCadSketchPointOnCurveRelation(graph, relation, points, parameters),
+  remap: { roles: ['point', 'carrier'], apart: [[0, 1]], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A point stays on the full circle of an arc or circle.',
     meaning: 'Keeps a point on the full supporting circle of the named arc or circle, with sliding freedom unless other dimensions constrain it. Does not join material boundaries, trim the arc or fix the curve.' }
 };
@@ -163,6 +167,9 @@ export const symmetric: CadSketchRelationDefinition<'symmetric'> = {
   check: (graph, relation, points, parameters) => checkCadSketchSymmetricRelation(graph, relation, points, parameters),
   meaningOf: relation => isCadSketchCurveSymmetry(relation) ? 'Keeps two lines, two arcs or two circles reflected about the infinite supporting line of the named axis, '
     + 'each end onto its mirror and an arc’s sweep reversed. Mirrored circles and arcs keep one radius. It does not fix that axis or join points.' : symmetricPointsMeaning,
+  // Mirrored curves pair their ends, so any change to either curve's extent changes what they mirror; the axis is only a carrier.
+  remap: { roles: relation => isCadSketchCurveSymmetry(relation) ? ['extent', 'extent', 'carrier'] : ['point', 'point', 'carrier'], apart: [[0, 2], [1, 2]],
+    copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two points, lines, arcs or circles mirror each other about a line or an axis.', meaning: symmetricPointsMeaning }
 };
 
@@ -194,6 +201,7 @@ export const tangentJoint: CadSketchRelationDefinition<'tangent-joint'> = {
     context.squareStart(arcPointId, centre, otherLineEndId);
   },
   check: (graph, relation, points) => checkCadSketchTangentJoint(graph, relation, points),
+  remap: { roles: ['joint', 'end', 'joint', 'end'], copy: { mirror: 'follow', offset: 'follow', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A line and an arc that share an endpoint join smoothly there.',
     meaning: 'Keeps one line and one arc smoothly opposed at their explicitly joined endpoints. Declared endpoint identity, arc direction and existing size drivers remain authoritative; it adds no coincidence or radius driver.' }
 };
@@ -230,6 +238,7 @@ export const tangent: CadSketchRelationDefinition<'tangent'> = {
       return [{ source, code: 'invalid-expression', message: error instanceof Error ? error.message : 'Invalid tangent to an axis.' }];
     }
   },
+  remap: { roles: ['carrier', 'carrier'], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'An arc or circle touches the H or V axis.',
     meaning: 'Keeps the full circle of an arc or circle touching an axis, on the side its centre starts on.' }
 };

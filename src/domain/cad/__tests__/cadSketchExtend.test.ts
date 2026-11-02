@@ -41,28 +41,36 @@ describe('exact line Extend', () => {
     expect(JSON.stringify(graph)).toBe(before);
   });
 
-  it('keeps explicit point/attachment/angle/corner ownership and shared-line H/V ambiguity blocked', () => {
+  it('keeps explicit point and attachment ownership blocked, and carries a ray, a shared-line level pair and a far corner along', () => {
     const original = source(), graph = parseCadSketchGraph({ ...original, points: [...original.points, { id: 'alias', position: [10, 0] }] });
     const owners: readonly CadSketchGraphRelation[] = [
       { id: 'fixed-axis', kind: 'fixed-axis', pointId: 'b', axis: 'y', value: ' 0 ' },
       { id: 'fixed-point', kind: 'fixed-point', pointId: 'b', position: [' 10 ', '0'] },
-      { id: 'attachment', kind: 'coincident', pointIds: ['b', 'alias'] },
-      { id: 'angle', kind: 'line-angle', rays: [{ lineId: 'edge', towardPointId: 'b' }, { lineId: 'near', towardPointId: 'd' }], sense: 'ccw', value: ' 90 ' }
+      { id: 'attachment', kind: 'coincident', pointIds: ['b', 'alias'] }
     ];
     for (const owner of owners) expect(() => prepareCadSketchExtend({ graph: parseCadSketchGraph({ ...graph, relations: [owner] }), parameters: {}, entityId: 'edge', end: 'end' }))
       .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: [owner.id] }));
+    const extended = (driven: CadSketchGraph, entityId = 'edge') => {
+      const { target } = prepareCadSketchExtend({ graph: driven, parameters: {}, entityId, end: 'end' });
+      return extendCadSketchEntity({ graph: driven, parameters: {}, extend: { ...target, endPointId: 'm' } }).graph;
+    };
+    // A ray toward the old end points the same way from the new one, so it follows the end along the line.
+    const angle = { id: 'angle', kind: 'line-angle', rays: [{ lineId: 'edge', towardPointId: 'b' }, { lineId: 'near', towardPointId: 'd' }], sense: 'ccw', value: ' 90 ' } as const;
+    expect(extended(parseCadSketchGraph({ ...graph, relations: [angle] })).relations).toEqual([{ ...angle, rays: [{ lineId: 'edge', towardPointId: 'm' }, angle.rays[1]] }]);
+    // Another line shares the level pair, so the pair is not this line's own direction: it stays on the points that line keeps.
     const duplicate = parseCadSketchGraph({ ...graph, entities: [...graph.entities,
       { id: 'other-line', kind: 'line', construction: true, startPointId: 'b', endPointId: 'a' }],
       relations: [{ id: 'direction', kind: 'horizontal', pointIds: ['a', 'b'] }] });
-    expect(() => prepareCadSketchExtend({ graph: duplicate, parameters: {}, entityId: 'edge', end: 'end' }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: ['direction'] }));
+    expect(extended(duplicate).relations).toEqual(duplicate.relations);
+    // A fillet at the line's other end stays where it is.
     let id = 0;
     const corner = createCadSketchCornerTreatment({ graph: parseCadSketchGraph({ points: [{ id: 'v', position: [0, 0] }, { id: 'a', position: [20, 0] },
-      { id: 'b', position: [0, 20] }], entities: [{ id: 'edge', kind: 'line', construction: false, startPointId: 'v', endPointId: 'a' },
-      { id: 'other', kind: 'line', construction: false, startPointId: 'v', endPointId: 'b' }], relations: [] }), parameters: {}, pointId: 'v',
+      { id: 'b', position: [0, 20] }, { id: 's', position: [30, -5] }, { id: 't', position: [30, 5] }], entities: [
+      { id: 'edge', kind: 'line', construction: false, startPointId: 'v', endPointId: 'a' },
+      { id: 'other', kind: 'line', construction: false, startPointId: 'v', endPointId: 'b' },
+      { id: 'stop', kind: 'line', construction: true, startPointId: 's', endPointId: 't' }], relations: [] }), parameters: {}, pointId: 'v',
       treatment: { kind: 'fillet', radius: 2 }, createId: () => `corner_${++id}` });
-    expect(() => prepareCadSketchExtend({ graph: corner.graph, parameters: {}, entityId: 'edge', end: 'end' }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: [corner.relationId] }));
+    expect(extended(corner.graph).relations).toEqual(corner.graph.relations);
   });
 
   it('rejects an out-of-range generated endpoint from a legal boundary instead of offering a malformed edit', () => {

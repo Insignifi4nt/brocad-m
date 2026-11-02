@@ -2,10 +2,22 @@ import { describe, expect, it } from 'vitest';
 import { parseCadDocument } from '../cadSchema';
 import { applyCadEdits } from '../cadOperations';
 import type { CadEdit } from '../cadOperations';
-import { isAcceptedCadSketchGraph, type CadSketchLinearPattern } from '../cadSketchGraph';
+import { isAcceptedCadSketchGraph, type CadSketchGraphRelation, type CadSketchLinearPattern } from '../cadSketchGraph';
 import { cadSketchLinearPatternForSelection, cadSketchLinearPatternInstances, cadSketchLinearPatternLockReason, reconcileCadSketchLinearPattern } from '../cadSketchLinearPattern';
 import { circleRow, circleRowPart, rowSketch } from './cadSketchLinearPatternFixtures';
 const set = (relation: CadSketchLinearPattern): CadEdit => ({ kind: 'set-sketch-relation', sketchId: 'sketch', relation });
+const copying = (relation: CadSketchLinearPattern): CadEdit => ({ kind: 'set-sketch-relation', sketchId: 'sketch', relation, copyRelations: true });
+/** The free seed with a driving radius, a reference diameter, a reference distance to a point outside the row and a fixed centre. */
+function measuredSeedPart() {
+  const part = circleRowPart(true), sketch = rowSketch(part);
+  const relations: CadSketchGraphRelation[] = [{ id: 'size', kind: 'radial-size', entityId: 'seed', quantity: 'radius', value: 3 },
+    { id: 'measure', kind: 'reference-dimension', measurement: { kind: 'radial-size', entityId: 'seed', quantity: 'diameter' } },
+    { id: 'reach', kind: 'reference-dimension', measurement: { kind: 'point-distance', pointIds: ['center', 'far'] } },
+    { id: 'pin', kind: 'fixed-point', pointId: 'center', position: [10, 10] }];
+  return parseCadDocument({ ...part, features: [{ ...sketch, graph: { ...sketch.graph, points: [...sketch.graph.points, { id: 'far', position: [10, 40] }], relations } }] });
+}
+const occurrenceMeasure = (index: number) => ({ id: `holes_i${index}_r0`, kind: 'reference-dimension',
+  measurement: { kind: 'radial-size', entityId: `holes_i${index}_e0`, quantity: 'diameter' } });
 
 describe('persistent circle row source and ownership', () => {
   it('allocates stable occurrences, retains exact seed/spacing, and preserves omissions across shrink/regrowth', () => {
@@ -71,6 +83,29 @@ describe('persistent circle row source and ownership', () => {
     expect(rowSketch(detached).graph.entities).toEqual(rowSketch(patterned).graph.entities);
     expect(rowSketch(detached).graph.relations).toEqual([]);
     expect(parseCadDocument(JSON.parse(JSON.stringify(patterned)))).toEqual(patterned);
+  });
+  it('copies the seed reference dimensions onto each occurrence it creates with copyRelations, and leaves the seed drivers to the pattern', () => {
+    const source = measuredSeedPart(), seedRelations = rowSketch(source).graph.relations;
+    // Without the flag nothing is copied, as before.
+    expect(rowSketch(applyCadEdits(source, [set(circleRow)])).graph.relations).toEqual([...seedRelations, circleRow]);
+    const patterned = applyCadEdits(source, [copying(circleRow)]);
+    expect(rowSketch(patterned).graph.relations).toEqual([...seedRelations, circleRow, ...[1, 2, 3].map(occurrenceMeasure)]);
+    // Regrowth copies onto the new occurrence only; the occurrences it keeps keep their relations as they are.
+    const grown = applyCadEdits(patterned, [copying({ ...circleRow, count: 5 })]);
+    expect(rowSketch(grown).graph.relations).toEqual([...seedRelations, { ...circleRow, count: 5 }, ...[1, 2, 3, 4].map(occurrenceMeasure)]);
+    // Omission still goes through the remap: a copied reference on the occurrence blocks it until it is removed.
+    expect(() => applyCadEdits(grown, [set({ ...circleRow, count: 5, omittedInstances: [2] })])).toThrow('Remove dependent relations');
+    const released = applyCadEdits(grown, [{ kind: 'remove-sketch-relation', sketchId: 'sketch', relationId: 'holes_i2_r0' },
+      set({ ...circleRow, count: 5, omittedInstances: [2] })]);
+    expect(rowSketch(released).graph.entities.map(entity => entity.id)).toEqual(['seed', 'holes_i1_e0', 'holes_i3_e0', 'holes_i4_e0']);
+    // A copied id that already names other data refuses, and the flag means nothing on any other relation.
+    const taken = applyCadEdits(source, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'holes_i1_r0', kind: 'distance', pointIds: ['center', 'far'], value: 30 } }]);
+    expect(() => applyCadEdits(taken, [copying(circleRow)])).toThrowError(expect.objectContaining({ code: 'invalid-sketch-pattern' }));
+    // A new owner reserves its own id: a copied reference or an occurrence that would reuse it refuses alike, and nothing is applied.
+    for (const id of ['holes_i1_r0', 'holes_i1_e0', 'holes_i2_p0'])
+      expect(() => applyCadEdits(source, [copying({ ...circleRow, id })])).toThrowError(expect.objectContaining({ code: 'invalid-sketch-pattern' }));
+    expect(() => applyCadEdits(source, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: seedRelations[0], copyRelations: true }]))
+      .toThrowError(expect.objectContaining({ code: 'invalid-edit' }));
   });
   it('validates count/omission/positive spacing boundaries and never leaves detached former members in a snapshot shrink', () => {
     const source = circleRowPart(), patterned = applyCadEdits(source, [set(circleRow)]), sketch = rowSketch(patterned);

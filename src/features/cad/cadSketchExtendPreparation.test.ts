@@ -68,8 +68,10 @@ describe('exact line Extend preparation', () => {
   it('rejects an arc Extend detaching exact endpoint drivers without committing a preceding parameter intent', async () => {
     const original = arcExtendPart(), sketch = original.features[0];
     if (sketch.kind !== 'sketch' || !sketch.graph) throw new Error('Arc extension source missing.');
+    // Without the divider the arc's old end leaves with the extension, and so would the expression placing it.
     const extend = arcExtendTarget(original), document = parseCadDocument({ ...original, features: [{ ...sketch, graph: { ...sketch.graph,
-      points: sketch.graph.points.map(point => point.id === 'b' ? { ...point, position: ['0.000', 10] } : point) } }] });
+      points: sketch.graph.points.map(point => point.id === 'b' ? { ...point, position: ['0.000', 10] } : point),
+      entities: sketch.graph.entities.filter(entity => entity.id !== 'divider') } }] });
     const session = new CadSession(document), before = session.getSnapshot();
     await expect(session.editPrepared(before.version, async accepted => (await prepareCadEdits(accepted, [
       { kind: 'set-parameter', name: 'retained', value: 99 }, { kind: 'extend-sketch-entity', sketchId: 'sketch', extend }

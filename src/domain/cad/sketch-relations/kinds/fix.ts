@@ -26,6 +26,7 @@ export const fixedPoint: CadSketchRelationDefinition<'fixed-point'> = {
   },
   check: (_, relation, points, parameters) => checkCadSketchHeldPoint(relation, points,
     () => ({ x: evaluateCadScalar(relation.position[0], parameters), y: evaluateCadScalar(relation.position[1], parameters) })),
+  remap: { roles: ['point'], copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A point keeps a set position.',
     meaning: 'Fixes a point at its driving X and Y coordinates.' }
 };

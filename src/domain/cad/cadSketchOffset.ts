@@ -8,7 +8,7 @@ import { CadError } from './cadError';
 import { isCadImportData } from './cadImportData';
 import { evaluateCadScalar } from './cadExpression';
 import { cadProfileToEntities, resolveCadSketchContours } from './cadSketchGeometry';
-import { appendCadSketchEntities } from './cadSketchGraphEdits';
+import { appendCadSketchCopiedRelations, appendCadSketchEntities } from './cadSketchGraphEdits';
 import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraphEntity } from './cadSketchGraph';
 import { compileCadSketchGraph } from './cadSketchGraphGeometry';
 import { createArcSegment, createCircleSegment, createLineSegment, cross } from '@/domain/path-intel/segments';
@@ -17,6 +17,7 @@ import type { DxfEntity } from '@/domain/dxf/types';
 import type { ArcPathSegment, LinePathSegment, PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION, cadRoundoff } from '@/domain/precision/cadPrecision';
+import type { CadSketchRelationCopy, CadSketchRemapPiece } from './sketch-relations/cadSketchRelationRemap';
 
 const strict = { additionalProperties: false };
 export const CadSketchOffsetSourceSchema = Type.Union([
@@ -24,7 +25,9 @@ export const CadSketchOffsetSourceSchema = Type.Union([
   Type.Object({ kind: Type.Literal('graph-cycle'), sourceRefs: Type.Array(Type.Object({ entityId: CadIdentifierSchema, reversed: Type.Boolean() }, strict), { minItems: 1 }) }, strict)
 ]);
 export const CadSketchOffsetRequestSchema = Type.Object({ source: CadSketchOffsetSourceSchema, distance: CadScalarSchema,
-  idPrefix: Type.String({ pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }) }, strict);
+  idPrefix: Type.String({ pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }),
+  /** Also carry the relations internal to a graph loop that an offset keeps exact onto the copy. */
+  copyRelations: Type.Optional(Type.Boolean()) }, strict);
 type Immutable<T> = { readonly [K in keyof T]: Immutable<T[K]> };
 export type CadSketchOffsetSource = Immutable<Static<typeof CadSketchOffsetSourceSchema>>;
 export type CadSketchOffsetRequest = Immutable<Static<typeof CadSketchOffsetRequestSchema>>;
@@ -115,12 +118,34 @@ function checkOffsetEdge(source: Edge, result: Edge, distance: number): void {
   }
 }
 
-/** One exact detached copy. Positive distance is outward, independent of source winding. */
+/**
+ * How an offset copies a graph loop: edge i of the copy runs along source ref i, from vertex i to vertex i + 1, so a reversed ref runs
+ * the copy against its source curve. Arc centres and a circle's centre have their own copies.
+ */
+function offsetCopy(entities: readonly CadSketchGraphEntity[], sourceRefs: readonly { readonly entityId: string; readonly reversed: boolean }[], idPrefix: string): Omit<CadSketchRelationCopy, 'relationId'> {
+  const byId = new Map(entities.map(entity => [entity.id, entity])), curves = new Map<string, CadSketchRemapPiece>(), points = new Map<string, string>();
+  for (const [index, ref] of sourceRefs.entries()) {
+    const entity = byId.get(ref.entityId);
+    if (!entity) continue;
+    curves.set(entity.id, { entityId: `${idPrefix}_e${index}`, interval: [0, 1], orientation: ref.reversed ? 'reversed' : 'same' });
+    if (entity.kind === 'circle') { points.set(entity.centerPointId, `${idPrefix}_c${index}`); continue; }
+    const [first, last] = ref.reversed ? [entity.endPointId, entity.startPointId] : [entity.startPointId, entity.endPointId];
+    points.set(first, `${idPrefix}_p${index}`); points.set(last, `${idPrefix}_p${(index + 1) % sourceRefs.length}`);
+    if (entity.kind === 'arc') points.set(entity.centerPointId, `${idPrefix}_c${index}`);
+  }
+  return { kind: 'offset', curves, points };
+}
+
+/**
+ * One exact detached copy. Positive distance is outward, independent of source winding. `copyRelations` carries the relations internal
+ * to a graph loop onto the copy by each kind's rule: directions, angles and joints, but no length or radius the offset changes.
+ */
 export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSketchOffsetRequest & {
   readonly sketch: CadSketchFeature; readonly parameters: Readonly<Record<string, number>>;
 }): CadSketchOffsetPreparation {
   if (!isCadImportData(request) || !Value.Check(CadSketchOffsetRequestSchema, request))
     throw new CadError('invalid-sketch-offset', 'Offset requires one exact loop, a distance and an identifier prefix of at most 64 characters.');
+  const copyRelations = request.copyRelations === true;
   if (!cadFeatureActive(sketch, { parameters })) return fail('Resume the sketch before offsetting a loop.');
   const { source, idPrefix } = request, distanceMm = evaluateCadScalar(request.distance, parameters);
   if (source.kind === 'profile') {
@@ -175,7 +200,10 @@ export function prepareCadSketchOffset({ sketch, parameters, ...request }: CadSk
     contained = combined.find(item => item.profile.id === contained?.parentId);
   }
   if (!nested) return fail('The offset cannot preserve the requested inside/outside branch.');
-  const preparation = { sketch: result, sourceSegments, resultSegments: resultEdges.map(pathSegment), distanceMm };
+  const carried = copyRelations && source.kind === 'graph-cycle' && sketch.graph ? appendCadSketchCopiedRelations(result, sketch.graph, parameters,
+    { ...offsetCopy(sketch.graph.entities, source.sourceRefs, idPrefix), relationId: (_relation, index) => `${idPrefix}_r${index}` },
+    () => new CadError('unsupported-sketch-offset', 'The offset cannot keep a copied relation exact. Offset it without copying relations.')) : result;
+  const preparation = { sketch: carried, sourceSegments, resultSegments: resultEdges.map(pathSegment), distanceMm };
   deepFreezeCadData(preparation);
   return preparation;
 }

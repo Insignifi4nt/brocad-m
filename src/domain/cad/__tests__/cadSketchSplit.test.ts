@@ -48,7 +48,7 @@ describe('exact sketch source split', () => {
     expect(JSON.stringify(graph)).toBe(before);
   });
 
-  it('blocks whole-edge equal-length, radius and corner owners with exact detached relation identities', () => {
+  it('blocks a whole-edge equal length with exact relation identities, and keeps a radius and a corner on the piece keeping the id', () => {
     const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [20, 0] }, { id: 'c', position: [0, 20] }],
       entities: [{ id: 'edge', kind: 'line', startPointId: 'a', endPointId: 'b', construction: false },
         { id: 'other', kind: 'line', startPointId: 'a', endPointId: 'c', construction: false }],
@@ -65,13 +65,14 @@ describe('exact sketch source split', () => {
     const arc = parseCadSketchGraph({ points: [{ id: 'o', position: [0, 0] }, { id: 'a', position: [10, 0] }, { id: 'b', position: [0, 10] }],
       entities: [{ id: 'arc', kind: 'arc', construction: false, centerPointId: 'o', startPointId: 'a', endPointId: 'b', direction: 'ccw' }],
       relations: [{ id: 'radius', kind: 'radial-size', entityId: 'arc', quantity: 'radius', value: ' 10 ' }] });
-    expect(() => splitCadSketchEntity({ graph: arc, parameters: {}, split: { kind: 'arc', entityId: 'arc', parameter: 0.5, splitPointId: 'm', newEntityId: 'child' } }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-split', relationIds: ['radius'] }));
+    // Both arcs keep the one circle, and the fillet stays at the start the first piece keeps.
+    expect(splitCadSketchEntity({ graph: arc, parameters: {}, split: { kind: 'arc', entityId: 'arc', parameter: 0.5, splitPointId: 'm', newEntityId: 'child' } }).graph.relations)
+      .toEqual(arc.relations);
     let id = 0;
     const corner = createCadSketchCornerTreatment({ graph: parseCadSketchGraph({ ...graph, relations: [] }), parameters: {}, pointId: 'a',
       treatment: { kind: 'fillet', radius: 2 }, createId: () => `corner_${++id}` });
-    expect(() => splitCadSketchEntity({ graph: corner.graph, parameters: {}, split: request }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-split', relationIds: [corner.relationId] }));
+    expect(splitCadSketchEntity({ graph: corner.graph, parameters: {}, split: request }).graph.relations)
+      .toEqual([...corner.graph.relations, { id: 'support', kind: 'parallel', lineIds: ['edge', 'child'] }]);
     expect(JSON.stringify(graph)).toBe(before);
   });
 

@@ -44,15 +44,22 @@ describe('reference dimension dependencies during edge edits', () => {
     relations: [{ id:'length',kind:'reference-dimension',measurement:{kind:'line-length',entityId:'edge'} },
       { id:'span',kind:'reference-dimension',measurement:{kind:'point-distance',pointIds:['b','a']} }] });
   const values = (graph: ReturnType<typeof parseCadSketchGraph>) => graph.relations.filter(r=>r.kind==='reference-dimension').map(r=>measureCadSketchReferenceDimension(graph,{},r));
-  it('follows the retained edge after Split or end Trim and removes a point distance to a detached end', () => {
+  it('blocks a whole-line length when Split or end Trim changes the line, and removes a point distance to a detached end', () => {
     const graph=line(), before=JSON.stringify(graph);
-    const split=splitCadSketchEntity({graph,parameters:{},split:{kind:'line',entityId:'edge',parameter:.25,splitPointId:'cut',newEntityId:'piece',supportRelationId:'support'}});
-    expect(values(split.graph)).toEqual([5,20]);expect(split.graph.relations.slice(0,2)).toEqual(graph.relations);
+    // A length of the whole line would measure another span on a piece, so it is never kept with that new meaning.
+    const request={kind:'line',entityId:'edge',parameter:.25,splitPointId:'cut',newEntityId:'piece',supportRelationId:'support'} as const;
+    expect(()=>splitCadSketchEntity({graph,parameters:{},split:request})).toThrowError(expect.objectContaining({code:'dependent-sketch-split',relationIds:['length']}));
+    const spanOnly=parseCadSketchGraph({...graph,relations:[graph.relations[1]]});
+    const split=splitCadSketchEntity({graph:spanOnly,parameters:{},split:request});
+    expect(values(split.graph)).toEqual([20]);expect(split.graph.relations.slice(0,1)).toEqual(spanOnly.relations);
     const prepared=prepareCadSketchTrim({graph,parameters:{},entityId:'edge',parameter:.1});
     if(prepared.target.kind!=='end')throw Error('Expected end trim');
-    expect(prepared.target.removedRelationIds).toEqual(['span']);
+    expect(prepared.target.removedRelationIds).toEqual(['length','span']);
+    const end=prepared.target;
+    expect(()=>trimCadSketchEntity({graph,parameters:{},trim:{...end,removedRelationIds:['span'],cutPointId:'cut'}}))
+      .toThrowError(expect.objectContaining({code:'unconfirmed-sketch-trim-removals'}));
     const trimmed=trimCadSketchEntity({graph,parameters:{},trim:{...prepared.target,cutPointId:'cut'}});
-    expect(values(trimmed.graph)).toEqual([15]);expect(trimmed.graph.relations).toEqual([graph.relations[0]]);
+    expect(trimmed.graph.relations).toEqual([]);
     expect(trimmed.graph.points.slice(0,3)).toEqual(graph.points.slice(1));expect(JSON.stringify(graph)).toBe(before);
     const pointOnly=parseCadSketchGraph({...graph,entities:[graph.entities[0]],relations:[graph.relations[1]]});
     const deletion=prepareCadSketchTrim({graph:pointOnly,parameters:{},entityId:'edge',parameter:.5});

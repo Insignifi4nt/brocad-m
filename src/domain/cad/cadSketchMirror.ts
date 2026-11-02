@@ -9,7 +9,7 @@ import { evaluateCadScalar } from './cadExpression';
 import { parseCadSketchGraph, type CadSketchGraphEntity, type CadSketchGraphRelation } from './cadSketchGraph';
 import { cadSketchEntityPointIds } from './cadSketchGraphReferences';
 import { compileCadSketchGraph } from './cadSketchGraphGeometry';
-import { appendCadSketchEntities } from './cadSketchGraphEdits';
+import { appendCadSketchCopiedRelations, appendCadSketchEntities } from './cadSketchGraphEdits';
 import { resolveCadSketchPointIdentities } from './cadSketchGraphJoints';
 import { cadPathClosureTolerance } from './cadAnalyticSegments';
 import { cadProfileToEntities, resolveCadProfile } from './cadSketchGeometry';
@@ -24,7 +24,9 @@ export const CadSketchMirrorRequestSchema = Type.Object({
   entityIds: Type.Array(CadIdentifierSchema, { minItems: 1, maxItems: 64, uniqueItems: true }),
   /** A graph line, or the H or V axis. */
   axisLineId: Type.String({ pattern: CAD_SKETCH_ELEMENT_ID_PATTERN }),
-  idPrefix: Type.String({ pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' })
+  idPrefix: Type.String({ pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }),
+  /** Also carry the relations internal to the copied set, and those reaching only the mirror line, onto the copy. */
+  copyRelations: Type.Optional(Type.Boolean())
 }, { additionalProperties: false });
 type Immutable<T> = { readonly [K in keyof T]: Immutable<T[K]> };
 export type CadSketchMirrorRequest = Immutable<Static<typeof CadSketchMirrorRequestSchema>>;
@@ -55,12 +57,16 @@ function checkOverlaps(copies: readonly PathSegment[], originals: readonly PathS
   }
 }
 
-/** Evaluated independent geometry; only declared internal joints are retained. */
+/**
+ * Evaluated independent geometry; only declared internal joints are retained, unless `copyRelations` carries every relation internal to
+ * the copied set, and those reaching only the mirror line, onto the copy by each kind's rule.
+ */
 export function prepareCadSketchMirror({ sketch, parameters, ...request }: CadSketchMirrorRequest & {
   readonly sketch: CadSketchFeature; readonly parameters: Readonly<Record<string, number>>;
 }): CadSketchMirrorPreparation {
   if (!isCadImportData(request) || !Value.Check(CadSketchMirrorRequestSchema, request))
     throw new CadError('invalid-sketch-mirror', 'Mirror copy needs distinct graph entities, one line and an identifier prefix of at most 64 characters.');
+  const copyRelations = request.copyRelations === true;
   if (!cadFeatureActive(sketch, { parameters }) || !sketch.graph) throw new CadError('invalid-sketch-mirror-source', 'Choose an active entity-based sketch.');
   const graph = parseCadSketchGraph(sketch.graph), sourceEntityIds = [...request.entityIds].sort();
   const byId = new Map(graph.entities.map(entity => [entity.id, entity]));
@@ -142,8 +148,11 @@ export function prepareCadSketchMirror({ sketch, parameters, ...request }: CadSk
     }
   }
   checkOverlaps(copiedGeometry.segments, [...sourceGeometry.segments, ...legacySegments(sketch, parameters)]);
-  const result = { sketch: appendCadSketchEntities({ sketch: structuredClone(sketch), geometry: addition }), sourceEntityIds,
-    resultEntityIds: entities.map(entity => entity.id) };
+  const appended = appendCadSketchEntities({ sketch: structuredClone(sketch), geometry: addition });
+  const result = { sketch: copyRelations ? appendCadSketchCopiedRelations(appended, graph, parameters, { kind: 'mirror',
+    curves: new Map(selected.map((entity, index) => [entity.id, { entityId: entities[index].id, interval: [0, 1], orientation: 'same' }])), points: newIds,
+    ...(axis.kind === 'axis' ? { axis: axis.id } : { invariant: new Set([axis.id, axis.startPointId, axis.endPointId]) }),
+    relationId: (_relation, index) => `${request.idPrefix}_r${index}` }, precision) : appended, sourceEntityIds, resultEntityIds: entities.map(entity => entity.id) };
   if (result.sketch.graph) compileCadSketchGraph(result.sketch.graph, parameters);
   deepFreezeCadData(result); return result;
 }

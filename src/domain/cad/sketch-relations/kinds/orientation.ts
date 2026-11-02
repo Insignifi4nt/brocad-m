@@ -31,6 +31,7 @@ export const horizontal: CadSketchRelationDefinition<'horizontal'> = {
   ],
   lower: (relation, context) => context.offset(1, relation.pointIds[0], relation.pointIds[1]),
   check: (_, relation, points) => checkCadSketchPointPair(relation, points, (a, b) => Math.abs(a.y - b.y)),
+  remap: { roles: ['point', 'point'], direction: true, copy: { mirror: 'axes', offset: 'ends', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two points, such as the ends of a line, stay level.',
     meaning: 'Keeps two points at the same Y coordinate.' }
 };
@@ -46,6 +47,7 @@ export const vertical: CadSketchRelationDefinition<'vertical'> = {
   ],
   lower: (relation, context) => context.offset(0, relation.pointIds[0], relation.pointIds[1]),
   check: (_, relation, points) => checkCadSketchPointPair(relation, points, (a, b) => Math.abs(a.x - b.x)),
+  remap: { roles: ['point', 'point'], direction: true, copy: { mirror: 'axes', offset: 'ends', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two points, such as the ends of a line, stay upright.',
     meaning: 'Keeps two points at the same X coordinate.' }
 };
@@ -71,6 +73,7 @@ export const parallel: CadSketchRelationDefinition<'parallel'> = {
     context.emit('parallel', [...context.support(a), ...context.support(b)]);
   },
   check: (graph, relation, points) => checkCadSketchLineRelation(graph, relation, points),
+  remap: { roles: ['carrier', 'carrier'], copy: { mirror: 'follow', offset: 'follow', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two lines keep the same direction.',
     meaning: 'Keeps two line directions parallel.' }
 };
@@ -86,6 +89,7 @@ export const perpendicular: CadSketchRelationDefinition<'perpendicular'> = {
     context.emit('perpendicular', [...context.support(a), ...context.support(b)]);
   },
   check: (graph, relation, points) => checkCadSketchLineRelation(graph, relation, points),
+  remap: { roles: ['carrier', 'carrier'], copy: { mirror: 'follow', offset: 'follow', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two lines meet at a right angle.',
     meaning: 'Keeps two line directions at a right angle.' }
 };
@@ -103,6 +107,7 @@ export const collinear: CadSketchRelationDefinition<'collinear'> = {
     if (![b.startPointId, b.endPointId].some(pointId => pointId === a.startPointId || pointId === a.endPointId)) context.onSupport(b.startPointId, context.support(a));
   },
   check: (graph, relation, points) => checkCadSketchLineRelation(graph, relation, points),
+  remap: { roles: ['carrier', 'carrier'], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two lines lie on one infinite line.',
     meaning: 'Keeps two lines on the same infinite supporting line without joining endpoints or fixing lengths.' }
 };

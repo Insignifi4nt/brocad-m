@@ -20,6 +20,7 @@ export const equalLength: CadSketchRelationDefinition<'equal-length'> = {
     context.emit('equal-length', [...context.support(a), ...context.support(b)]);
   },
   check: (graph, relation, points, parameters) => checkCadSketchEqualRelation(graph, relation, points, parameters),
+  remap: { roles: ['extent', 'extent'], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two lines keep the same length.',
     meaning: 'Keeps two line lengths equal.' }
 };
@@ -35,6 +36,7 @@ export const equalRadius: CadSketchRelationDefinition<'equal-radius'> = {
     context.equalSizes(context.size(a), context.size(b));
   },
   check: (graph, relation, points, parameters) => checkCadSketchEqualRelation(graph, relation, points, parameters),
+  remap: { roles: ['carrier', 'carrier'], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two arcs or circles keep the same radius.',
     meaning: 'Keeps two circle or arc radii equal.' }
 };

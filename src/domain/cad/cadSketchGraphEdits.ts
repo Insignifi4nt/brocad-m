@@ -1,8 +1,9 @@
 import type { CadSketchFeature } from './cadDocument';
 import { CadError } from './cadError';
-import { parseCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
+import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
 import { cadSketchEntityPointIds, cadSketchRelationEntityIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
 import { cadSketchLinearPatternForSelection } from './cadSketchLinearPattern';
+import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRelationCopy } from './sketch-relations/cadSketchRelationRemap';
 
 /** Structural intent only. The shared preparation stage solves before complete-part acceptance. */
 export function appendCadSketchEntities({ sketch, geometry }: { sketch: CadSketchFeature; geometry: CadSketchGraph }): CadSketchFeature {
@@ -16,6 +17,28 @@ export function appendCadSketchEntities({ sketch, geometry }: { sketch: CadSketc
     entities: [...sketch.graph?.entities ?? [], ...geometry.entities],
     relations: [...sketch.graph?.relations ?? [], ...geometry.relations]
   }) };
+}
+
+/**
+ * The relations a copy carries onto it by each kind's rule (see `copyCadSketchRelations`), appended to the sketch the copy was added to,
+ * `source` being the graph before it. Each must hold on the copy as its source relation holds on the original: one that does not, where
+ * its source does, means the copy lost the geometry's exactness, and `precisionError` says so.
+ */
+export function appendCadSketchCopiedRelations(sketch: CadSketchFeature, source: CadSketchGraph, parameters: Readonly<Record<string, number>>,
+  copy: CadSketchRelationCopy, precisionError: () => CadError): CadSketchFeature {
+  const outcomes = copyCadSketchRelations(source, copy), relations = copiedCadSketchRelations(outcomes);
+  if (!relations.length || !sketch.graph) return sketch;
+  const profileIds = new Set(sketch.profiles.map(profile => profile.id));
+  for (const relation of relations) if (profileIds.has(relation.id)) throw new CadError('duplicate-sketch-id', `Sketch identity "${relation.id}" already belongs to a legacy profile.`);
+  const graph = parseCadSketchGraph({ ...sketch.graph, relations: [...sketch.graph.relations, ...relations] });
+  const from = new Map(outcomes.flatMap(item => item.kind === 'replace' ? item.relations.map(relation => [relation.id, item.relation.id] as const) : []));
+  const unmet = (issues: ReturnType<typeof checkCadSketchGraph>) => new Set(issues.flatMap(issue => issue.source.kind === 'relation' ? [issue.source.id] : []));
+  const lost = [...unmet(checkCadSketchGraph(graph, parameters))].filter(id => from.has(id));
+  if (lost.length) {
+    const unmetBefore = unmet(checkCadSketchGraph(source, parameters));
+    if (lost.some(id => !unmetBefore.has(from.get(id)!))) throw precisionError();
+  }
+  return { ...sketch, graph };
 }
 
 function requireGraph(sketch: CadSketchFeature): CadSketchGraph {

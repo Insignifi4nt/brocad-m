@@ -6,8 +6,8 @@ import { parseCadSketchGraph, type CadSketchGraph, type CadSketchGraphRelation }
 import { isCadImportData } from './cadImportData';
 import { compileCadSketchGraph } from './cadSketchGraphGeometry';
 import { cadPathClosureTolerance, cadPathTangentContact } from './cadAnalyticSegments';
-import { cadSketchEntityPointIds, cadSketchRelationEntityIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
-import { resolveCadSketchGraphJoints, resolveCadSketchPointIdentities } from './cadSketchGraphJoints';
+import { cadSketchEntityPointIds, cadSketchRelationPointIds } from './cadSketchGraphReferences';
+import { resolveCadSketchGraphJoints } from './cadSketchGraphJoints';
 import { evaluateCadScalar } from './cadExpression';
 import { classifyLineRayPathSegmentIntersection, classifyParameterizedPathSegmentIntersection } from '@/domain/path-intel/intersections';
 import { createArcSegment, createCircleSegment, createLineSegment, distance, pointOnArcAtParameter } from '@/domain/path-intel/segments';
@@ -15,6 +15,7 @@ import type { ArcPathSegment, CirclePathSegment, LinePathSegment, PathSegment, P
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
 import { cadSketchAxisNormal, isCadSketchVirtualAxisId, type CadSketchVirtualAxisId } from './sketch-relations/cadSketchVirtualElements';
+import { applyCadSketchRemapOutcomes, blockedCadSketchRemaps, cadSketchPointIdentities, remapCadSketchRelations, type CadSketchRemapOutcome, type CadSketchRemapPiece } from './sketch-relations/cadSketchRelationRemap';
 
 const strict = { additionalProperties: false }, id = CadIdentifierSchema;
 const parameter = Type.Number({ minimum: 0, maximum: 1 });
@@ -202,96 +203,63 @@ function extent(segment: PathSegment): Point2[] {
 function assertEndpointRange(point: Point2, operation: 'trim' | 'extend'): void {
   if (!Value.Check(boundary.properties.position, [point.x, point.y])) throw precision(operation);
 }
-function sameEndpointPair(edge: Pick<SourceLine, 'startPointId' | 'endPointId'>, pair: readonly string[]): boolean {
-  return pair.length === 2 && (edge.startPointId === pair[0] && edge.endPointId === pair[1] || edge.startPointId === pair[1] && edge.endPointId === pair[0]);
-}
-/** Relations that keep their meaning while the line keeps its support: its direction, and a point's distance from the support. */
-function retainedLineDirection(graph: CadSketchGraph, line: SourceLine, relation: CadSketchGraphRelation): boolean {
-  if (relation.kind === 'parallel' || relation.kind === 'perpendicular' || relation.kind === 'collinear' || relation.kind === 'point-line-distance') return true;
-  if (relation.kind !== 'horizontal' && relation.kind !== 'vertical') return false;
-  return !sameEndpointPair(line, relation.pointIds) || !graph.entities.some(other => other.id !== line.id
-    && other.kind !== 'circle' && sameEndpointPair(other, relation.pointIds));
-}
-function retainedArcRadius(entity: SourceEdge, relation: CadSketchGraphRelation): boolean {
-  return entity.kind === 'arc' && (relation.kind === 'radial-size' && relation.entityId === entity.id
-    || relation.kind === 'equal-radius' && relation.curveIds.includes(entity.id));
-}
-function assertDependencies(graph: CadSketchGraph, entityId: string, detached: readonly string[], operation: 'trim' | 'extend' = 'trim', retained?: SourceEdge) {
-  const owners = graph.relations.filter(relation => (cadSketchRelationEntityIds(relation).includes(entityId)
-    || cadSketchRelationPointIds(graph, relation).some(id => detached.includes(id)))
-    && !(relation.kind === 'reference-dimension' && (retained || !cadSketchRelationEntityIds(relation).includes(entityId)))
-    && !(retained && (retained.kind === 'line' ? retainedLineDirection(graph, retained, relation) : retainedArcRadius(retained, relation))));
-  const drivers = detached.filter(id => graph.points.find(point => point.id === id)?.position.some(value => typeof value === 'string')
-    || owners.some(relation => cadSketchRelationPointIds(graph, relation).includes(id)));
-  if (owners.length || drivers.length) throw operation === 'trim' ? new CadSketchTrimDependencyError(owners.map(relation => relation.id), drivers)
-    : new CadSketchExtendDependencyError(owners.map(relation => relation.id), drivers);
-}
 type SourceEntity = CadSketchGraph['entities'][number];
 /** What a trim does to its source: removes it, moves one end, removes an interior span, or opens a circle. */
 type TrimShape = { readonly kind: 'delete' } | { readonly kind: 'end'; readonly end: 'start' | 'end' } | { readonly kind: 'middle' } | { readonly kind: 'circle' };
-/** The points a relation names directly, rather than through the entities it names. */
-function relationPointOperands(relation: CadSketchGraphRelation): readonly string[] {
-  switch (relation.kind) {
-    case 'coincident': case 'horizontal': case 'vertical': case 'distance': case 'axis-distance': return relation.pointIds;
-    // Mirrored curves name their points through the curves.
-    case 'symmetric': return 'pointIds' in relation ? relation.pointIds : [];
-    case 'fixed-point': case 'fixed-axis': case 'midpoint': case 'point-on-line': case 'point-on-curve': case 'point-line-distance': case 'fillet-corner': case 'chamfer-corner': return [relation.pointId];
-    case 'reference-dimension': return relation.measurement.kind === 'point-distance' ? relation.measurement.pointIds
-      : relation.measurement.kind === 'point-line-distance' ? [relation.measurement.pointId] : [];
-    case 'tangent-joint': return relation.endpoints.map(endpoint => endpoint.pointId);
-    case 'line-angle': return relation.rays.map(ray => ray.towardPointId);
-    default: return [];
-  }
+// Stand-ins for the ids a request gives a trim's cuts and new piece, or an extension's new end, before it gives them. Ids never hold a
+// space, so a stand-in names nothing in the graph.
+const PENDING_CUTS = ['pending cut 0', 'pending cut 1'] as const, PENDING_PIECE = 'pending piece', PENDING_END = 'pending end';
+/** Each of `leaving` that no remaining edge uses, directly or through a point joined to it: it leaves with the edit. */
+function orphanedPoints(graph: CadSketchGraph, entity: SourceEntity, leaving: readonly string[], kept: readonly string[], identity: (id: string) => string): ReadonlySet<string> {
+  const used = new Set(graph.entities.flatMap(item => item.id === entity.id ? kept : cadSketchEntityPointIds(item))), live = new Set([...used].map(identity));
+  return new Set(leaving.filter(id => !used.has(id) && !live.has(identity(id))));
 }
-function namesEntity(relation: CadSketchGraphRelation, entityId: string): boolean {
-  return cadSketchRelationEntityIds(relation).includes(entityId) || relation.kind === 'line-angle' && relation.rays.some(ray => ray.lineId === entityId);
-}
-/** A fillet or chamfer corner whose rounding meets `pointId`, or that rounds `entityId` itself. */
-function cornerAt(graph: CadSketchGraph, relation: CadSketchGraphRelation, entityId: string, pointId: string): boolean {
-  if (relation.kind !== 'fillet-corner' && relation.kind !== 'chamfer-corner') return false;
-  const corner = graph.entities.find(item => item.id === (relation.kind === 'fillet-corner' ? relation.arcId : relation.chamferId));
-  return corner?.id === entityId || relation.pointId === pointId || Boolean(corner && cadSketchEntityPointIds(corner).includes(pointId));
-}
+const leave = (ids: Iterable<string>) => new Map([...ids].map(id => [id, null] as const));
+interface TrimRemap { readonly outcomes: readonly CadSketchRemapOutcome[]; readonly removedRelationIds: readonly string[]; readonly orphans: ReadonlySet<string> }
 /**
- * The relations and points that only describe the piece a trim removes; everything else stays. A point leaves with the
- * source only when no remaining edge uses it or a point coincident with it, and its relations leave with it. Relations of
- * the source itself stay while its support does, except those its changed extent would redefine. A cut at an existing point
- * becomes an endpoint of the source or its new piece, so a relation holding that point on the source's support leaves too.
- * Pattern and preceding-sketch owners generate the source, so they must be detached first.
+ * What a trim does to the relations on its source, by each kind's rule (see `remapCadSketchRelations`): the pieces that stay, with the
+ * span of the source each covers, and the points that leave, which no remaining edge uses or joins. The relations it blocks leave with
+ * the removed piece once the request confirms them; one it cannot confirm, such as a pattern's or linked reference's, refuses the trim
+ * until it is detached. `cuts` and `newEntityId` are the ids the request gives, or stand-ins before it gives them.
  */
-function trimRemovals(graph: CadSketchGraph, entity: SourceEntity, shape: TrimShape, cuts: readonly Witness[] = []): { readonly relationIds: readonly string[]; readonly pointIds: readonly string[] } {
-  const owners = graph.relations.filter(relation => (relation.kind === 'linear-pattern' || relation.kind === 'external-reference') && namesEntity(relation, entity.id));
-  if (owners.length) throw new CadSketchTrimDependencyError(owners.map(relation => relation.id), []);
-  const old = entity.kind === 'circle' ? null : shape.kind === 'end' ? shape.end === 'start' ? entity.startPointId : entity.endPointId : null;
-  const leaving = shape.kind === 'delete' ? cadSketchEntityPointIds(entity) : old ? [old] : [];
-  const used = new Set(graph.entities.flatMap(item => item.id === entity.id ? shape.kind === 'delete' ? [] : cadSketchEntityPointIds(item).filter(id => id !== old) : cadSketchEntityPointIds(item)));
-  const identity = resolveCadSketchPointIdentities(graph), live = new Set([...used].map(identity));
-  const orphans = new Set(leaving.filter(id => !used.has(id) && !live.has(identity(id))));
-  const line = entity.kind === 'line' ? entity : null;
-  const ownAxis = (relation: CadSketchGraphRelation) => line !== null && (relation.kind === 'horizontal' || relation.kind === 'vertical') && sameEndpointPair(line, relation.pointIds);
-  const cutKeys = new Set(cuts.flatMap(witness => witness.endpointPointId === undefined ? [] : [identity(witness.endpointPointId)]));
-  const removed = graph.relations.filter(relation => {
-    const named = namesEntity(relation, entity.id);
-    if (named && (relation.kind === 'point-on-line' || relation.kind === 'point-on-curve' || relation.kind === 'point-line-distance') && cutKeys.has(identity(relation.pointId))) return true;
-    // A mirror of curves pairs their ends, which any trim of one of them moves, and a trimmed circle is an arc, so it leaves with the trim.
-    if (relation.kind === 'symmetric' && 'curveIds' in relation && relation.curveIds.includes(entity.id)) return true;
-    if (shape.kind === 'delete') {
-      if (named) return true;
-      if (ownAxis(relation) && 'pointIds' in relation && !graph.entities.some(other => other.id !== entity.id && other.kind !== 'circle' && sameEndpointPair(other, relation.pointIds))) return true;
-    } else if (shape.kind === 'end' && old) {
-      if (named && (relation.kind === 'midpoint' || relation.kind === 'equal-length')) return true;
-      if (relation.kind === 'tangent-joint' && relation.endpoints.some(endpoint => endpoint.entityId === entity.id && endpoint.pointId === old)) return true;
-      if (named && cornerAt(graph, relation, entity.id, old)) return true;
-      // Its own axis relation and a ray toward the moved end follow that end to the cut.
-      if (ownAxis(relation)) return false;
-      if (relation.kind === 'line-angle') return relation.rays.some(ray => !(ray.lineId === entity.id && ray.towardPointId === old) && orphans.has(ray.towardPointId));
-    } else if (shape.kind === 'middle') {
-      if (named && (relation.kind === 'midpoint' || relation.kind === 'equal-length')) return true;
-      if (named && (relation.kind === 'fillet-corner' || relation.kind === 'chamfer-corner') && cornerAt(graph, relation, entity.id, '')) return true;
-    }
-    return relationPointOperands(relation).some(id => orphans.has(id));
-  });
-  return { relationIds: removed.map(relation => relation.id), pointIds: [...orphans] };
+function trimRemap(graph: CadSketchGraph, entity: SourceEntity, shape: TrimShape, witnesses: readonly Witness[], cuts: readonly string[], newEntityId: string): TrimRemap {
+  const identity = cadSketchPointIdentities(graph), own = cadSketchEntityPointIds(entity);
+  const old = entity.kind === 'circle' || shape.kind !== 'end' ? null : shape.end === 'start' ? entity.startPointId : entity.endPointId;
+  const orphans = shape.kind === 'delete' ? orphanedPoints(graph, entity, own, [], identity)
+    : old ? orphanedPoints(graph, entity, [old], own.filter(id => id !== old), identity) : new Set<string>();
+  const pieces = ((): readonly CadSketchRemapPiece[] => {
+    if (shape.kind === 'delete') return [];
+    const piece = (entityId: string, interval: readonly [number, number], ends: readonly [string, string]): CadSketchRemapPiece => ({ entityId, interval, orientation: 'same', ends });
+    const [first, second] = witnesses.map(witness => witness.parameter);
+    if (shape.kind === 'circle') return [piece(entity.id, [second, first < second ? first + 1 : first], [cuts[1], cuts[0]])];
+    if (entity.kind === 'circle') throw precision();
+    if (shape.kind === 'middle') return [piece(entity.id, [0, first], [entity.startPointId, cuts[0]]), piece(newEntityId, [second, 1], [cuts[1], entity.endPointId])];
+    return [shape.end === 'start' ? piece(entity.id, [first, 1], [cuts[0], entity.endPointId]) : piece(entity.id, [0, first], [entity.startPointId, cuts[0]])];
+  })();
+  const outcomes = remapCadSketchRelations(graph, { curves: new Map([[entity.id, pieces]]), points: leave(orphans), identity });
+  const blocked = blockedCadSketchRemaps(outcomes), refused = blocked.filter(item => !item.confirmable);
+  if (refused.length) throw new CadSketchTrimDependencyError(refused.map(item => item.relation.id), []);
+  return { outcomes, removedRelationIds: blocked.map(item => item.relation.id), orphans };
+}
+/** The cut ids a prepared trim names: an existing endpoint where it cuts at one, else a stand-in. */
+const pendingCuts = (witnesses: readonly Witness[]) => witnesses.map((witness, index) => witness.endpointPointId ?? PENDING_CUTS[index]);
+/**
+ * What an extension does to the relations on its source: the piece reaches past the moved end, which goes to `endPointId`, and the old
+ * end leaves unless another edge uses or joins it. Every relation it blocks refuses the extension, as does an old end that leaves while an
+ * expression places it, or that a blocked relation names, since the extension would drop that driver.
+ */
+function extendRemap(graph: CadSketchGraph, entity: SourceEdge, end: 'start' | 'end', endPointId: string): readonly CadSketchRemapOutcome[] {
+  const identity = cadSketchPointIdentities(graph), old = end === 'start' ? entity.startPointId : entity.endPointId;
+  const orphans = orphanedPoints(graph, entity, [old], cadSketchEntityPointIds(entity).filter(id => id !== old), identity);
+  const piece: CadSketchRemapPiece = { entityId: entity.id, interval: end === 'end' ? [0, 2] : [-1, 1], orientation: 'same',
+    ends: end === 'end' ? [entity.startPointId, endPointId] : [endPointId, entity.endPointId] };
+  const outcomes = remapCadSketchRelations(graph, { curves: new Map([[entity.id, [piece]]]), points: leave(orphans), identity });
+  const blocked = blockedCadSketchRemaps(outcomes);
+  // An old end another edge keeps stays where it is, expression and all; only one the extension removes loses its expression.
+  const drivers = [old].filter(id => orphans.has(id) && graph.points.find(point => point.id === id)?.position.some(value => typeof value === 'string')
+    || blocked.some(item => cadSketchRelationPointIds(graph, item.relation).includes(id)));
+  if (blocked.length || drivers.length) throw new CadSketchExtendDependencyError(blocked.map(item => item.relation.id), drivers);
+  return outcomes;
 }
 function partition(segment: OpenSegment, point: Point2, t: number): readonly [OpenSegment, OpenSegment] {
   const minimum = Math.max(CAD_PRECISION.minimumLengthMm, cadPathClosureTolerance([segment.start, point, segment.end]));
@@ -348,7 +316,7 @@ function middleArcPieces(segment: ArcPathSegment, left: Event, right: Event) {
 function boundaryEvents(graph: CadSketchGraph, parameters: Readonly<Record<string, number>>, segments: readonly PathSegment[], query: BoundaryQuery): Event[] {
   const { segment } = query, operation = query.kind;
   const numericPoints = new Map(graph.points.map(point => [point.id, { x: evaluateCadScalar(point.position[0], parameters), y: evaluateCadScalar(point.position[1], parameters) }]));
-  const joint = resolveCadSketchGraphJoints(graph, numericPoints), events: Event[] = [];
+  const joint = resolveCadSketchGraphJoints(graph, numericPoints, cadSketchPointIdentities(graph)), events: Event[] = [];
   const support = query.kind === 'extend' && segment.kind === 'arc'
     ? createCircleSegment({ id: segment.id, source: segment.source, center: segment.center, radius: segment.radius }) : null;
   const endpointIds = (id: string) => { const entity = graph.entities.find(item => item.id === id); return entity && entity.kind !== 'circle' ? [entity.startPointId, entity.endPointId] : []; };
@@ -539,16 +507,8 @@ function replaceEndpoint(graph: CadSketchGraph, parameters: Readonly<Record<stri
   witness: Witness, pointId: string, operation: 'trim' | 'extend'): CadSketchGraph {
   const endpoint = witness.endpointPointId;
   if (endpoint !== undefined && pointId !== endpoint) throw new CadError(`invalid-sketch-${operation}-point`, 'Use the exact witnessed boundary endpoint identity.');
-  const source = graph.entities.find(entity => entity.id === entityId), line = source?.kind === 'line' ? source : null;
-  // A surviving line explicitly transfers only its own endpoint-pair axis relation, unless another edge shares that pair.
-  // Adjacent axis operands keep the detached old point; scalar/attachment drivers never transfer.
-  const relations = line ? graph.relations.map((relation): CadSketchGraphRelation => {
-    if ((relation.kind !== 'horizontal' && relation.kind !== 'vertical') || !sameEndpointPair(line, relation.pointIds)
-      || graph.entities.some(other => other.id !== line.id && other.kind !== 'circle' && sameEndpointPair(other, relation.pointIds))) return relation;
-    const old = end === 'start' ? line.startPointId : line.endPointId;
-    return { ...relation, pointIds: [relation.pointIds[0] === old ? pointId : relation.pointIds[0], relation.pointIds[1] === old ? pointId : relation.pointIds[1]] };
-  }) : graph.relations;
-  const candidate = parseCadSketchGraph({ ...graph, relations,
+  const source = graph.entities.find(entity => entity.id === entityId);
+  const candidate = parseCadSketchGraph({ ...graph,
     points: endpoint === undefined ? [...graph.points, { id: pointId, position: witness.position }] : graph.points,
     entities: graph.entities.map(entity => entity.id === entityId ? { ...entity, [end === 'start' ? 'startPointId' : 'endPointId']: pointId } : entity) });
   compileCadSketchGraph(candidate, parameters);
@@ -556,7 +516,7 @@ function replaceEndpoint(graph: CadSketchGraph, parameters: Readonly<Record<stri
 }
 
 /** Relations that leave with the removed piece; omitted when there are none so plain trims keep their request shape. */
-const removals = ({ relationIds }: { readonly relationIds: readonly string[] }) => relationIds.length ? { removedRelationIds: [...relationIds] } : {};
+const removals = ({ removedRelationIds }: { readonly removedRelationIds: readonly string[] }) => removedRelationIds.length ? { removedRelationIds: [...removedRelationIds] } : {};
 
 /**
  * One clicked span between its nearest cuts; only the relations of the removed piece go with it. Drawn edges cut, and the H and V axes
@@ -580,7 +540,7 @@ export function prepareCadSketchTrim({ graph: input, parameters, entityId, param
     : isCadSketchVirtualAxisId(event.boundary.id) ? { kind: 'fixed-axis', axis: cadSketchAxisNormal(event.boundary.id), value: 0 }
     : event.boundary.kind === 'line' ? { kind: 'point-on-line', lineId: event.boundary.id } : { kind: 'point-on-curve', curveId: event.boundary.id };
   if (!unique.length) {
-    const result: CadSketchEndTrimPreparation = { target: { kind: 'delete', entityId, parameter: pick, ...removals(trimRemovals(graph, entity, { kind: 'delete' })) }, removed: segment,
+    const result: CadSketchEndTrimPreparation = { target: { kind: 'delete', entityId, parameter: pick, ...removals(trimRemap(graph, entity, { kind: 'delete' }, [], [], PENDING_PIECE)) }, removed: segment,
       survivor: null, boundary: null, point: null, attachment: null };
     deepFreezeCadData(result); return result;
   }
@@ -600,7 +560,7 @@ export function prepareCadSketchTrim({ graph: input, parameters, entityId, param
     bounds(previous, next);
     const [removed, survivor] = circlePieces(segment, previous, next);
     const result: CadSketchCircleTrimPreparation = { target: { kind: 'circle', entityId, parameter: pick,
-      boundaries: [previous.witness, next.witness], ...removals(trimRemovals(graph, entity, { kind: 'circle' }, [previous.witness, next.witness])) }, removed, survivor,
+      boundaries: [previous.witness, next.witness], ...removals(trimRemap(graph, entity, { kind: 'circle' }, [previous.witness, next.witness], pendingCuts([previous.witness, next.witness]), PENDING_PIECE)) }, removed, survivor,
       cuts: [{ boundary: previous.boundary, point: [previous.point.x, previous.point.y] }, { boundary: next.boundary, point: [next.point.x, next.point.y] }],
       attachments: [attach(previous), attach(next)] };
     deepFreezeCadData(result); return result;
@@ -616,7 +576,7 @@ export function prepareCadSketchTrim({ graph: input, parameters, entityId, param
     const minimum = Math.max(CAD_PRECISION.minimumLengthMm, cadPathClosureTolerance([segment.start, left.point, right.point, segment.end]));
     if (distance(segment.start, left.point) <= minimum || distance(left.point, right.point) <= minimum || distance(right.point, segment.end) <= minimum) throw precision();
     const contacts: MiddleTrimContacts = {
-      target: { kind: 'middle', entityId, parameter: pick, boundaries: [left.witness, right.witness], ...removals(trimRemovals(graph, entity, { kind: 'middle' }, [left.witness, right.witness])) },
+      target: { kind: 'middle', entityId, parameter: pick, boundaries: [left.witness, right.witness], ...removals(trimRemap(graph, entity, { kind: 'middle' }, [left.witness, right.witness], pendingCuts([left.witness, right.witness]), PENDING_PIECE)) },
       cuts: [{ boundary: left.boundary, point: [left.point.x, left.point.y] }, { boundary: right.boundary, point: [right.point.x, right.point.y] }],
       attachments: [attach(left), attach(right)]
     };
@@ -629,7 +589,7 @@ export function prepareCadSketchTrim({ graph: input, parameters, entityId, param
   const event = end === 'start' ? first : last;
   bounds(event);
   const pieces = partition(segment, event.point, event.witness.parameter);
-  const result: CadSketchEndTrimPreparation = { target: { kind: 'end', entityId, parameter: pick, end, boundary: event.witness, ...removals(trimRemovals(graph, entity, { kind: 'end', end }, [event.witness])) },
+  const result: CadSketchEndTrimPreparation = { target: { kind: 'end', entityId, parameter: pick, end, boundary: event.witness, ...removals(trimRemap(graph, entity, { kind: 'end', end }, [event.witness], pendingCuts([event.witness]), PENDING_PIECE)) },
     removed: pieces[end === 'start' ? 0 : 1], survivor: pieces[end === 'start' ? 1 : 0], boundary: event.boundary,
     point: [event.point.x, event.point.y], attachment: attach(event) };
   deepFreezeCadData(result); return result;
@@ -643,7 +603,7 @@ export function trimCadSketchEntity({ graph: input, parameters, trim }: Source &
   if (!isCadImportData(trim) || !Value.Check(CadSketchTrimTargetSchema, trim)) throw new CadError('invalid-sketch-trim', 'Choose one complete trim request.');
   const axes = namedAxes(trim.kind === 'delete' ? [] : trim.kind === 'end' ? [trim.boundary] : trim.boundaries);
   const graph = parseCadSketchGraph(input), prepared = prepareCadSketchTrim({ graph, parameters, entityId: trim.entityId, parameter: trim.parameter, axes });
-  const removedRelationIds = trim.removedRelationIds ?? [], confirmed = removals({ relationIds: removedRelationIds });
+  const removedRelationIds = trim.removedRelationIds ?? [], confirmed = removals({ removedRelationIds });
   const target = trim.kind === 'delete' ? { kind: trim.kind, entityId: trim.entityId, parameter: trim.parameter, ...confirmed } : trim.kind === 'end'
     ? { kind: trim.kind, entityId: trim.entityId, parameter: trim.parameter, end: trim.end, boundary: trim.boundary, ...confirmed }
     : { kind: trim.kind, entityId: trim.entityId, parameter: trim.parameter, boundaries: trim.boundaries, ...confirmed };
@@ -653,15 +613,23 @@ export function trimCadSketchEntity({ graph: input, parameters, trim }: Source &
       throw new CadError('unconfirmed-sketch-trim-removals', `This trim removes ${expected.length === 1 ? 'one relation' : `${expected.length} relations`} with its piece${expected.length ? `: ${expected.join(', ')}` : ''}. Send exactly these IDs as removedRelationIds to confirm.`);
     throw new CadError('stale-sketch-trim', 'The trim boundary changed. Choose the portion again.');
   }
-  const source = graph.entities.find(entity => entity.id === trim.entityId)!, removed = new Set(removedRelationIds);
-  const kept = graph.relations.filter(relation => !removed.has(relation.id));
+  const source = graph.entities.find(entity => entity.id === trim.entityId)!;
+  // The request's own cut and piece ids, which the preview stood in for: the same relations block, so its confirmation stands. A cut at
+  // an existing endpoint keeps that endpoint, which the checks below hold the request to.
+  const shape: TrimShape = trim.kind === 'end' ? { kind: 'end', end: trim.end } : { kind: trim.kind };
+  const witnesses = trim.kind === 'delete' ? [] : trim.kind === 'end' ? [trim.boundary] : trim.boundaries;
+  const cuts = trim.kind === 'delete' ? [] : trim.kind === 'end' ? [trim.cutPointId] : trim.cutPointIds;
+  const remap = trimRemap(graph, source, shape, witnesses, witnesses.map((witness, index) => witness.endpointPointId ?? cuts[index]),
+    trim.kind === 'middle' ? trim.newEntityId : PENDING_PIECE);
+  if (!Value.Equal(remap.removedRelationIds, removedRelationIds)) throw new CadError('stale-sketch-trim', 'The trim boundary changed. Choose the portion again.');
+  const kept = applyCadSketchRemapOutcomes(graph.relations, remap.outcomes);
   const attach = (relationId: string | null | undefined, attachment: CadSketchTrimAttachment | null, pointId: string): CadSketchGraphRelation[] => {
     if (relationId === undefined || relationId === null) return [];
     if (attachment === null) throw new CadError('invalid-sketch-trim-attachment', 'Only a new cut inside a cutting edge can stay on that edge.');
     return [{ id: relationId, pointId, ...attachment }];
   };
   if (trim.kind === 'delete') {
-    const orphans = new Set(trimRemovals(graph, source, { kind: 'delete' }).pointIds);
+    const orphans = remap.orphans;
     return Object.freeze({ graph: withoutDetachedPoints(parseCadSketchGraph({ points: graph.points.filter(point => !orphans.has(point.id)),
       entities: graph.entities.filter(entity => entity.id !== trim.entityId), relations: kept }), cadSketchEntityPointIds(source)),
     retainedEntityId: null, removedEntityId: trim.entityId, cutPointId: null });
@@ -673,7 +641,7 @@ export function trimCadSketchEntity({ graph: input, parameters, trim }: Source &
     if (circle.kind !== 'circle' || !('survivor' in prepared) || prepared.survivor?.kind !== 'arc') throw precision();
     for (const [index, witness] of trim.boundaries.entries()) if (witness.endpointPointId !== undefined && trim.cutPointIds[index] !== witness.endpointPointId)
       throw new CadError('invalid-sketch-trim-point', 'Use the exact witnessed boundary endpoint identity.');
-    const joint = resolveCadSketchPointIdentities(graph), keys = trim.boundaries.map((witness, index) => witness.endpointPointId === undefined
+    const joint = cadSketchPointIdentities(graph), keys = trim.boundaries.map((witness, index) => witness.endpointPointId === undefined
       ? trim.cutPointIds[index] : joint(trim.cutPointIds[index]));
     if (keys[0] === keys[1] || keys.includes(joint(circle.centerPointId))) throw new CadError('invalid-sketch-trim-point', 'The circle cuts and center need distinct point identities.');
     const candidate = parseCadSketchGraph({ ...graph,
@@ -693,35 +661,17 @@ export function trimCadSketchEntity({ graph: input, parameters, trim }: Source &
     for (const [index, witness] of trim.boundaries.entries()) if (witness.endpointPointId !== undefined && trim.cutPointIds[index] !== witness.endpointPointId)
       throw new CadError('invalid-sketch-trim-point', 'Use the exact witnessed boundary endpoint identity.');
     if (source.kind === 'arc') {
-      const joint = resolveCadSketchPointIdentities(graph), outer = [source.centerPointId, source.startPointId, source.endPointId].map(joint);
+      const joint = cadSketchPointIdentities(graph), outer = [source.centerPointId, source.startPointId, source.endPointId].map(joint);
       const cuts = trim.boundaries.map((witness, index) => witness.endpointPointId === undefined ? trim.cutPointIds[index] : joint(trim.cutPointIds[index]));
       if (cuts[0] === cuts[1] || cuts.some(cut => outer.includes(cut))) throw new CadError('invalid-sketch-trim-point', 'Arc cuts need distinct identities from the original center and endpoints.');
     }
     const support: CadSketchGraphRelation = source.kind === 'line' ? { id: trim.supportRelationId, kind: 'collinear', lineIds: [source.id, trim.newEntityId] }
       : { id: trim.supportRelationId, kind: 'equal-radius', curveIds: [source.id, trim.newEntityId] };
-    // Joints, corners and rays at the source's end now belong to the end-side piece.
-    const end = source.endPointId, moved = (lineId: string) => lineId === source.id ? trim.newEntityId : lineId;
-    const relations = kept.map((relation): CadSketchGraphRelation => {
-      if (relation.kind === 'tangent-joint') return { ...relation, endpoints: [relation.endpoints[0], relation.endpoints[1]].map(endpoint =>
-        endpoint.entityId === source.id && endpoint.pointId === end ? { ...endpoint, entityId: trim.newEntityId } : endpoint) as [typeof relation.endpoints[0], typeof relation.endpoints[1]] };
-      if ((relation.kind === 'fillet-corner' || relation.kind === 'chamfer-corner') && relation.lineIds.includes(source.id) && cornerAt(graph, relation, '', end)) {
-        const lineIds = [moved(relation.lineIds[0]), moved(relation.lineIds[1])], swap = lineIds[0] > lineIds[1];
-        const ordered: [string, string] = swap ? [lineIds[1], lineIds[0]] : [lineIds[0], lineIds[1]];
-        // A chamfer's setbacks, and where each is drawn, stay with their lines.
-        const sides = relation.kind === 'chamfer-corner' && swap ? relation.annotation?.sides : undefined;
-        return relation.kind === 'fillet-corner' ? { ...relation, lineIds: ordered }
-          : { ...relation, lineIds: ordered, values: swap ? [relation.values[1], relation.values[0]] : relation.values,
-            ...(sides ? { annotation: { kind: 'setbacks' as const, sides: [sides[1], sides[0]] as const } } : {}) };
-      }
-      if (relation.kind === 'line-angle') return { ...relation, rays: [relation.rays[0], relation.rays[1]].map(ray =>
-        ray.lineId === source.id && ray.towardPointId === end ? { ...ray, lineId: trim.newEntityId } : ray) as [typeof relation.rays[0], typeof relation.rays[1]] };
-      return relation;
-    });
     const candidate = parseCadSketchGraph({ ...graph,
       points: [...graph.points, ...trim.boundaries.flatMap((witness, index) => witness.endpointPointId === undefined ? [{ id: trim.cutPointIds[index], position: witness.position }] : [])],
       entities: graph.entities.flatMap(entity => entity.id === source.id ? [{ ...source, endPointId: trim.cutPointIds[0] },
         { ...source, id: trim.newEntityId, startPointId: trim.cutPointIds[1] }] : [entity]),
-      relations: [...relations, support, ...attachments(trim.attachRelationIds, trim.cutPointIds)] });
+      relations: [...kept, support, ...attachments(trim.attachRelationIds, trim.cutPointIds)] });
     const compiled = compileCadSketchGraph(candidate, parameters);
     if (source.kind === 'arc' && 'survivors' in prepared) for (const [index, expected] of prepared.survivors.entries()) {
       const actual = compiled.segments.find(segment => segment.id === (index === 0 ? source.id : trim.newEntityId));
@@ -731,11 +681,7 @@ export function trimCadSketchEntity({ graph: input, parameters, trim }: Source &
     return Object.freeze({ graph: candidate, retainedEntityId: source.id, removedEntityId: null,
       cutPointIds: Object.freeze([trim.cutPointIds[0], trim.cutPointIds[1]] satisfies [string, string]), newEntityId: trim.newEntityId });
   }
-  // A ray toward the moved end follows it to the cut.
-  const old = trim.end === 'start' ? source.startPointId : source.endPointId;
-  const relations = kept.map((relation): CadSketchGraphRelation => relation.kind === 'line-angle' ? { ...relation, rays: [relation.rays[0], relation.rays[1]].map(ray =>
-    ray.lineId === source.id && ray.towardPointId === old ? { ...ray, towardPointId: trim.cutPointId } : ray) as [typeof relation.rays[0], typeof relation.rays[1]] } : relation);
-  const candidate = replaceEndpoint({ ...graph, relations: [...relations, ...attach(trim.attachRelationId, 'attachment' in prepared ? prepared.attachment : null, trim.cutPointId)] },
+  const candidate = replaceEndpoint({ ...graph, relations: [...kept, ...attach(trim.attachRelationId, 'attachment' in prepared ? prepared.attachment : null, trim.cutPointId)] },
     parameters, trim.entityId, trim.end, trim.boundary, trim.cutPointId, 'trim');
   return Object.freeze({ graph: candidate, retainedEntityId: trim.entityId, removedEntityId: null, cutPointId: trim.cutPointId });
 }
@@ -753,7 +699,7 @@ export function prepareCadSketchExtend({ graph: input, parameters, entityId, end
   if (!entity || entity.kind !== 'arc') throw new CadError('invalid-sketch-extend-target', 'Extend needs an existing line or open arc.');
   const geometry = compileCadSketchGraph(graph, parameters), segment = geometry.segments.find(item => item.id === entityId);
   if (!segment || segment.kind !== 'arc') throw precision('extend');
-  assertDependencies(graph, entityId, [end === 'start' ? entity.startPointId : entity.endPointId], 'extend', entity);
+  extendRemap(graph, entity, end, PENDING_END);
   const events = boundaryEvents(graph, parameters, geometry.segments, { kind: 'extend', segment, end, axes }), event = end === 'start' ? events.at(-1) : events[0];
   if (!event) throw new CadError('missing-sketch-extend-boundary', `No finite boundary${axes.length ? ' or named axis' : ''} intersects the unused circular support beyond this endpoint.`);
   assertEndpointRange(event.point, 'extend');
@@ -761,7 +707,7 @@ export function prepareCadSketchExtend({ graph: input, parameters, entityId, end
   const tolerance = cadPathClosureTolerance([segment.center, segment.start, segment.end, event.point]), minimum = Math.max(CAD_PRECISION.minimumLengthMm, tolerance);
   if (distance(current, event.point) <= minimum || distance(opposite, event.point) <= minimum) throw precision('extend');
   if (event.witness.endpointPointId !== undefined) {
-    const joint = resolveCadSketchPointIdentities(graph), key = joint(event.witness.endpointPointId);
+    const joint = cadSketchPointIdentities(graph), key = joint(event.witness.endpointPointId);
     if (key === joint(entity.centerPointId) || key === joint(end === 'start' ? entity.endPointId : entity.startPointId)) throw precision('extend');
   }
   const make = (start: Point2, finish: Point2) => createArcSegment({ id: segment.id, source: segment.source, center: segment.center,
@@ -770,6 +716,8 @@ export function prepareCadSketchExtend({ graph: input, parameters, entityId, end
   const added = make(end === 'start' ? event.point : current, end === 'start' ? current : event.point);
   const expected = segment.sweepRadians * (end === 'start' ? 1 - event.witness.parameter : event.witness.parameter);
   checkArcPiece(segment, extended, expected, tolerance, 'extend'); checkArcPiece(segment, added, expected - segment.sweepRadians, tolerance, 'extend');
+  // An end at an existing point may meet a point a relation keeps off this curve.
+  if (event.witness.endpointPointId !== undefined) extendRemap(graph, entity, end, event.witness.endpointPointId);
   const result: CadSketchArcExtendPreparation = { target: { kind: 'arc', entityId, end, boundary: event.witness }, added, extended,
     boundary: event.boundary, point: [event.point.x, event.point.y] };
   deepFreezeCadData(result); return result;
@@ -780,7 +728,7 @@ function prepareLineExtend(graph: CadSketchGraph, parameters: Readonly<Record<st
   const entityId = entity.id;
   const geometry = compileCadSketchGraph(graph, parameters), segment = geometry.segments.find(item => item.id === entityId);
   if (!segment || segment.kind !== 'line') throw new CadError('invalid-sketch-extend-target', 'This extension supports an existing line endpoint.');
-  assertDependencies(graph, entityId, [end === 'start' ? entity.startPointId : entity.endPointId], 'extend', entity);
+  extendRemap(graph, entity, end, PENDING_END);
   const events = boundaryEvents(graph, parameters, geometry.segments, { kind: 'extend', segment, end, axes });
   const event = end === 'start' ? events.at(-1) : events[0];
   if (!event) throw new CadError('missing-sketch-extend-boundary', `No finite boundary${axes.length ? ' or named axis' : ''} intersects this line beyond the selected endpoint.`);
@@ -789,6 +737,7 @@ function prepareLineExtend(graph: CadSketchGraph, parameters: Readonly<Record<st
   if (distance(original, event.point) <= Math.max(CAD_PRECISION.minimumLengthMm, cadPathClosureTolerance([segment.start, segment.end, event.point]))) throw precision('extend');
   const extended = createLineSegment({ ...segment, [end]: event.point });
   const added = createLineSegment({ ...segment, start: end === 'start' ? event.point : original, end: end === 'start' ? original : event.point });
+  if (event.witness.endpointPointId !== undefined) extendRemap(graph, entity, end, event.witness.endpointPointId);
   const result: CadSketchLineExtendPreparation = { target: { kind: 'line', entityId, end, boundary: event.witness }, added, extended,
     boundary: event.boundary, point: [event.point.x, event.point.y] };
   deepFreezeCadData(result); return result;
@@ -804,11 +753,12 @@ export function extendCadSketchEntity({ graph: input, parameters, extend }: Sour
   if (source.kind === 'arc') {
     if (extend.boundary.endpointPointId !== undefined && endPointId !== extend.boundary.endpointPointId)
       throw new CadError('invalid-sketch-extend-point', 'Use the exact witnessed boundary endpoint identity.');
-    const joint = resolveCadSketchPointIdentities(graph), key = extend.boundary.endpointPointId === undefined ? endPointId : joint(endPointId);
+    const joint = cadSketchPointIdentities(graph), key = extend.boundary.endpointPointId === undefined ? endPointId : joint(endPointId);
     if (key === joint(source.centerPointId) || key === joint(extend.end === 'start' ? source.endPointId : source.startPointId))
       throw new CadError('invalid-sketch-extend-point', 'The arc endpoint needs a distinct identity from its center and opposite endpoint.');
   }
-  const candidate = replaceEndpoint(graph, parameters, extend.entityId, extend.end, extend.boundary, endPointId, 'extend');
+  const relations = applyCadSketchRemapOutcomes(graph.relations, extendRemap(graph, source, extend.end, endPointId));
+  const candidate = replaceEndpoint({ ...graph, relations }, parameters, extend.entityId, extend.end, extend.boundary, endPointId, 'extend');
   if (prepared.extended.kind === 'arc') {
     const actual = compileCadSketchGraph(candidate, parameters).segments.find(segment => segment.id === extend.entityId), expected = prepared.extended;
     if (actual?.kind !== 'arc') throw precision('extend');

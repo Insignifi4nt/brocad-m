@@ -1,0 +1,20 @@
+{
+  "sourceCommit": "9b236720",
+  "records": 797,
+  "operations": {
+    "extend": 45,
+    "extend-prepare": 130,
+    "mirror": 32,
+    "offset": 55,
+    "pattern-reconcile": 39,
+    "profile-copy": 31,
+    "split": 74,
+    "trim": 119,
+    "trim-prepare": 272
+  },
+  "jsonBytes": 806185,
+  "gzipBytes": 54134,
+  "jsonSha256": "cea042d23fd4a17b6fa40afcc1a118baf570aceaf94475358f7607b40ce29065",
+  "gzipSha256": "8cf55193123a4595009087a9751da7d7066d1f92f3b4d7b92b5242b7ac5c317b",
+  "steps": "See scripts/record-sketch-relation-remap-parity.mjs."
+}

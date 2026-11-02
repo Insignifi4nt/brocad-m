@@ -4,7 +4,7 @@ import { cadSketchRelationEntityIds, cadSketchRelationPointIds, mapCadSketchRela
 import { tangentJoint, tangentPart, tangentSketch } from './cadSketchTangentFixtures';
 import { CadSketchTangentOwnershipError, resolveCadSketchTangentJoint } from '../cadSketchTangentRelations';
 import { deleteCadSketchElements } from '../cadSketchGraphEdits';
-import { splitCadSketchEntity, CadSketchSplitDependencyError } from '../cadSketchSplit';
+import { splitCadSketchEntity } from '../cadSketchSplit';
 import { createCadSketchCornerTreatment } from '../cadSketchCornerTreatment';
 import { resolveCadSketchCornerTopology } from '../cadSketchCornerGeometry';
 import { applyCadEdits } from '../cadOperations';
@@ -90,8 +90,9 @@ describe('declared line–arc tangent joints', () => {
     for (const entityId of ['line', 'arc']) expect(() => deleteCadSketchElements({ sketch, pointIds: [], entityIds: [entityId], relationIds: [], cascade: false })).toThrow();
     expect(() => deleteCadSketchElements({ sketch, pointIds: ['c'], entityIds: [], relationIds: [], cascade: false })).toThrow();
     expect(deleteCadSketchElements({ sketch, pointIds: [], entityIds: ['line'], relationIds: [], cascade: true }).graph?.relations).toEqual([]);
-    expect(() => splitCadSketchEntity({ graph: sketch.graph, parameters: { bendRadius: 5 }, split: { kind: 'arc', entityId: 'arc', parameter: .5,
-      splitPointId: 'cut', newEntityId: 'after' } })).toThrow(CadSketchSplitDependencyError);
+    // The joint is at the arc's start, which the piece keeping the arc's id still holds.
+    expect(splitCadSketchEntity({ graph: sketch.graph, parameters: { bendRadius: 5 }, split: { kind: 'arc', entityId: 'arc', parameter: .5,
+      splitPointId: 'cut', newEntityId: 'after' } }).graph.relations).toEqual([tangentJoint]);
     const row = rowSketch(applyCadEdits(circleRowPart(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: circleRow }]));
     // Even an arc CENTER is an owned support, not just the named contact endpoint.
     expect(() => parseCadSketchGraph({ ...row.graph, points: [...row.graph.points, { id: 'a', position: [15, 0] }, { id: 'j', position: [25, 0] }, { id: 'e', position: [35, 10] }],

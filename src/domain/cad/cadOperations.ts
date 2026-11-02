@@ -58,7 +58,8 @@ export type CadEdit =
   | { readonly kind: 'delete-sketch-elements'; readonly sketchId: string; readonly pointIds: readonly string[]; readonly entityIds: readonly string[]; readonly relationIds: readonly string[]; readonly cascade: boolean }
   | { readonly kind: 'set-sketch-construction'; readonly sketchId: string; readonly entityIds: readonly string[]; readonly construction: boolean }
   | { readonly kind: 'move-sketch-point'; readonly sketchId: string; readonly pointId: string; readonly translation: CadPoint2 }
-  | { readonly kind: 'set-sketch-relation'; readonly sketchId: string; readonly relation: CadSketchGraphRelation }
+  /** `copyRelations` applies to a linear-pattern owner only: each occurrence it creates copies the seed's reference dimensions. */
+  | { readonly kind: 'set-sketch-relation'; readonly sketchId: string; readonly relation: CadSketchGraphRelation; readonly copyRelations?: boolean }
   | { readonly kind: 'remove-sketch-relation'; readonly sketchId: string; readonly relationId: string }
   | { readonly kind: 'rename-document'; readonly name: string };
 
@@ -96,7 +97,8 @@ export const CadEditSchema = Type.Union([
   Type.Object({ kind: Type.Literal('delete-sketch-elements'), sketchId: identifier, pointIds: Type.Array(identifier, { uniqueItems: true }), entityIds: Type.Array(identifier, { uniqueItems: true }), relationIds: Type.Array(identifier, { uniqueItems: true }), cascade: Type.Boolean() }, strict),
   Type.Object({ kind: Type.Literal('set-sketch-construction'), sketchId: identifier, entityIds: Type.Array(identifier, { uniqueItems: true }), construction: Type.Boolean() }, strict),
   Type.Object({ kind: Type.Literal('move-sketch-point'), sketchId: identifier, pointId: identifier, translation: CadPoint2Schema }, strict),
-  Type.Object({ kind: Type.Literal('set-sketch-relation'), sketchId: identifier, relation: CadSketchGraphSchema.properties.relations.items }, strict),
+  Type.Object({ kind: Type.Literal('set-sketch-relation'), sketchId: identifier, relation: CadSketchGraphSchema.properties.relations.items,
+    copyRelations: Type.Optional(Type.Boolean()) }, strict),
   Type.Object({ kind: Type.Literal('remove-sketch-relation'), sketchId: identifier, relationId: identifier }, strict),
   Type.Object({ kind: Type.Literal('rename-document'), name: Type.String({ minLength: 1, maxLength: 160, pattern: '\\S' }) }, strict)
 ]);
@@ -175,7 +177,11 @@ export function validateCadEditBatch(edits: readonly CadEdit[]): void {
   if (!isCadImportData(edits) || !Array.isArray(edits)) throw new CadError('invalid-edit', 'CAD edits must contain their own complete JSON data fields.');
   if (edits.length > 256) throw new CadError('edit-limit', 'An edit batch may contain at most 256 edits.');
   for (const edit of edits) { refuseReservedSketchIds(edit); refuseFixedSketchElements(edit); }
-  for (const edit of edits) if (!Value.Check(CadEditSchema, edit)) throw new CadError('invalid-edit', 'Malformed CAD edit.');
+  for (const edit of edits) {
+    if (!Value.Check(CadEditSchema, edit)) throw new CadError('invalid-edit', 'Malformed CAD edit.');
+    if (edit.kind === 'set-sketch-relation' && edit.copyRelations !== undefined && edit.relation.kind !== 'linear-pattern')
+      throw new CadError('invalid-edit', 'copyRelations applies only to a linear-pattern owner, whose new occurrences copy the seed\'s reference dimensions.');
+  }
 }
 
 /** Internal unsolved intent stage. Only parseCadDocument may accept its result. */
@@ -302,13 +308,16 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
       case 'offset-sketch-loop': {
         const index = indexOf(edit.sketchId), sketch = features[index];
         if (sketch.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to offset.');
-        features[index] = prepareCadSketchOffset({ sketch, parameters, source: edit.source, distance: edit.distance, idPrefix: edit.idPrefix }).sketch;
+        // The edit is the shared request plus its sketch, so a proposal.offset preview and this commit read the same fields.
+        const { kind: _kind, sketchId: _sketchId, ...request } = edit;
+        features[index] = prepareCadSketchOffset({ sketch, parameters, ...request }).sketch;
         break;
       }
       case 'mirror-sketch-geometry': {
         const index = indexOf(edit.sketchId), sketch = features[index];
         if (sketch.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to mirror.');
-        features[index] = prepareCadSketchMirror({ sketch, parameters, entityIds: edit.entityIds, axisLineId: edit.axisLineId, idPrefix: edit.idPrefix }).sketch;
+        const { kind: _kind, sketchId: _sketchId, ...request } = edit;
+        features[index] = prepareCadSketchMirror({ sketch, parameters, ...request }).sketch;
         break;
       }
       case 'use-sketch-entity': {
@@ -378,7 +387,8 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
           if (previous?.kind === 'linear-pattern' && edit.relation.kind !== 'linear-pattern') throw new CadError('owned-sketch-pattern', 'Detach the linear pattern before replacing its owner.');
           if (edit.relation.kind === 'linear-pattern') {
             if (previous && previous.kind !== 'linear-pattern') throw new CadError('duplicate-sketch-id', 'Choose a fresh identity for the linear pattern.');
-            graph = Value.Equal(previous, edit.relation) ? graph : reconcileCadSketchLinearPattern({ graph, parameters, relation: edit.relation, previous });
+            graph = Value.Equal(previous, edit.relation) ? graph
+              : reconcileCadSketchLinearPattern({ graph, parameters, relation: edit.relation, previous, copyRelations: edit.copyRelations === true });
           } else graph = { ...graph, relations: graph.relations.some(relation => relation.id === edit.relation.id)
             ? graph.relations.map(relation => relation.id === edit.relation.id ? edit.relation : relation) : [...graph.relations, edit.relation] };
         } else {

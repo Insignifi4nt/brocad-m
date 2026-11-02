@@ -121,6 +121,51 @@ export interface CadSketchRelationOffering {
 export type CadSketchRelationFamily = 'incidence' | 'orientation' | 'equality' | 'fix' | 'dimension' | 'composite';
 
 /**
+ * How an operand follows an edit of the point or curve it names (see `remapCadSketchRelations`). The origin and the axes are never
+ * edited, so an operand naming one keeps it whatever its role.
+ */
+export type CadSketchRemapRole =
+  /** A point: follows it while it survives, under its new id, and blocks the edit when it leaves. */
+  | 'point'
+  /** A curve's whole supporting line or circle: follows the piece that keeps the curve's id, which shares that carrier with the others. */
+  | 'carrier'
+  /** A curve's finite extent, its ends, length or middle: follows it only while the edit keeps its whole interval. */
+  | 'extent'
+  /** A curve and the end of it the relation joins at: follows the piece that still has that end where it was. */
+  | 'joint'
+  /** A line and the end of it a ray points toward: follows the piece's end on that side, moved or not. */
+  | 'toward'
+  /** The end of the curve in the slot before, settled with that slot. */
+  | 'end'
+  /** Geometry the relation generates from: an edit that changes it is refused until the relation is detached. */
+  | 'source';
+/**
+ * What a copy keeps of a relation internal to the copied set. `follow` copies it; `axes` only where the copy keeps the H and V
+ * directions; `ends` only between the two ends of one copied line; `centres` only between centres of copied arcs and circles;
+ * `unjoined` only where the copy does not already join its points; `drop` never.
+ */
+export type CadSketchCopyRule = 'follow' | 'axes' | 'ends' | 'centres' | 'unjoined' | 'drop';
+/** How a kind's relations follow geometry-changing edits and copies, declared once for every operation. */
+export interface CadSketchRemapRule<R extends CadSketchGraphRelation = CadSketchGraphRelation> {
+  /** Each stored slot's role, in slot order. */
+  readonly roles: readonly CadSketchRemapRole[] | ((relation: R) => readonly CadSketchRemapRole[]);
+  /** Two points that are the ends of one line, and of no other edge, hold that line's direction: each follows the line's end on its side. */
+  readonly direction?: true;
+  /** Point and curve slots whose point the kind keeps apart from the curve's own points; an edit that makes it an end is blocked. */
+  readonly apart?: readonly (readonly [number, number])[];
+  /** The end each `joint` slot without an end slot after it joins at, by slot. */
+  readonly ends?: (graph: CadSketchGraph, relation: R) => readonly (string | undefined)[];
+  /** An edit that changes geometry the relation owns is confirmed, removing the relation, or refused until the relation is detached. */
+  readonly owned?: 'confirm' | 'refuse';
+  /** What a mirror copy, an offset copy and a linear pattern's occurrences keep. Occurrences are owned by their pattern, so they keep only reference dimensions. */
+  readonly copy: { readonly mirror: CadSketchCopyRule; readonly offset: CadSketchCopyRule; readonly pattern: CadSketchCopyRule };
+  /** The relation with its stored side or sense set for a reflection, and for operands now on pieces that run the other way. */
+  readonly orient?: (relation: R, change: { readonly reflected: boolean; readonly reversed: readonly boolean[] }) => R;
+  /** The relation in its stored form after its operands change, such as a corner's lines in id order. */
+  readonly normalize?: (relation: R) => R;
+}
+
+/**
  * Everything a relation kind declares once, so consumers read relations through it instead of switching on kinds: the solver compiles
  * its equations through `lower`, and the graph checks accept its geometry through `check`.
  */
@@ -178,6 +223,8 @@ export interface CadSketchRelationDefinition<K extends CadSketchRelationKind> {
    */
   readonly check: (graph: CadSketchGraph, relation: CadSketchRelationOf<K>, points: ReadonlyMap<string, Point2>,
     parameters: Readonly<Record<string, number>>) => readonly CadSketchGraphIssue[];
+  /** How the kind follows trim, extend, split, mirror and the copies, by the role of each operand. */
+  readonly remap: CadSketchRemapRule<CadSketchRelationOf<K>>;
   /**
    * Whether agent tools may name the kind, what they are told it does, and what an inspection of one relation says it holds and
    * leaves free.

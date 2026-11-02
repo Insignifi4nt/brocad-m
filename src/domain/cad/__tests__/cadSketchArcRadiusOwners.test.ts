@@ -68,20 +68,26 @@ describe('retained arc radius ownership in exact boundary edits', () => {
     expect(JSON.stringify(graph)).toBe(before);
   });
 
-  it('does not release detached coordinate/point drivers, a peer-only radius owner or a corner owner, and deletes an arc with its owner', () => {
+  it('keeps drivers and a peer radius on an old end another edge keeps, refuses drivers on one that leaves, and deletes an arc with its owner', () => {
     const source = drivenStartSource(), parameters = source.parameters, graph = source.graph, before = JSON.stringify(graph);
     const explicit = parseCadSketchGraph({ ...graph, relations: [...graph.relations,
       { id: 'endpoint-driver', kind: 'fixed-axis', pointId: 'b', axis: 'x', value: ' 0 ' }] });
-    expect(() => prepareCadSketchExtend({ graph: explicit, parameters, entityId: 'arc', end: 'start' }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: ['endpoint-driver'], pointIds: ['b'] }));
     const string = parseCadSketchGraph({ ...graph, points: graph.points.map(point => point.id === 'b' ? { ...point, position: ['0.000', 10] } : point) });
-    expect(() => prepareCadSketchExtend({ graph: string, parameters, entityId: 'arc', end: 'start' }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: [], pointIds: ['b'] }));
     const peer = parseCadSketchGraph({ ...graph, points: [...graph.points, { id: 'peer-center', position: [0, 20] }, { id: 'peer-end', position: [10, 20] }],
       entities: [...graph.entities, { id: 'peer', kind: 'arc', centerPointId: 'peer-center', startPointId: 'b', endPointId: 'peer-end', direction: 'ccw', construction: true }],
       relations: [...graph.relations, { id: 'peer-radius', kind: 'radial-size', entityId: 'peer', quantity: 'radius', value: ' stockRadius ' }] });
-    expect(() => prepareCadSketchExtend({ graph: peer, parameters, entityId: 'arc', end: 'start' }))
-      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: ['peer-radius'], pointIds: ['b'] }));
+    // The divider keeps the arc's old start, so its driver and the peer arc's radius stay with it, unchanged, as the arc reaches past it.
+    for (const kept of [explicit, string, peer]) {
+      const { target } = prepareCadSketchExtend({ graph: kept, parameters, entityId: 'arc', end: 'start' });
+      const result = extendCadSketchEntity({ graph: kept, parameters, extend: { ...target, endPointId: 'c' } });
+      expect(result.graph.relations).toEqual(kept.relations); expect(result.graph.points).toEqual(kept.points);
+    }
+    // Without the divider the old start leaves with the extension, and the driver placing it would go with it.
+    const alone = (driven: typeof graph) => parseCadSketchGraph({ ...driven, entities: driven.entities.filter(entity => entity.id !== 'divider') });
+    expect(() => prepareCadSketchExtend({ graph: alone(explicit), parameters, entityId: 'arc', end: 'start' }))
+      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: ['endpoint-driver'], pointIds: ['b'] }));
+    expect(() => prepareCadSketchExtend({ graph: alone(string), parameters, entityId: 'arc', end: 'start' }))
+      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: [], pointIds: ['b'] }));
     const isolated = parseCadSketchGraph({ ...graph, entities: graph.entities.filter(entity => entity.id === 'arc') });
     expect(prepareCadSketchTrim({ graph: isolated, parameters, entityId: 'arc', parameter: .5 }).target)
       .toEqual({ kind: 'delete', entityId: 'arc', parameter: .5, removedRelationIds: ['radius'] });

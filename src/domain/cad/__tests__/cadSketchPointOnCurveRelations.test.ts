@@ -3,7 +3,7 @@ import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraph, type Cad
 import { cadSketchRelationEntityIds, cadSketchRelationPointIds, mapCadSketchRelationScalars } from '../cadSketchGraphReferences';
 import { deleteCadSketchElements } from '../cadSketchGraphEdits';
 import { prepareCadSketchTrim, trimCadSketchEntity } from '../cadSketchTrimExtend';
-import { CadSketchSplitDependencyError, splitCadSketchEntity } from '../cadSketchSplit';
+import { splitCadSketchEntity } from '../cadSketchSplit';
 
 const onArc = { id: 'on-arc', kind: 'point-on-curve', pointId: 'p', curveId: 'arc' } as const;
 const onRing = { id: 'on-ring', kind: 'point-on-curve', pointId: 'q', curveId: 'ring' } as const;
@@ -38,7 +38,7 @@ describe('point on an arc or circle', () => {
       code: 'relation-residual', residualMm: expect.closeTo(1, 12) })]);
   });
 
-  it('reports its operands through the shared reference visitors and protects the curve on delete and split', () => {
+  it('reports its operands through the shared reference visitors, protects the curve on delete and follows its circle through split', () => {
     const graph = curves([onArc, onRing]);
     expect(cadSketchRelationEntityIds(onArc)).toEqual(['arc']);
     expect(cadSketchRelationPointIds(graph, onArc)).toEqual(['p', 'o', 's', 'e']);
@@ -48,8 +48,9 @@ describe('point on an arc or circle', () => {
     expect(() => deleteCadSketchElements({ sketch, pointIds: [], entityIds: ['ring'], relationIds: [], cascade: false })).toThrow();
     expect(deleteCadSketchElements({ sketch, pointIds: [], entityIds: ['ring'], relationIds: [], cascade: true }).graph?.relations).toEqual([onArc]);
     expect(deleteCadSketchElements({ sketch, pointIds: ['p'], entityIds: [], relationIds: [], cascade: true }).graph?.relations).toEqual([onRing]);
-    expect(() => splitCadSketchEntity({ graph, parameters: { r: 5 }, split: { kind: 'arc', entityId: 'arc', parameter: .5,
-      splitPointId: 'cut', newEntityId: 'after' } })).toThrow(CadSketchSplitDependencyError);
+    // Both pieces lie on the one circle the point is held to, so it stays with the piece keeping the arc's id.
+    expect(splitCadSketchEntity({ graph, parameters: { r: 5 }, split: { kind: 'arc', entityId: 'arc', parameter: .5,
+      splitPointId: 'cut', newEntityId: 'after' } }).graph.relations).toEqual([onArc, onRing]);
   });
 });
 

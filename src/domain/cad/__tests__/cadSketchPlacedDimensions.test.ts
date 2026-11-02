@@ -203,11 +203,16 @@ describe('editing commands', () => {
   it('keeps placements, relative to their geometry, as Move selection and Extend move it', () => {
     const height = { kind: 'linear', offset: 3, along: .75 } as const, length = { kind: 'linear', offset: -2, along: 1.25 } as const;
     // The second blank's height drives it, and a reference measures the line Extend lengthens.
-    const source = applyCadEdits(extendPart(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'height', kind: 'distance', pointIds: ['f', 'g'], value: 10, annotation: height } },
+    const driven = applyCadEdits(extendPart(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'height', kind: 'distance', pointIds: ['f', 'g'], value: 10, annotation: height } }]);
+    const source = applyCadEdits(driven, [
       { kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'length', kind: 'reference-dimension', measurement: { kind: 'line-length', entityId: 'ab' }, annotation: length } }]);
     const moved = applyCadEdits(source, [{ kind: 'translate-sketch-geometry', sketchId: 'sketch', selections: ['ef', 'fg', 'gh', 'he'].map(id => ({ kind: 'entity', id })), translation: [5, -2] }]);
-    const extended = applyCadEdits(source, [{ kind: 'extend-sketch-entity', sketchId: 'sketch', extend: lineExtend }]);
-    for (const result of [moved, extended]) expect(relationsOf(result, 'sketch')).toEqual(relationsOf(source, 'sketch'));
+    expect(relationsOf(moved, 'sketch')).toEqual(relationsOf(source, 'sketch'));
     expect(placements(source, 'sketch')).toEqual([['height', height], ['length', length]]);
+    // A length measured on the whole line would mean another length once the line grows, so Extend refuses it until it is removed.
+    expect(() => applyCadEdits(source, [{ kind: 'extend-sketch-entity', sketchId: 'sketch', extend: lineExtend }]))
+      .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', relationIds: ['length'] }));
+    const extended = applyCadEdits(driven, [{ kind: 'extend-sketch-entity', sketchId: 'sketch', extend: lineExtend }]);
+    expect(relationsOf(extended, 'sketch')).toEqual(relationsOf(driven, 'sketch'));
   });
 });

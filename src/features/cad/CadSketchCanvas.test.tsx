@@ -1257,12 +1257,12 @@ describe('graph spatial selection', () => {
     const h = await spatialFixture(), graph = h.feature.graph; if (!graph) throw new Error('Graph missing.');
     const feature = { ...h.feature, graph: { ...graph, points: [...graph.points, { id: 'p', position: [0, 10] as const }, { id: 'q', position: [10, 10] as const }],
       entities: [...graph.entities, { id: 'guide', kind: 'line' as const, construction: true, startPointId: 'p', endPointId: 'q' }],
-      relations: [{ id: 'whole-owner', kind: 'parallel' as const, lineIds: ['ab', 'guide'] as const }] } };
+      relations: [{ id: 'whole-owner', kind: 'equal-length' as const, lineIds: ['ab', 'guide'] as const }] } };
     await h.show({ sketch: feature, graphControls: { ...h.props().graphControls!, document: { ...h.props().graphControls!.document, features: [feature] } } });
     await h.pointer('pointerdown', 5, .1, false, 7, 2); await h.pointer('pointerup', 5, .1, false, 7, 2);
     const split = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent === 'Split here');
     expect(split?.disabled).toBe(true);
-    expect(split?.getAttribute('aria-description')).toMatch(/Parallel relation 1.*Line 1 and Line 3/);
+    expect(split?.getAttribute('aria-description')).toMatch(/Equal length relation 1.*Line 1 and Line 3/);
     await act(async () => split?.click());
     expect(h.edited).not.toHaveBeenCalled(); expect(container.querySelector('[data-cad-sketch-split-point]')).toBeNull();
   });

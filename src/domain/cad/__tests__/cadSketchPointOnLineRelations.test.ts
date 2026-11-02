@@ -4,7 +4,7 @@ import { resolveCadSketchPointOnLineOperands } from '../cadSketchPointOnLineRela
 import { resolveCadSketchPointIdentities } from '../cadSketchGraphJoints';
 import { cadSketchRelationEntityIds, cadSketchRelationPointIds, mapCadSketchRelationScalars } from '../cadSketchGraphReferences';
 import { deleteCadSketchElements } from '../cadSketchGraphEdits';
-import { splitCadSketchEntity, CadSketchSplitDependencyError } from '../cadSketchSplit';
+import { splitCadSketchEntity } from '../cadSketchSplit';
 import { applyCadEdits } from '../cadOperations';
 import { circleRow, circleRowPart, rowSketch } from './cadSketchLinearPatternFixtures';
 import { pointOnLineRelation, pointOnLinePart, pointOnLineSketch } from './cadSketchPointOnLineFixtures';
@@ -41,8 +41,11 @@ describe('infinite supporting-line incidence source', () => {
     const source = pointOnLineSketch(pointOnLinePart()), sketch = { ...source, graph: parseCadSketchGraph({ ...source.graph, relations: [pointOnLineRelation] }) };
     expect(() => deleteCadSketchElements({ sketch, pointIds: [], entityIds: ['guide'], relationIds: [], cascade: false })).toThrow();
     expect(deleteCadSketchElements({ sketch, pointIds: [], entityIds: ['guide'], relationIds: [], cascade: true }).graph?.relations).toEqual([]);
-    expect(() => splitCadSketchEntity({ graph: sketch.graph, parameters: { height: 20 }, split: { kind: 'line', entityId: 'guide', parameter: .5,
-      splitPointId: 'cut', newEntityId: 'after', supportRelationId: 'support' } })).toThrow(CadSketchSplitDependencyError);
+    // The point is held to the guide's whole support, which both pieces share, so it stays with the piece keeping the guide's id.
+    const solved = parseCadSketchGraph({ ...sketch.graph, points: sketch.graph.points.map(point => point.id === 'p' ? { ...point, position: [10, 5] } : point) });
+    expect(splitCadSketchEntity({ graph: solved, parameters: { height: 20 }, split: { kind: 'line', entityId: 'guide', parameter: .5,
+      splitPointId: 'cut', newEntityId: 'after', supportRelationId: 'support' } }).graph.relations)
+      .toEqual([pointOnLineRelation, { id: 'support', kind: 'parallel', lineIds: ['guide', 'after'] }]);
     const row = rowSketch(applyCadEdits(circleRowPart(), [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: circleRow }]));
     expect(() => parseCadSketchGraph({ ...row.graph, points: [...row.graph.points, { id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }],
       entities: [...row.graph.entities, { id: 'guide', kind: 'line', construction: true, startPointId: 'a', endPointId: 'b' }],

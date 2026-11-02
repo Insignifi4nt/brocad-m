@@ -139,8 +139,13 @@ describe('exact endpoint-owned arc Extend', () => {
     const ownedPreview = prepareCadSketchExtend({ graph: owned, parameters: document.parameters, entityId: 'arc', end: 'end' });
     expect(extendCadSketchEntity({ graph: owned, parameters: document.parameters, extend: { ...ownedPreview.target, endPointId: 'c' } }).graph.relations)
       .toEqual(owned.relations);
+    // The divider keeps the old end b, so its expression stays with it; once nothing else keeps b, the extension would detach it and refuses.
     const driven = parseCadSketchGraph({ ...graph, points: graph.points.map(point => point.id === 'b' ? { ...point, position: ['0.000', 10] } : point) });
-    expect(() => prepareCadSketchExtend({ graph: driven, parameters: document.parameters, entityId: 'arc', end: 'end' }))
+    const drivenPreview = prepareCadSketchExtend({ graph: driven, parameters: document.parameters, entityId: 'arc', end: 'end' });
+    expect(extendCadSketchEntity({ graph: driven, parameters: document.parameters, extend: { ...drivenPreview.target, endPointId: 'c' } }).graph.points
+      .find(point => point.id === 'b')?.position).toEqual(['0.000', 10]);
+    const alone = parseCadSketchGraph({ ...driven, entities: driven.entities.filter(entity => entity.id !== 'divider') });
+    expect(() => prepareCadSketchExtend({ graph: alone, parameters: document.parameters, entityId: 'arc', end: 'end' }))
       .toThrowError(expect.objectContaining({ code: 'dependent-sketch-extend', pointIds: ['b'] }));
     const changed = parseCadSketchGraph({ ...graph, entities: graph.entities.map(entity => entity.id === 'closure' ? { ...entity, id: 'new-closure' } : entity) });
     expect(() => extendCadSketchEntity({ graph: changed, parameters: document.parameters, extend: request }))

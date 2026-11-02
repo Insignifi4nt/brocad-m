@@ -3,7 +3,7 @@ import { validateCadSketchExternalReference } from '../../cadSketchExternalRefer
 import { cadSketchLinearPatternInstances, checkCadSketchLinearPattern, validateCadSketchLinearPattern } from '../../cadSketchLinearPattern';
 import type { CadSketchLoweringContext } from '../../sketch-solver/cadSketchLoweringContext';
 import { checkCadSketchExternalReferenceOwnership } from '../cadSketchRelationChecks';
-import type { CadSketchOperandSignature, CadSketchRelationDefinition, CadSketchRelationOf } from '../cadSketchRelationTypes';
+import type { CadSketchOperandSignature, CadSketchRelationDefinition, CadSketchRelationOf, CadSketchRemapRule } from '../cadSketchRelationTypes';
 import { sortedIds } from './kindParts';
 
 // Relations that made geometry and keep it: a pattern's copies, a linked reference's construction edge and a corner's arc or chamfer
@@ -32,6 +32,7 @@ export const linearPattern: CadSketchRelationDefinition<'linear-pattern'> = {
     }
   },
   check: (graph, relation, _, parameters) => checkCadSketchLinearPattern(graph, parameters, relation),
+  remap: { roles: ['source', 'end'], owned: 'refuse', copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Copies of a circle repeat at a set spacing along X or Y.',
     meaning: 'Owns a row of circles. Copies follow the seed center and radius at the declared signed axis pitch. Edit this owner to change count, direction or exclusions; detach before independent copy edits.' }
 };
@@ -49,6 +50,7 @@ export const externalReference: CadSketchRelationDefinition<'external-reference'
   // Its edge's points and radius follow the source, so they compile as fixed values and it adds no equation.
   lower: () => {},
   check: (graph, relation) => checkCadSketchExternalReferenceOwnership(graph, relation),
+  remap: { roles: [], owned: 'refuse', copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A construction line or circle follows an edge of another sketch.',
     meaning: 'Linked construction geometry follows a stable preceding sketch edge along the shared plane normal. Detach explicitly to retain its current numeric shape without the source link.' }
 };
@@ -63,6 +65,12 @@ function cornerOnSupports(relation: CadSketchRelationOf<'fillet-corner' | 'chamf
 const CORNER = {
   slots: [{ role: 'Corner point', accepts: ['point'], needs: ['movable'] }, { role: 'First line', accepts: ['line'], needs: ['ends'] }, { role: 'Second line', accepts: ['line'], needs: ['ends'] }]
 } as const satisfies CadSketchOperandSignature;
+/** A corner joins each line at its trim point and keeps the arc or chamfer line it made, which an edit may only remove with it. */
+const CORNER_REMAP = {
+  roles: ['point', 'joint', 'joint'],
+  ends: (graph, relation) => { const { trimPointIds } = resolveCadSketchCornerTopology(graph, relation); return [undefined, trimPointIds[0], trimPointIds[1]]; },
+  owned: 'confirm', copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' }
+} as const satisfies CadSketchRemapRule<CadSketchRelationOf<'fillet-corner' | 'chamfer-corner'>>;
 export const filletCorner: CadSketchRelationDefinition<'fillet-corner'> = {
   kind: 'fillet-corner', family: 'composite', name: 'Fillet',
   stored: CORNER,
@@ -83,6 +91,7 @@ export const filletCorner: CadSketchRelationDefinition<'fillet-corner'> = {
     context.sized(context.span(centre, p), context.value(relation.id, 'value'));
   },
   check: (graph, relation, points, parameters) => checkCadSketchCornerRelation(graph, relation, points, parameters),
+  remap: { ...CORNER_REMAP, normalize: relation => relation.lineIds[0] < relation.lineIds[1] ? relation : { ...relation, lineIds: [relation.lineIds[1], relation.lineIds[0]] } },
   agent: { exposed: true, summary: 'An arc of a set radius rounds the corner where two lines meet.',
     meaning: 'Keeps a tangent minor arc at the original reference corner, with a driving radius and finite trimmed sides.' }
 };
@@ -102,6 +111,13 @@ export const chamferCorner: CadSketchRelationDefinition<'chamfer-corner'> = {
     context.sized(context.span(relation.pointId, q), context.value(relation.id, 'values.1'));
   },
   check: (graph, relation, points, parameters) => checkCadSketchCornerRelation(graph, relation, points, parameters),
+  // A chamfer's setbacks, and where each is drawn, stay with their lines.
+  remap: { ...CORNER_REMAP, normalize: relation => {
+    if (relation.lineIds[0] < relation.lineIds[1]) return relation;
+    const sides = relation.annotation?.sides;
+    return { ...relation, lineIds: [relation.lineIds[1], relation.lineIds[0]], values: [relation.values[1], relation.values[0]],
+      ...(sides ? { annotation: { kind: 'setbacks' as const, sides: [sides[1], sides[0]] as const } } : {}) };
+  } },
   agent: { exposed: true, summary: 'A line cuts the corner where two lines meet, set back by two lengths.',
     meaning: 'Keeps two driving setbacks along the finite sides of the original reference corner.' }
 };

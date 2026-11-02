@@ -28,9 +28,13 @@ export function resolveCadSketchPointIdentities(graph: CadSketchGraph): (pointId
   return root;
 }
 
-/** Transient connectivity of validated source identities; never substitutes a point's coordinates. */
-export function resolveCadSketchGraphJoints(graph: CadSketchGraph, points: ReadonlyMap<string, Point2>): (pointId: string) => string {
-  const root = resolveCadSketchPointIdentities(graph);
+/**
+ * Transient connectivity of validated source identities; never substitutes a point's coordinates. `identities` is the graph's point
+ * identities, when the caller has them already.
+ */
+export function resolveCadSketchGraphJoints(graph: CadSketchGraph, points: ReadonlyMap<string, Point2>,
+  identities?: (pointId: string) => string): (pointId: string) => string {
+  const root = identities ?? resolveCadSketchPointIdentities(graph);
   const groups = new Map<string, Point2[]>();
   for (const [id, point] of points) {
     const key = root(id), group = groups.get(key) ?? [];

@@ -5,7 +5,7 @@ import { CadError } from './cadError';
 import { isCadImportData } from './cadImportData';
 import { checkCadSketchGraph, parseCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
 import { compileCadSketchGraph } from './cadSketchGraphGeometry';
-import { cadSketchRelationEntityIds } from './cadSketchGraphReferences';
+import { applyCadSketchRemapOutcomes, blockedCadSketchRemaps, remapCadSketchRelations } from './sketch-relations/cadSketchRelationRemap';
 import { cadPathClosureTolerance } from './cadAnalyticSegments';
 import { pointOnArcAtParameter } from '@/domain/path-intel/segments';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
@@ -33,7 +33,7 @@ export class CadSketchSplitDependencyError extends CadError {
   }
 }
 
-/** One source-oriented cut, with no coordinate welding or whole-entity relation transfer beyond the retained piece's support. */
+/** One source-oriented cut, with no coordinate welding; relations follow the pieces by each kind's rule. */
 export function splitCadSketchEntity({ graph: input, parameters, split }: {
   readonly graph: CadSketchGraph; readonly parameters: Readonly<Record<string, number>>; readonly split: CadSketchSplitTarget;
 }): CadSketchSplitResult {
@@ -41,9 +41,13 @@ export function splitCadSketchEntity({ graph: input, parameters, split }: {
     throw new CadError('invalid-sketch-split', 'Choose a line or open arc and a finite split parameter strictly between zero and one.');
   const graph = parseCadSketchGraph(input), entity = graph.entities.find(item => item.id === split.entityId);
   if (!entity || entity.kind !== split.kind) throw new CadError('invalid-sketch-split-target', 'The split source must remain the requested line or open arc.');
-  // A point's distance from a line stays on the retained piece, which keeps the line's support.
-  const blockers = graph.relations.filter(relation => relation.kind !== 'reference-dimension' && relation.kind !== 'point-line-distance' && cadSketchRelationEntityIds(relation).includes(entity.id));
-  if (blockers.length) throw new CadSketchSplitDependencyError(blockers.map(relation => relation.id));
+  // Both pieces keep the edge's line or circle, so a relation on that carrier stays on the retained piece; a joint, corner or ray at the
+  // edge's end moves to the new piece, and a relation on the edge's length, ends or middle refuses the split (see `remapCadSketchRelations`).
+  const outcomes = remapCadSketchRelations(graph, { curves: new Map([[entity.id, [
+    { entityId: entity.id, interval: [0, split.parameter], orientation: 'same', ends: [entity.startPointId, split.splitPointId] },
+    { entityId: split.newEntityId, interval: [split.parameter, 1], orientation: 'same', ends: [split.splitPointId, entity.endPointId] }]]]) });
+  const blockers = blockedCadSketchRemaps(outcomes);
+  if (blockers.length) throw new CadSketchSplitDependencyError(blockers.map(item => item.relation.id));
   const geometry = compileCadSketchGraph(graph, parameters), segment = geometry.segments.find(item => item.id === entity.id);
   if (!segment || segment.kind === 'circle') throw new CadError('invalid-sketch-split-target', 'This split source is not supported.');
   const point = segment.kind === 'line' ? { x: segment.start.x + (segment.end.x - segment.start.x) * split.parameter,
@@ -56,7 +60,8 @@ export function splitCadSketchEntity({ graph: input, parameters, split }: {
   const retained = { ...entity, endPointId: split.splitPointId }, second = { ...entity, id: split.newEntityId, startPointId: split.splitPointId };
   const candidate = parseCadSketchGraph({ points: [...graph.points, { id: split.splitPointId, position: [point.x, point.y] }],
     entities: graph.entities.flatMap(item => item.id === entity.id ? [retained, second] : [item]),
-    relations: split.kind === 'line' ? [...graph.relations, { id: split.supportRelationId, kind: 'parallel', lineIds: [entity.id, split.newEntityId] }] : graph.relations });
+    relations: [...applyCadSketchRemapOutcomes(graph.relations, outcomes),
+      ...(split.kind === 'line' ? [{ id: split.supportRelationId, kind: 'parallel', lineIds: [entity.id, split.newEntityId] } as const] : [])] });
   // Far from the origin a short piece's direction can miss the parallel accuracy contract.
   if (split.kind === 'line' && checkCadSketchGraph(candidate, parameters).some(issue => issue.source.id === split.supportRelationId))
     throw new CadError('sketch-split-precision', 'The cut cannot keep both pieces in line at these coordinates. Cut at a different point.');

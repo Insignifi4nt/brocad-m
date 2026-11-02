@@ -14,6 +14,8 @@ import { endTrim, trimPart, middleTrim, middleTrimPart } from '@/domain/cad/__te
 import { trimCadSketchEntity } from '@/domain/cad/cadSketchTrimExtend';
 import { extendPart, lineExtend } from '@/domain/cad/__tests__/cadSketchExtendFixtures';
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
+import { circleRow, circleRowPart, rowSketch } from '@/domain/cad/__tests__/cadSketchLinearPatternFixtures';
+import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { length: 20 }, features: [{
@@ -432,5 +434,17 @@ describe('shared CAD edit preparation with the real sketch solver', () => {
     await expect(prepareCadEdits(redundant, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { ...distance, value: ' length + 0 ', annotation: { kind: 'linear', offset: -4, along: 0.75 } } as typeof distance }], counting))
       .rejects.toMatchObject({ diagnostics: { redundantIds: expect.arrayContaining(['distance-again']) } });
     expect(solves).toBeGreaterThan(0);
+  });
+  it('keeps a driving radius on a pattern seed driving every occurrence through the pattern after its references are copied', async () => {
+    const part = circleRowPart(true), sketch = rowSketch(part);
+    const size = { id: 'size', kind: 'radial-size', entityId: 'seed', quantity: 'radius', value: 3 } as const;
+    const measure = { id: 'measure', kind: 'reference-dimension', measurement: { kind: 'radial-size', entityId: 'seed', quantity: 'diameter' } } as const;
+    const measured = parseCadDocument({ ...part, features: [{ ...sketch, graph: { ...sketch.graph, relations: [size, measure] } }] });
+    const patterned = (await prepareCadEdits(measured, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: circleRow, copyRelations: true }], solver)).document;
+    // Each occurrence gets the reference, never the driver: the pattern owns its size.
+    expect(rowSketch(patterned).graph.relations.map(relation => relation.id)).toEqual(['size', 'measure', 'row', 'holes_i1_r0', 'holes_i2_r0', 'holes_i3_r0']);
+    const resized = rowSketch((await prepareCadEdits(patterned, [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { ...size, value: 4 } }], solver)).document).graph;
+    for (const entity of resized.entities) expect(entity.kind === 'circle' && entity.radius).toBeCloseTo(4, 9);
+    expect(checkCadSketchGraph(resized, part.parameters)).toEqual([]);
   });
 });

@@ -33,6 +33,7 @@ export const distance: CadSketchRelationDefinition<'distance'> = {
   key: relation => `distance ${sortedIds(relation.pointIds)}`,
   lower: (relation, context) => context.sized(context.span(relation.pointIds[0], relation.pointIds[1]), context.value(relation.id, 'value')),
   check: (_, relation, points, parameters) => checkCadSketchPointDistance(relation, points, parameters),
+  remap: { roles: ['point', 'point'], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'Two points keep a set distance apart.',
     meaning: 'Keeps the straight-line distance between two points.' }
 };
@@ -55,6 +56,9 @@ export const pointLineDistance: CadSketchRelationDefinition<'point-line-distance
     context.emit('point-line-distance', [...context.point(relation.pointId), ...context.support(line)], cadSketchPointLineSideSign(relation.side) * length);
   },
   check: (graph, relation, points, parameters) => checkCadSketchPointLineDistanceRelation(graph, relation, points, parameters),
+  // The side is seen along the line, so it turns over with a reflection or with a line that now runs the other way.
+  remap: { roles: ['point', 'carrier'], apart: [[0, 1]], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' },
+    orient: (relation, { reflected, reversed }) => reflected !== reversed[1] ? { ...relation, side: relation.side === 'left' ? 'right' : 'left' } : relation },
   agent: { exposed: true, summary: 'A point keeps a set distance from a line, on one side of it.',
     meaning: 'Keeps a point at a positive distance from the infinite supporting line of the named line, on the side it starts on. Does not fix the line or make it parallel to anything.' }
 };
@@ -73,6 +77,7 @@ export const axisDistance: CadSketchRelationDefinition<'axis-distance'> = {
   // The stored order gives the direction, including negative and zero offsets.
   check: (_, relation, points, parameters) => checkCadSketchPointPair(relation, points,
     (a, b) => Math.abs((b[relation.axis] - a[relation.axis]) - evaluateCadScalar(relation.value, parameters))),
+  remap: { roles: ['point', 'point'], copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'One point keeps a set horizontal or vertical distance from another.',
     meaning: 'Drives the signed second-minus-first point coordinate along the declared sketch axis.' }
 };
@@ -89,6 +94,7 @@ export const fixedAxis: CadSketchRelationDefinition<'fixed-axis'> = {
   mentions: (relation, names) => [names.point(relation.pointId), names.entity(cadSketchAxisOfNormal(relation.axis))],
   lower: (relation, context) => context.hold(relation.pointId, relation.axis === 'x' ? 0 : 1, context.value(relation.id, 'value')),
   check: (_, relation, points, parameters) => checkCadSketchHeldPoint(relation, points, point => ({ ...point, [relation.axis]: evaluateCadScalar(relation.value, parameters) })),
+  remap: { roles: ['point'], copy: { mirror: 'drop', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'A point keeps a set distance from the H or V axis; at 0 it lies on that axis.',
     meaning: 'Keeps one point coordinate, X measured from the Y axis or Y from the X axis; the other can remain free. A value that is 0 whatever the parameters are keeps the point on that axis; any other value is a distance from the axis, on the side its sign gives.' }
 };
@@ -110,6 +116,9 @@ export const lineAngle: CadSketchRelationDefinition<'line-angle'> = {
       cadSketchDrivingAngle(context.value(relation.id, 'value'), relation.sense).signedRadians);
   },
   check: (graph, relation, points, parameters) => checkCadSketchAngleRelation(graph, relation, points, parameters),
+  // Each ray runs toward a point, so it keeps its direction on a line that now runs the other way; a reflection turns the sector over.
+  remap: { roles: ['toward', 'end', 'toward', 'end'], copy: { mirror: 'follow', offset: 'follow', pattern: 'drop' },
+    orient: (relation, { reflected }) => reflected ? { ...relation, sense: relation.sense === 'cw' ? 'ccw' : 'cw' } : relation },
   agent: { exposed: true, summary: 'Two lines keep a set angle between them.',
     meaning: 'Drives the declared clockwise or counterclockwise sector between two explicit line rays in degrees.' }
 };
@@ -133,6 +142,7 @@ export const radialSize: CadSketchRelationDefinition<'radial-size'> = {
     context.sized(context.size(entity), radius);
   },
   check: (graph, relation, points, parameters) => checkCadSketchRadialRelation(graph, relation, points, parameters),
+  remap: { roles: ['carrier'], copy: { mirror: 'follow', offset: 'drop', pattern: 'drop' } },
   agent: { exposed: true, summary: 'An arc or circle keeps a set radius or diameter.',
     meaning: 'Drives circle or arc size using the declared radius or diameter.' }
 };
@@ -158,6 +168,9 @@ export const referenceDimension: CadSketchRelationDefinition<'reference-dimensio
   // It drives nothing, and the geometry's own checks stay authoritative.
   lower: () => {},
   check: () => [],
+  // A reference reads what it measures, so a length on a changed extent would read something else: it blocks as a driving length does.
+  remap: { roles: ({ measurement }) => measurement.kind === 'line-length' ? ['extent'] : measurement.kind === 'point-distance' ? ['point', 'point']
+    : measurement.kind === 'point-line-distance' ? ['point', 'carrier'] : ['carrier'], copy: { mirror: 'follow', offset: 'drop', pattern: 'follow' } },
   agent: { exposed: true, summary: 'A measurement shown on the sketch without driving it.',
     meaning: 'Measures current geometry without driving it or adding a native equation.' }
 };
