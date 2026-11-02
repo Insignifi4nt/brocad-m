@@ -328,14 +328,19 @@ export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: C
     markSettled(graph, generations, parameters);
     return acceptCadSketchGraph(graph);
   }
-  // Members that leave, or whose id now names another kind of edge, end the user relations on them.
+  // Members that leave, whose id now names another kind of edge, or whose key the kind says now names another part of the shape, end
+  // the user relations on them.
   const curves = new Map<string, readonly never[]>(), points = new Map<string, null>(), owners = new Map<string, CadSketchGenerator>();
+  const records = previous && previous !== candidate ? generatorIndex(previous).byPrefix : undefined;
   for (const { generator, members } of generations) {
     const kept = had.get(generator.idPrefix);
     if (!kept) continue;
     const kinds = new Map(members.entities.map(entity => [entity.id, entity.kind])), keptPoints = new Set(members.points.map(point => point.id));
-    for (const entity of kept.entities) if (kinds.get(entity.id) !== entity.kind) { curves.set(entity.id, []); owners.set(entity.id, generator); }
-    for (const point of kept.points) if (!keptPoints.has(point.id)) { points.set(point.id, null); owners.set(point.id, generator); }
+    const record = records?.get(generator.idPrefix), from = generator.idPrefix.length + 1;
+    const moved = record && record !== generator && record.geometry.kind === generator.geometry.kind
+      ? cadSketchGeneratorKind(generator.geometry).renumbered?.(record.geometry, generator.geometry) : undefined;
+    for (const entity of kept.entities) if (kinds.get(entity.id) !== entity.kind || moved?.(entity.id.slice(from))) { curves.set(entity.id, []); owners.set(entity.id, generator); }
+    for (const point of kept.points) if (!keptPoints.has(point.id) || moved?.(point.id.slice(from))) { points.set(point.id, null); owners.set(point.id, generator); }
   }
   let relations = stored.relations;
   if (curves.size || points.size) {

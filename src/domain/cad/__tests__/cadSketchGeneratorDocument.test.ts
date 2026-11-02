@@ -102,6 +102,24 @@ describe('sketch generators in a document', () => {
       expect(graphOf(edit(changed, removal))).toMatchObject({ points: [], entities: [], relations: [] });
   });
 
+  it('take relations on a listed polygon\'s vertices after an inserted one through the remap, and keep them through an edit of one vertex', () => {
+    const outline = (points: readonly (readonly [number, number])[]): CadSketchGenerator => ({ id: 'plate', kind: 'generator', idPrefix: 'p', construction: false, geometry: { kind: 'polygon', points } });
+    const square: readonly (readonly [number, number])[] = [[0, 0], [20, 0], [20, 10], [0, 10]];
+    const document = documentWith({ points: [{ id: 'u', position: [40, 40] }], entities: [], relations: [outline(square),
+      { id: 'd1', kind: 'distance', pointIds: ['u', 'p_v1'], value: Math.hypot(20, 40) }, { id: 'd3', kind: 'distance', pointIds: ['u', 'p_v3'], value: 50 }] });
+    // Moving a vertex keeps every key and the relations on them.
+    const moved = edit(document, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: outline([[0, 0], [20, 0], [20, 12], [0, 10]]) });
+    expect(graphOf(moved).relations.map(relation => relation.id)).toEqual(['plate', 'd1', 'd3']);
+    // A vertex inserted after v1 puts v2 and v3 on other corners: v3 would silently become the old v2, so its relation refuses.
+    const notched = outline([[0, 0], [20, 0], [25, 5], [20, 10], [0, 10]]);
+    expect(refusal(() => edit(document, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: notched }))).toMatchObject({ code: 'owned-sketch-generator',
+      message: expect.stringMatching(/Polygon "plate" no longer generates geometry that Distance "d3" uses/) });
+    const onFirst = edit(document, { kind: 'remove-sketch-relation', sketchId: 'sketch', relationId: 'd3' });
+    const inserted = edit(onFirst, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: notched });
+    expect(graphOf(inserted).relations.map(relation => relation.id)).toEqual(['plate', 'd1']);
+    expect(position(inserted, 'p_v4')).toEqual([0, 10]);
+  });
+
   it('delete the user relations on a deleted generator\'s members only with cascade, and keep relations on kept members through regeneration', () => {
     const members = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon()] }, { n: 5 });
     const at = (id: string) => members.points.find(point => point.id === id)!.position;

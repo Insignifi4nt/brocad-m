@@ -4,7 +4,7 @@ import { cadSketchFixedComponents } from '../cadSketchFixedComponents';
 import { cadSketchOwnedGeometryLockReason } from '../cadSketchOwnedGeometry';
 import { mapCadSketchGraphScalars } from '../features/cadFeatureScalarMaps';
 import * as plugins from '../plugins/cadPlugins';
-import { CAD_GEAR_V3_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugins';
+import { CAD_GEAR_V3_PLUGIN, CAD_STAR_PLUGIN, createCadPluginProfile, type CadPluginPackage } from '../plugins/cadPlugins';
 import {
   cadSketchGeneratedComponents, cadSketchGeneratorOwner, expandCadSketchGenerators, regenerateCadSketchGenerators, storedCadSketchGraph
 } from '../sketch-generators/cadSketchGenerators';
@@ -19,6 +19,10 @@ const polygon = (sides: number | string = 'n', directionId = '@h'): CadSketchGen
 const ids = (graph: CadSketchGraph) => ({ points: graph.points.map(item => item.id), entities: graph.entities.map(item => item.id), relations: graph.relations.map(item => item.id) });
 const position = (graph: CadSketchGraph, id: string) => graph.points.find(point => point.id === id)!.position;
 const withRelations = (graph: CadSketchGraph, relations: readonly CadSketchGraphRelation[]) => parseCadSketchGraph({ ...graph, relations });
+const pluginOf = (plugin: CadPluginPackage, inputs: Readonly<Record<string, number | string>>): CadSketchGenerator => ({ id: 'gear', kind: 'generator', idPrefix: 'g',
+  construction: false, geometry: { ...createCadPluginProfile(plugin), inputs: { ...createCadPluginProfile(plugin).inputs, ...inputs } } as CadSketchGenerator['geometry'] });
+const entityOf = (graph: CadSketchGraph, id: string) => graph.entities.find(entity => entity.id === id);
+const userRelations = (graph: CadSketchGraph) => graph.relations.filter(relation => relation.kind !== 'generator');
 
 describe('sketch generators', () => {
   it('generate their members from the record alone, with stable ids, fixed in the solve and left out of the stored form', () => {
@@ -126,8 +130,66 @@ describe('sketch generators', () => {
     expect(regenerateCadSketchGenerators(kept, { n: 4 }).relations.map(relation => relation.id)).toContain('d0');
   });
 
+  it('key a gear by tooth and part, so the teeth that stay keep their members and the user relations on them as the count changes', () => {
+    // A free point and circle tied to tooth 3's tip arc and its ends, the base of its right flank, and the root arc after tooth 5.
+    const points = [{ id: 'u', position: [80, 0] }, { id: 'o', position: [0, 80] }];
+    const entities = [{ id: 'ring', kind: 'circle', construction: false, centerPointId: 'o', radius: 5 }];
+    const ties = [{ id: 'tip-end', kind: 'distance', pointIds: ['u', 'g_t3_tipL'], value: 5 }, { id: 'flank-base', kind: 'distance', pointIds: ['u', 'g_t3_baseR'], value: 5 },
+      { id: 'tip-size', kind: 'equal-radius', curveIds: ['ring', 'g_t3_tip'] }, { id: 'on-root', kind: 'point-on-curve', pointId: 'o', curveId: 'g_t5_root' }];
+    const last = { id: 'last-tip', kind: 'distance', pointIds: ['u', 'g_t17_tipR'], value: 5 };
+    const z18 = expandCadSketchGenerators(graphOf([pluginOf(CAD_GEAR_V3_PLUGIN, { teeth: 'z' }), ...ties, last], points, entities), { z: 18 });
+    expect(entityOf(z18, 'g_t3_tip')).toMatchObject({ kind: 'arc', centerPointId: 'g_t3_tipC', startPointId: 'g_t3_tipL', endPointId: 'g_t3_tipR' });
+    expect(entityOf(z18, 'g_t5_root')).toMatchObject({ kind: 'arc', startPointId: 'g_t5_rootR', endPointId: 'g_t6_rootL' });
+    expect(entityOf(z18, 'g_t17_root')).toMatchObject({ endPointId: 'g_t0_rootL' });
+    // Seventeen teeth leave tooth 17, and the relation on it refuses, naming the gear and the relation.
+    expect(() => regenerateCadSketchGenerators(z18, { z: 17 })).toThrow(/Spur gear "gear" no longer generates geometry that Distance "last-tip" uses/);
+    const kept = withRelations(z18, z18.relations.filter(relation => relation.id !== 'last-tip'));
+    const z17 = regenerateCadSketchGenerators(kept, { z: 17 });
+    // Tooth 3 is tooth 3 still, its tip the arc between the same ends, and every relation on it stays as it was.
+    expect(userRelations(z17)).toEqual(userRelations(kept));
+    expect(entityOf(z17, 'g_t3_tip')).toMatchObject({ kind: 'arc', startPointId: 'g_t3_tipL', endPointId: 'g_t3_tipR' });
+    expect(entityOf(z17, 'g_t16_root')).toMatchObject({ endPointId: 'g_t0_rootL' });
+    expect(z17.entities.some(entity => entity.id.startsWith('g_t17_'))).toBe(false);
+    // Back to eighteen, the gear is again exactly what it was, members and ids, with the relations on it.
+    const back = regenerateCadSketchGenerators(z17, { z: 18 });
+    expect(ids(back)).toEqual(ids(kept));
+    expect(back.points).toEqual(kept.points);
+    expect(userRelations(back)).toEqual(userRelations(kept));
+  });
+
+  it('key a resampled flank\'s chords anew, keeping its ends, the tip and the root, and take relations on old chords through the remap', () => {
+    const points = [{ id: 'u', position: [80, 0] }, { id: 'a', position: [0, 80] }, { id: 'b', position: [10, 90] }, { id: 'o', position: [0, -80] }];
+    const entities = [{ id: 'free', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }, { id: 'ring', kind: 'circle', construction: false, centerPointId: 'o', radius: 5 }];
+    const gear = pluginOf(CAD_GEAR_V3_PLUGIN, { qualityMode: 1, tolerance: 'tol' });
+    const coarse = expandCadSketchGenerators(graphOf([gear], points, entities), { tol: 0.01 });
+    const chord = (graph: CadSketchGraph) => graph.entities.find(entity => /^g_t2_flankL\d+s1$/.test(entity.id))!.id;
+    const ties = [{ id: 'flank-tip', kind: 'distance', pointIds: ['u', 'g_t2_tipL'], value: 5 }, { id: 'flank-base', kind: 'distance', pointIds: ['u', 'g_t2_baseL'], value: 5 },
+      { id: 'tip-size', kind: 'equal-radius', curveIds: ['ring', 'g_t2_tip'] }, { id: 'on-root', kind: 'point-on-curve', pointId: 'o', curveId: 'g_t2_root' }];
+    const along = { id: 'along', kind: 'parallel', lineIds: ['free', chord(coarse)] };
+    const tied = withRelations(coarse, [...coarse.relations, ...ties, along] as CadSketchGraphRelation[]);
+    expect(() => regenerateCadSketchGenerators(tied, { tol: 0.001 })).toThrow(/Spur gear "gear" no longer generates geometry that Parallel "along" uses/);
+    const fine = regenerateCadSketchGenerators(withRelations(tied, tied.relations.filter(relation => relation.id !== 'along')), { tol: 0.001 });
+    expect(chord(fine)).not.toBe(chord(coarse));
+    expect(fine.entities.length).toBeGreaterThan(coarse.entities.length);
+    expect(userRelations(fine).map(relation => relation.id)).toEqual(['flank-tip', 'flank-base', 'tip-size', 'on-root']);
+    expect(entityOf(fine, 'g_t2_tip')).toMatchObject({ startPointId: 'g_t2_tipL' });
+  });
+
+  it('key a recipe by repetition and point, so repetitions that stay keep their members as the count changes', () => {
+    const points = [{ id: 'u', position: [80, 0] }];
+    const ties = [{ id: 'lobe-2', kind: 'distance', pointIds: ['u', 'g_r2_v1'], value: 5 }, { id: 'lobe-7', kind: 'distance', pointIds: ['u', 'g_r7_v0'], value: 5 }];
+    const eight = expandCadSketchGenerators(graphOf([pluginOf(CAD_STAR_PLUGIN, { lobes: 'k' }), ...ties], points), { k: 8 });
+    expect(entityOf(eight, 'g_r7_e1')).toMatchObject({ startPointId: 'g_r7_v1', endPointId: 'g_r0_v0' });
+    expect(() => regenerateCadSketchGenerators(eight, { k: 7 })).toThrow(/Star profile "gear" no longer generates geometry that Distance "lobe-7" uses/);
+    const kept = withRelations(eight, eight.relations.filter(relation => relation.id !== 'lobe-7'));
+    const seven = regenerateCadSketchGenerators(kept, { k: 7 });
+    expect(userRelations(seven)).toEqual(userRelations(kept));
+    expect(entityOf(seven, 'g_r6_e1')).toMatchObject({ startPointId: 'g_r6_v1', endPointId: 'g_r0_v0' });
+    expect(ids(regenerateCadSketchGenerators(seven, { k: 8 }))).toEqual(ids(kept));
+  });
+
   it('generate plugin shapes through the plugin API, once for each set of inputs', () => {
-    const resolve = vi.spyOn(plugins, 'resolveCadPluginProfile');
+    const resolve = vi.spyOn(plugins, 'resolveCadPluginOutline');
     try {
       const gear = (id: string): CadSketchGenerator => ({ id, kind: 'generator', idPrefix: `g-${id}`, construction: false,
         geometry: { ...createCadPluginProfile(CAD_GEAR_V3_PLUGIN), inputs: { ...createCadPluginProfile(CAD_GEAR_V3_PLUGIN).inputs, teeth: 'teeth' } } as CadSketchGenerator['geometry'] });
