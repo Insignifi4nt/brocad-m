@@ -65,6 +65,35 @@ describe('CAD worker lifetime and cancellation', () => {
       expect(transport.terminated).toBe(false); client.dispose();
     }
   });
+  it('admits build diagnostics only with well-formed, bounded details and the facts their code carries', () => {
+    const reply = (...diagnostics: unknown[]) => ({ id: 1, kind: 'built', result: { buildId: 'diagnosed', meshes: [], diagnostics, durationMs: 1 } });
+    const failure = { code: 'kernel-operation-failed', featureId: 'round', message: 'The fillet could not be applied.' };
+    const details = { operation: 'fillet', input: { field: 'targetId', id: 'box' }, kernelMessage: 'BRep_API: command not done' };
+    const stop = { code: 'rebuild-stopped', featureId: 'round', message: 'Rebuild stopped here.' };
+    // A reply without details, as the kernel gave before it named its steps, and one with them.
+    expect(isCadKernelReply(reply(failure, stop))).toBe(true);
+    expect(isCadKernelReply(reply({ ...failure, details }, stop))).toBe(true);
+    expect(isCadKernelReply(reply({ ...failure, details: { ...details, input: null, kernelMessage: null } }))).toBe(true);
+    for (const changed of [{ operation: 'nonsense' }, { input: { field: [], id: {} } }, { input: { field: 'targetId' } }, { input: { field: 'targetId', id: 'box', extra: 1 } },
+      { input: { field: 'f'.repeat(65), id: 'box' } }, { input: { field: 'targetId', id: 'i'.repeat(97) } }, { kernelMessage: {} }, { kernelMessage: 'x'.repeat(2049) },
+      { kernelMessage: '' }, { note: 'free text' }]) {
+      expect(isCadKernelReply(reply({ ...failure, details: { ...details, ...changed } })), JSON.stringify(changed).slice(0, 80)).toBe(false);
+    }
+    expect(isCadKernelReply(reply({ ...failure, details: [] }))).toBe(false);
+    // A code that carries facts gives them, in range; no other code gives any.
+    const mismatch = { ...failure, code: 'selection-count-mismatch', message: 'Matched 3, requires 2.' };
+    expect(isCadKernelReply(reply({ ...mismatch, facts: { expected: 2, actual: 3 } }))).toBe(true);
+    expect(isCadKernelReply(reply({ ...mismatch, code: 'selection-empty', facts: { expected: null } }))).toBe(true);
+    for (const facts of [undefined, { expected: 2 }, { expected: 2, actual: 2 }, { expected: 2, actual: 0 }, { expected: 0, actual: 1 }, { expected: 2, actual: 1.5 },
+      { expected: 2, actual: 3, extra: 1 }, { expected: '2', actual: 3 }, null]) {
+      expect(isCadKernelReply(reply({ ...mismatch, facts })), JSON.stringify(facts)).toBe(false);
+    }
+    expect(isCadKernelReply(reply({ ...failure, facts: { expected: 2, actual: 3 } }))).toBe(false);
+    // A stop follows a failure of the feature it stopped at.
+    expect(isCadKernelReply(reply(stop))).toBe(false);
+    expect(isCadKernelReply(reply({ ...failure, featureId: 'other' }, stop))).toBe(false);
+    expect(isCadKernelReply(reply(failure, { ...stop, featureId: undefined }))).toBe(false);
+  });
   it('checks preview triangle topology and rejects malformed buffers before rendering', () => {
     const mesh = { featureId: 'body', name: 'Body', positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1], indices: [0, 1, 2], edges: [], volume: 1,
       faceGroups: [{ start: 0, count: 3, key: 'face' }], edgeGroups: [],

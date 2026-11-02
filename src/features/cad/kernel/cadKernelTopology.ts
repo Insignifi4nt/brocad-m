@@ -174,8 +174,10 @@ function readAdjacency(entries: readonly Entry[]): Omit<CadTopologyAdjacency, 'b
   });
 }
 function exactCount(actual: number, expected: number) {
-  if (actual !== expected) throw new CadError(actual === 0 ? 'selection-empty' : 'selection-count-mismatch',
-    `The geometric selector matched ${actual} element(s), but requires exactly ${expected}. Revise the selector; ambiguous matches are never chosen automatically.`);
+  if (actual === expected) return;
+  const message = `The geometric selector matched ${actual} element(s), but requires exactly ${expected}. Revise the selector; ambiguous matches are never chosen automatically.`;
+  if (actual === 0) throw new CadError('selection-empty', message, { expected });
+  throw new CadError('selection-count-mismatch', message, { expected, actual });
 }
 
 /** One exact topology inventory owns native handles; descriptors are computed on demand. */

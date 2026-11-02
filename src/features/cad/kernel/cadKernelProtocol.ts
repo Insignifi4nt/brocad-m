@@ -1,5 +1,6 @@
 import type { CadBuildResult, CadDocument, CadMesh, CadMeshTopologyGroup } from '../../../domain/cad/cadDocument';
 import { cadBodyFeatureId, isCadBodyIssue, isCadBodyKey, isCadBodyState, MAX_CAD_BODY_ISSUES } from '../../../domain/cad/cadBodies';
+import { isCadKernelFailureDetails, isCadRefusalFactCode, isCadRefusalFacts } from '../../../domain/cad/cadIssueCodes';
 import { isCadSectionResult, type CadSectionRequest, type CadSectionResult } from '../../../domain/cad/cadSection';
 import { isCadTopologyInspectResult, isCadTopologyResolvePicksResult, type CadTopologyInspectRequest, type CadTopologyInspectResult,
   type CadTopologyResolvePicksRequest, type CadTopologyResolvePicksResult } from '../../../domain/cad/cadTopology';
@@ -73,10 +74,17 @@ export function isCadKernelReply(value: unknown): value is CadKernelReply {
   }
   if ('bodyIssues' in result && result.bodyIssues !== undefined
     && (!Array.isArray(result.bodyIssues) || result.bodyIssues.length > MAX_CAD_BODY_ISSUES || !result.bodyIssues.every(isCadBodyIssue))) return false;
+  const failed = new Set<string>();
   for (const diagnostic of result.diagnostics) {
     if (typeof diagnostic !== 'object' || diagnostic === null || typeof diagnostic.code !== 'string'
       || diagnostic.code.length > 128 || typeof diagnostic.message !== 'string' || diagnostic.message.length > 8192
-      || diagnostic.featureId !== undefined && (typeof diagnostic.featureId !== 'string' || diagnostic.featureId.length > 96)) return false;
+      || diagnostic.featureId !== undefined && (typeof diagnostic.featureId !== 'string' || diagnostic.featureId.length > 96)
+      || diagnostic.details !== undefined && !isCadKernelFailureDetails(diagnostic.details)
+      // A code that carries facts always gives them, and no other code gives any.
+      || (diagnostic.facts === undefined ? isCadRefusalFactCode(diagnostic.code) : !isCadRefusalFacts(diagnostic.code, diagnostic.facts))) return false;
+    // A stop follows a failure of the feature it stopped at.
+    if (diagnostic.code !== 'rebuild-stopped') { if (diagnostic.featureId !== undefined) failed.add(diagnostic.featureId); }
+    else if (diagnostic.featureId === undefined || !failed.has(diagnostic.featureId)) return false;
   }
   return true;
 }

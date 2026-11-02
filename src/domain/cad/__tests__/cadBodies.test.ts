@@ -587,7 +587,7 @@ describe('body parts', () => {
     const issues = lineage.issues();
     expect(issues).toHaveLength(MAX_CAD_BODY_ISSUES);
     expect(issues.every(isCadBodyIssue)).toBe(true);
-    expect(issues.at(-1)).toEqual({ code: 'more-body-issues', featureId: `c${MAX_CAD_BODY_ISSUES - 1}`, body: 'box', pieces: [],
+    expect(issues.at(-1)).toEqual({ code: 'more-body-issues', featureId: `c${MAX_CAD_BODY_ISSUES - 1}`, body: 'box', pieces: [], omitted: 21,
       message: `21 more body issues, from feature c${MAX_CAD_BODY_ISSUES - 1} on, are not listed.` });
   });
 
@@ -771,10 +771,15 @@ describe('body references, metadata and selection', () => {
     const issue = { code: 'lost-body-parts', featureId: 'slot', body: 'box', pieces: ['peg/split(0)'], message: 'x' };
     expect(isCadBodyIssue(issue)).toBe(true);
     expect(isCadBodyIssue({ ...issue, code: 'ambiguous-split-order' })).toBe(false);
-    // Only an untracked body names why, with one of its causes.
+    // An untracked body names why, with one of its causes, and only it does.
     expect(isCadBodyIssue({ ...issue, code: 'untracked-body-parts', pieces: [], reason: 'search-limit' })).toBe(true);
     expect(isCadBodyIssue({ ...issue, code: 'untracked-body-parts', pieces: [], reason: 'too-many' })).toBe(false);
+    expect(isCadBodyIssue({ ...issue, code: 'untracked-body-parts', pieces: [] })).toBe(false);
     expect(isCadBodyIssue({ ...issue, reason: 'part-limit' })).toBe(false);
+    // The summary of issues left out counts them, and only it does.
+    expect(isCadBodyIssue({ ...issue, code: 'more-body-issues', pieces: [], omitted: 21 })).toBe(true);
+    for (const omitted of [undefined, 0, 1.5, '21']) expect(isCadBodyIssue({ ...issue, code: 'more-body-issues', pieces: [], omitted }), String(omitted)).toBe(false);
+    expect(isCadBodyIssue({ ...issue, omitted: 21 })).toBe(false);
     expect(isCadBodyIssue({ ...issue, pieces: ['bad key'] })).toBe(false);
     expect(isCadBodyIssue({ ...issue, message: 'x'.repeat(8193) })).toBe(false);
   });

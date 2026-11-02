@@ -220,7 +220,8 @@ export function isCadBodyIssue(value: unknown): value is CadBodyIssue {
   if (!BODY_ISSUE_CODES.has(issue.code) || !isFeatureId(issue.featureId) || !isCadBodyKey(issue.body)) return false;
   if (!Array.isArray(pieces) || pieces.length > MAX_CAD_BODY_LIST) return false;
   for (const piece of pieces) if (!isCadBodyKey(piece)) return false;
-  if (issue.reason !== undefined && (issue.code !== 'untracked-body-parts' || !UNTRACKED_REASONS.has(issue.reason))) return false;
+  if (issue.code === 'untracked-body-parts' ? !UNTRACKED_REASONS.has(issue.reason) : issue.reason !== undefined) return false;
+  if (issue.code === 'more-body-issues' ? !Number.isSafeInteger(issue.omitted) || (issue.omitted as number) < 1 : issue.omitted !== undefined) return false;
   return typeof issue.message === 'string' && issue.message.length <= MAX_CAD_BODY_ISSUE_MESSAGE;
 }
 
@@ -243,7 +244,7 @@ export function cadBodyFeatureId(state: Pick<CadBodyState, 'createdBy' | 'modifi
  *   gives the bound it passed: more solids than it tracks (`part-limit`); more part names or longer ones than it tracks, whether names
  *   the body keeps or names it lost (`key-limit`); or more work to find which names were lost than a rebuild allows (`search-limit`),
  *   which can stop it even when none was.
- * - `more-body-issues`: the issues from `featureId` on did not fit in the list; the message gives how many were left out.
+ * - `more-body-issues`: the issues from `featureId` on did not fit in the list; `omitted` gives how many were left out.
  */
 export interface CadBodyIssue {
   readonly code: 'ambiguous-body-parts' | 'lost-body-parts' | 'untracked-body-parts' | 'more-body-issues';
@@ -251,8 +252,10 @@ export interface CadBodyIssue {
   readonly body: CadBodyKey;
   readonly pieces: readonly CadBodyKey[];
   readonly message: string;
-  /** Given for `untracked-body-parts` only. */
+  /** Given for `untracked-body-parts`, and only for it. */
   readonly reason?: CadBodyUntrackedReason;
+  /** Given for `more-body-issues`, and only for it. */
+  readonly omitted?: number;
 }
 /** Why the lineage stopped tracking a body's parts: more solids than it tracks, more or longer part names, or more tracing work than a rebuild allows. */
 export type CadBodyUntrackedReason = 'part-limit' | 'key-limit' | 'search-limit';
@@ -1028,8 +1031,9 @@ export function createCadBodyLineage(): CadBodyLineage {
       }));
       if (issues.length <= MAX_CAD_BODY_ISSUES) return listed;
       const first = issues[listed.length].about;
-      return [...listed, freeze({ code: 'more-body-issues' as const, featureId: first.featureId, body: first.body, pieces: NONE,
-        message: `${issues.length - listed.length} more body issues, from feature ${first.featureId} on, are not listed.` })];
+      const omitted = issues.length - listed.length;
+      return [...listed, freeze({ code: 'more-body-issues' as const, featureId: first.featureId, body: first.body, pieces: NONE, omitted,
+        message: `${omitted} more body issues, from feature ${first.featureId} on, are not listed.` })];
     }
   };
 }

@@ -5,7 +5,7 @@ import { CAD_PRECISION } from '../../../domain/precision/cadPrecision';
 
 /** Explicit native builder lifetimes also cover rejected kernel operations. */
 export function applyCadEdgeOperation(shape: Shape3D, edges: readonly Edge[], kind: 'fillet' | 'chamfer', radius: number, tangentPropagation = false): Shape3D {
-  if (!edges.length) throw new CadError('selection-empty', 'Select at least one exact edge.');
+  if (!edges.length) throw new CadError('selection-empty', 'Select at least one exact edge.', { expected: null });
   const oc = getOC();
   const builder = kind === 'fillet'
     ? new oc.BRepFilletAPI_MakeFillet(shape.wrapped, oc.ChFi3d_FilletShape.ChFi3d_Rational)

@@ -306,5 +306,5 @@ export function createCadSketchProfile(input: { readonly geometry: CadProfile; r
 
 export function validateCadDocument(document: CadDocument): readonly CadDiagnostic[] {
   try { parseCadDocument(document); return []; }
-  catch (error) { if (error instanceof CadError) return [{ code: error.code, message: error.message }]; throw error; }
+  catch (error) { if (error instanceof CadError) return [{ code: error.code, message: error.message, ...(error.facts ? { facts: error.facts } : {}) }]; throw error; }
 }

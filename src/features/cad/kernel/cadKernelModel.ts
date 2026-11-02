@@ -2,6 +2,7 @@ import { cast, Compound, getOC, isShape3D, type Drawing, type Shape3D, type Simp
 import type { CadBuildResult, CadDocument, CadFeature, CadMesh, CadScalar, CadSketchFeature } from '../../../domain/cad/cadDocument';
 import { evaluateCadAngle, evaluateCadScalar } from '../../../domain/cad/cadExpression';
 import { CadError } from '../../../domain/cad/cadError';
+import { isCadRefusalFactCode, isCadRefusalFacts } from '../../../domain/cad/cadIssueCodes';
 import { resolveCadSketchRegions, type CadSketchMaterialRegion } from '../../../domain/cad/cadSketchGeometry';
 import type { CadSectionRequest, CadSectionResult } from '../../../domain/cad/cadSection';
 import { createCadKernelPlane } from './cadKernelPlane';
@@ -358,8 +359,13 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       releaseTransientShapes();
     } catch (error) {
       releaseTransientShapes();
+      // The reply guard refuses a code that carries facts without them; in development the site that raised it is found here.
+      if (import.meta.env?.DEV && error instanceof CadError && isCadRefusalFactCode(error.code) && !isCadRefusalFacts(error.code, error.facts)) {
+        throw new Error(`Refusal ${error.code} of ${feature.id} is raised without its facts.`);
+      }
       diagnostics.push({ code: error instanceof CadError ? error.code : 'kernel-operation-failed', featureId: feature.id,
-        message: error instanceof Error ? error.message : 'OpenCascade could not construct this feature. Reduce its dimensions or revise the sketch.' });
+        message: error instanceof Error ? error.message : 'OpenCascade could not construct this feature. Reduce its dimensions or revise the sketch.',
+        ...(error instanceof CadError && error.facts ? { facts: error.facts } : {}) });
       diagnostics.push({ code: 'rebuild-stopped', featureId: feature.id, message: 'Rebuild stopped here. The preview shows the preceding valid features; downstream features have not been evaluated.' });
       break;
     } finally { copyFaces?.dispose(); }

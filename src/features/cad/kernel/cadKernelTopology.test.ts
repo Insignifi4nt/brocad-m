@@ -161,7 +161,8 @@ describe('exact topology and selected mechanical features', () => {
       expect(model.result.diagnostics).toEqual([]); expect(model.result.meshes[0].volume).toBeCloseTo(990, 6);
     });
     built(withFeatures(boxDocument(), { ...base('bad'), kind: 'chamfer', targetId: 'box', radius: 1, selection: { ...overlapping, expectedCount: 2 } }), model => {
-      expect(model.result.diagnostics[0].code).toBe('selection-count-mismatch'); expect(model.result.meshes[0].volume).toBeCloseTo(1000);
+      // The union matches the one edge both queries find, and the refusal carries both counts.
+      expect(model.result.diagnostics[0]).toMatchObject({ code: 'selection-count-mismatch', facts: { expected: 2, actual: 1 } }); expect(model.result.meshes[0].volume).toBeCloseTo(1000);
     });
   });
   it('rejects unselected tangent propagation and accepts an explicitly selected complete rounded rim', () => {

@@ -104,7 +104,7 @@ const kindReach = (kind: CadFeatureKind) => {
   const stop = new Set([...options.stop!, ...Object.entries(INPUT_EVALUATIONS).filter(([, owners]) => !owners.includes(kind)).map(([name]) => name)]);
   return reaches.get(kind) ?? reaches.set(kind, cadDiagnosticReach(index, kindRoots(kind), { ...options, stop })).get(kind)!;
 };
-const shared = () => new Set(Object.values(CAD_FEATURE_SHARED_DIAGNOSTICS).flat());
+const shared = (): ReadonlySet<string> => new Set(Object.values(CAD_FEATURE_SHARED_DIAGNOSTICS).flat());
 
 describe('CAD feature diagnostics', () => {
   it('list the codes of the steps every feature goes through as shared', () => {
