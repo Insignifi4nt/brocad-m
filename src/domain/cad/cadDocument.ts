@@ -90,7 +90,21 @@ export interface CadDocument {
   readonly features: readonly CadFeature[];
 }
 
-export interface CadDiagnostic { readonly code: string; readonly message: string; readonly featureId?: string }
+/**
+ * A build diagnostic. A feature's failure carries `details` from the kernel: the step it was taking, the input it was reading and, for a
+ * failure the kernel reported in its own words, that text, which the message never repeats. `rebuild-stopped` carries none.
+ */
+export interface CadDiagnostic { readonly code: string; readonly message: string; readonly featureId?: string; readonly details?: CadKernelFailureDetails }
+/** The kernel step a feature was taking when it failed. */
+export type CadKernelOperation = 'import' | 'profile' | 'extrude' | 'revolve' | 'loft' | 'sweep' | 'pocket' | 'join' | 'cut' | 'intersect'
+  | 'fillet' | 'chamfer' | 'shell' | 'transform' | 'mirror' | 'pattern' | 'check' | 'record';
+export interface CadKernelFailureDetails {
+  readonly operation: CadKernelOperation;
+  /** The input the step was reading: the feature field that names it and the id it holds. */
+  readonly input: { readonly field: string; readonly id: string } | null;
+  /** The kernel's own text, for a failure it reported in its own words; never shown as the message. */
+  readonly kernelMessage: string | null;
+}
 export interface CadMeshTopologyGroup { readonly start: number; readonly count: number; readonly key: string }
 export interface CadMesh {
   readonly featureId: string; readonly name: string;

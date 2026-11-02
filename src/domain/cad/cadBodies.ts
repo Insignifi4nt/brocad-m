@@ -220,6 +220,7 @@ export function isCadBodyIssue(value: unknown): value is CadBodyIssue {
   if (!BODY_ISSUE_CODES.has(issue.code) || !isFeatureId(issue.featureId) || !isCadBodyKey(issue.body)) return false;
   if (!Array.isArray(pieces) || pieces.length > MAX_CAD_BODY_LIST) return false;
   for (const piece of pieces) if (!isCadBodyKey(piece)) return false;
+  if (issue.reason !== undefined && (issue.code !== 'untracked-body-parts' || !UNTRACKED_REASONS.has(issue.reason))) return false;
   return typeof issue.message === 'string' && issue.message.length <= MAX_CAD_BODY_ISSUE_MESSAGE;
 }
 
@@ -238,7 +239,9 @@ export function cadBodyFeatureId(state: Pick<CadBodyState, 'createdBy' | 'modifi
  * - `lost-body-parts`: `pieces` of `body` named a solid before `featureId` in some kernel order and name none after it in any, since it
  *   removed or merged their solids. It lists every such key, whether or not this build gave it, digits by value, so every kernel order
  *   reports the same. References to them resolve as missing.
- * - `untracked-body-parts`: after `featureId`, `body` has more parts than the lineage tracks, so it keeps none from then on.
+ * - `untracked-body-parts`: after `featureId`, the lineage stops tracking the parts of `body`, so it keeps none from then on. `reason`
+ *   gives the cause: more solids than it tracks (`part-limit`), more part names or longer ones (`key-limit`), or more work to find
+ *   which keys were lost, or more lost keys, than a rebuild allows (`search-limit`); the work limit can stop it even when none was.
  * - `more-body-issues`: the issues from `featureId` on did not fit in the list; the message gives how many were left out.
  */
 export interface CadBodyIssue {
@@ -247,7 +250,12 @@ export interface CadBodyIssue {
   readonly body: CadBodyKey;
   readonly pieces: readonly CadBodyKey[];
   readonly message: string;
+  /** Given for `untracked-body-parts` only. */
+  readonly reason?: CadBodyUntrackedReason;
 }
+/** Why the lineage stopped tracking a body's parts: more solids than it tracks, more or longer part names, or more tracing work than a rebuild allows. */
+export type CadBodyUntrackedReason = 'part-limit' | 'key-limit' | 'search-limit';
+const UNTRACKED_REASONS: ReadonlySet<unknown> = new Set<CadBodyUntrackedReason>(['part-limit', 'key-limit', 'search-limit']);
 
 /** The most issues one build lists: the last place goes to a `more-body-issues` summary when there are more. */
 export const MAX_CAD_BODY_ISSUES = 512;
@@ -362,15 +370,16 @@ export interface CadBodyParts {
    * `lost-body-parts` issue, sorted so that every kernel order gives the same list.
    */
   readonly lost: readonly CadBodyKey[];
-  /** The feature gave the body more parts than the lineage tracks, for an `untracked-body-parts` issue. */
-  readonly overflowed?: true;
+  /** Why the feature left the body's parts untracked, for an `untracked-body-parts` issue. */
+  readonly overflowed?: CadBodyUntrackedReason;
 }
 
 const NONE: readonly CadBodyKey[] = freeze([]);
 const NO_PAIRS: readonly (readonly [CadBodyKey, CadBodyKey])[] = freeze([]);
 const WHOLE: CadBodyParts = freeze({ ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
 const UNTRACKED: CadBodyParts = freeze({ untracked: true as const, ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
-const OVERFLOWED: CadBodyParts = freeze({ untracked: true as const, ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE, overflowed: true as const });
+const overflowed = (reason: CadBodyUntrackedReason): CadBodyParts => freeze({ untracked: true as const, ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE, overflowed: reason });
+const OVERFLOWED = { parts: overflowed('part-limit'), keys: overflowed('key-limit'), search: overflowed('search-limit') } as const;
 /** What every tool solid passes on: never a key, since a key is never empty. Solids of a fused tool alone get fresh keys. */
 const TOOL = '' as CadBodyKey;
 
@@ -663,7 +672,7 @@ export function cadBodyParts(input: {
   const patterned = facts.sources.some(source => source.kind === 'copy'), fused = facts.sources.some(source => source.kind === 'tool');
   const beforeSolids = input.beforeSolids ?? 1;
   if (!before && (count <= 1 || fused && !patterned || !patterned && !facts.removesMaterial && count <= beforeSolids)) return WHOLE;
-  if (count > MAX_CAD_BODY_LIST) return OVERFLOWED;
+  if (count > MAX_CAD_BODY_LIST) return OVERFLOWED.parts;
   const traced = facts.provenance();
   if (traced.length !== count) throw new Error('Each solid of the result needs its sources.');
   if (!before && (patterned ? traced.every(sources => sources.some(entry => entry.source === 0)) : !splits(traced, count, beforeSolids))) return WHOLE;
@@ -810,7 +819,7 @@ export function cadBodyParts(input: {
   const leads = addLeads(new Set(), [...pieces, ...parent.keys()]);
   const kept = [...(previous.orders ?? []).filter(order => order.keys.some(part => leads.has(part))), ...orders];
   const all = new Set<CadBodyKey>([...pieces, ...parent.keys(), ...kept.flatMap(order => order.keys)]);
-  if (all.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED;
+  if (all.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED.keys;
   const groups = new Map<CadBodyKey, CadBodyKey[]>();
   for (const part of parent.keys()) { const top = root(part), group = groups.get(top); if (group) group.push(part); else groups.set(top, [part]); }
   const ambiguous = [...groups.values()].map(group => freeze(group));
@@ -825,7 +834,7 @@ export function cadBodyParts(input: {
   // greater cost, so they are skipped.
   const homeless = previous.ambiguous?.filter((_, g) => !descent.has(`${g} 0`)).flat() ?? [], stays = passer(after, () => true);
   const lost = lostKeys(previous, after, [...(before ?? []).filter(piece => !continuedFrom.has(piece)), ...homeless].filter(part => !stays(part)), continuedFrom);
-  if (!lost) return OVERFLOWED;
+  if (!lost) return OVERFLOWED.search;
   // The keys this feature made ambiguous: its groups' keys and the pieces its orders may place otherwise, unless they were ambiguous before
   // or are ambiguous through a key that was.
   const descended = new Set(inherited.map(([piece]) => piece));
@@ -891,7 +900,7 @@ function stateOf(body: Body): CadBodyState {
 
 /** An issue as the lineage records it: an ambiguity's keys grow as later features extend it. */
 interface Recorded {
-  readonly about: Pick<CadBodyIssue, 'code' | 'featureId' | 'body'>;
+  readonly about: Pick<CadBodyIssue, 'code' | 'featureId' | 'body' | 'reason'>;
   readonly pieces: CadBodyKey[];
   readonly listed: Set<CadBodyKey>;
   /** Fixed for every code but `ambiguous-body-parts`, whose message counts its keys. */
@@ -900,6 +909,13 @@ interface Recorded {
 
 /** `n` pieces, in words. */
 function piecesOf(n: number): string { return n === 1 ? '1 piece' : `${n} pieces`; }
+
+/** What an `untracked-body-parts` issue says, by its cause. */
+const UNTRACKED_MESSAGES: Readonly<Record<CadBodyUntrackedReason, (body: CadBodyKey, featureId: string) => string>> = {
+  'part-limit': (body, featureId) => `Body ${body} has more parts than are tracked after ${featureId}, so references to its parts resolve as missing.`,
+  'key-limit': (body, featureId) => `Body ${body} has more part names, or longer ones, than are tracked after ${featureId}, so references to its parts resolve as missing.`,
+  'search-limit': (body, featureId) => `Finding which parts of body ${body} were lost after ${featureId} takes more work, or finds more of them, than a rebuild tracks, so its parts are no longer tracked and references to them resolve as missing.`
+};
 
 export function createCadBodyLineage(): CadBodyLineage {
   /** Current bodies by the feature whose result each now is, in the order meshes list them. */
@@ -922,14 +938,14 @@ export function createCadBodyLineage(): CadBodyLineage {
     return { kept, tools, target, key };
   }
 
-  function record(code: CadBodyIssue['code'], featureId: string, body: CadBodyKey, pieces: readonly CadBodyKey[], message?: string): Recorded {
-    const issue: Recorded = { about: { code, featureId, body }, pieces: [...pieces], listed: new Set(pieces), ...(message !== undefined ? { message } : {}) };
+  function record(code: CadBodyIssue['code'], featureId: string, body: CadBodyKey, pieces: readonly CadBodyKey[], message?: string, reason?: CadBodyUntrackedReason): Recorded {
+    const issue: Recorded = { about: { code, featureId, body, ...(reason ? { reason } : {}) }, pieces: [...pieces], listed: new Set(pieces), ...(message !== undefined ? { message } : {}) };
     issues.push(issue);
     return issue;
   }
 
   function report(featureId: string, body: CadBodyKey, parts: CadBodyParts) {
-    if (parts.overflowed) record('untracked-body-parts', featureId, body, NONE, `Body ${body} has more parts than are tracked after ${featureId}, so references to its parts resolve as missing.`);
+    if (parts.overflowed) record('untracked-body-parts', featureId, body, NONE, UNTRACKED_MESSAGES[parts.overflowed](body, featureId), parts.overflowed);
     // A key ambiguous only through an ambiguous key it descends from extends that key's issues; one no issue can take is reported here.
     const fresh = new Set(parts.ambiguousNow);
     for (const [piece, origin] of parts.inherited) {

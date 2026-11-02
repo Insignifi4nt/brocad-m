@@ -25,7 +25,7 @@ const INPUT_EVALUATIONS: Readonly<Record<string, readonly CadFeatureKind[]>> = {
  */
 const GRAPH_ISSUE = 'A sketch graph issue, refused with the code of the check that finds it.';
 const ARRANGEMENT_ISSUE = 'A sketch arrangement issue. Cells refuse an arrangement with issues as unsupported-sketch-cells.';
-const BODY_ISSUE = 'A body issue. The body lineage, which the parse and the rebuild both keep, records it, and a build returns it in bodyIssues beside its bodies; nothing turns it into a diagnostic.';
+const BODY_ISSUE = 'A body issue. The body lineage, which the parse and the rebuild both keep, records it, and a build returns it in bodyIssues beside its bodies; the build issues present it as an issue, never as a diagnostic.';
 /** Codes the walk finds that are no refusal of a feature, and why. */
 const NOT_REFUSALS: Readonly<Record<string, string>> = {
   STALE_BUILD: 'A topology snapshot refuses use once disposed. A rebuild selects edges and faces on the snapshot of its own build, before disposing it.',
