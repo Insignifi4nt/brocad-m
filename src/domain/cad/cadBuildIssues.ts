@@ -111,7 +111,10 @@ function featureRepairs(feature: CadFeature, code: string, version: string): rea
   return repairs;
 }
 
-/** The kernel step a feature's rebuild starts with, and the step a failure without kernel details names: the feature's own operation. */
+/**
+ * The kernel step a feature's rebuild starts with, and the step a failure without kernel details names: the feature's own operation. None
+ * starts with profile: a feature reads its sketch before building faces from it, and its own step resumes once they are built.
+ */
 export function cadKernelOperationOf(feature: CadFeature | undefined): CadKernelOperation {
   switch (feature?.kind) {
     case 'imported': return 'import';

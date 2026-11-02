@@ -9,6 +9,7 @@ import { cadKernelProfileDrawing, cadKernelSketchOnPlane } from './cadKernelSket
 import { cadKernelDisposeOwned, cadKernelIsValid, cadKernelSolids } from './cadKernelShapes';
 import { CAD_PRECISION } from '../../../domain/precision/cadPrecision';
 import { cadKernelVolume } from './cadKernelQueries';
+import type { CadKernelProfileStep } from './cadKernelFailures';
 
 function validateSweepSolid(shape: Shape3D) {
   const oc = getOC(); const solids = cadKernelSolids(shape);
@@ -50,8 +51,8 @@ function validateSweepSolid(shape: Shape3D) {
   } finally { solids.forEach(cadKernelDisposeOwned); }
 }
 
-/** Exact line extrusions and signed circular revolutions, never a fitted pipe frame. */
-export function buildCadSweepSolid(resolved: CadResolvedSweepInputs): Shape3D {
+/** Exact line extrusions and signed circular revolutions, never a fitted pipe frame. The section's face is built in `faces`. */
+export function buildCadSweepSolid(resolved: CadResolvedSweepInputs, faces: CadKernelProfileStep): Shape3D {
   const datumPlacement = !resolved.placement.legacyPrincipal;
   const curvePlane = datumPlacement ? null : requireCadPrincipalPlane(resolved.curve.plane, 'Sweep');
   const sectionPlane = datumPlacement ? null : requireCadPrincipalPlane(resolved.section.plane, 'Sweep');
@@ -65,13 +66,15 @@ export function buildCadSweepSolid(resolved: CadResolvedSweepInputs): Shape3D {
   let result: Shape3D | undefined;
   try {
     const plane = basis ? new CadKernelPlane(origin, basis.u, basis.normal) : createCadKernelPlane(resolved.section.placement.frame, offset); planes.push(plane);
-    const drawing = cadKernelProfileDrawing(resolved.section.geometry, drawings);
-    const sketch = cadKernelSketchOnPlane(drawing, plane); sketches.push(sketch);
-    const faceBuilder = own(new oc.BRepBuilderAPI_MakeFace(sketch.wire.wrapped, true));
-    if (!faceBuilder.IsDone()) throw new CadError('sweep-section', 'Sweep section did not form a planar closed face.');
-    const rawFace = faceBuilder.Face(); let face: Face;
-    try { face = own(new Face(oc.TopoDS.Face(rawFace))); } finally { cadKernelDisposeOwned(rawFace); }
-    release(faceBuilder);
+    let face = faces(() => {
+      const drawing = cadKernelProfileDrawing(resolved.section.geometry, drawings);
+      const sketch = cadKernelSketchOnPlane(drawing, plane); sketches.push(sketch);
+      const faceBuilder = own(new oc.BRepBuilderAPI_MakeFace(sketch.wire.wrapped, true));
+      if (!faceBuilder.IsDone()) throw new CadError('sweep-section', 'Sweep section did not form a planar closed face.');
+      const rawFace = faceBuilder.Face(); let built: Face;
+      try { built = own(new Face(oc.TopoDS.Face(rawFace))); } finally { cadKernelDisposeOwned(rawFace); }
+      release(faceBuilder); return built;
+    });
     for (let index = 0; index < resolved.curve.segments.length; ++index) {
       const segment = resolved.curve.segments[index]; const entity = resolved.curve.entities[index];
       if (!entity) throw new CadError('sweep-curve', 'Sweep curve is missing an analytic edge.');

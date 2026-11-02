@@ -36,7 +36,7 @@ import { cadFeatureScalar, cadFeatureScalarAccepts } from '../../../domain/cad/f
 import { cadKernelBounds, cadKernelVolume } from './cadKernelQueries';
 import { cadKernelOperationOf } from '../../../domain/cad/cadBuildIssues';
 import type { CadKernelOperation } from '../../../domain/cad/cadDocument';
-import { cadKernelFailure, type CadKernelStep } from './cadKernelFailures';
+import { cadKernelFailure, type CadKernelProfileStep, type CadKernelStep } from './cadKernelFailures';
 
 /** BRep state stays inside the worker. Only tessellation and export bytes leave it. */
 export interface CadKernelModel {
@@ -125,8 +125,8 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
     for (const shape of shapes) if (!retained.has(shape)) { cadKernelDisposeShape(shape); shapes.delete(shape); }
   }
 
-  /** A single region returns its checked shape unchanged; several regions return their fused, unchecked union. */
-  function fromSketch(feature: Extract<CadFeature, { kind: 'extrude' | 'revolve' }>, regions: readonly CadSketchMaterialRegion[]): { shape: Shape3D; checked: boolean } {
+  /** A single region returns its checked shape unchanged; several regions return their fused, unchecked union. Each region's face is built in `faces`. */
+  function fromSketch(feature: Extract<CadFeature, { kind: 'extrude' | 'revolve' }>, regions: readonly CadSketchMaterialRegion[], faces: CadKernelProfileStep): { shape: Shape3D; checked: boolean } {
     const sketch = sketches.get(feature.sketchId);
     if (!sketch) throw new CadError('missing-sketch', 'The source sketch is unavailable or suppressed.');
     const placement = resolveCadExtrudeRevolvePlacement(feature, sketch, document.parameters, frameLookup);
@@ -143,8 +143,9 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       let result: Shape3D | undefined;
       for (const region of regions) {
         const boundaries = [region.boundary, ...region.voids];
-        const wires = boundaries.map(item => { const drawing = cadKernelProfileDrawing(item.geometry, drawings); const wire = cadKernelSketchOnPlane(drawing, plane); consumedSketches.push(wire); return wire; });
-        const face = cadKernelSketchFace(wires), oc = getOC();
+        const face = faces(() => cadKernelSketchFace(boundaries.map(item => {
+          const drawing = cadKernelProfileDrawing(item.geometry, drawings); const wire = cadKernelSketchOnPlane(drawing, plane); consumedSketches.push(wire); return wire;
+        }))), oc = getOC();
         try {
           const vector = feature.kind === 'extrude' ? cadKernelScaledUnitVector(orientation.normal, distance) : null;
           const axis = feature.kind === 'revolve' ? cadKernelAx1(origin, revolutionAxis) : null;
@@ -182,6 +183,11 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
     // The step the rebuild of this feature is taking and the input it reads, which its failure names.
     let step: CadKernelStep = { operation: cadKernelOperationOf(feature), input: null };
     const at = (operation: CadKernelOperation, field?: string, id?: string | null) => { step = { operation, input: field && id ? { field, id } : null }; };
+    // Faces built from sketch `sketchId`'s profile are the step profile; the step they interrupted resumes once they are built.
+    const profile = (sketchId: string): CadKernelProfileStep => build => {
+      const resumed = step; at('profile', 'sketchId', sketchId);
+      const built = build(); step = resumed; return built;
+    };
     try {
       let result: Shape3D;
       // Whether the feature takes material from its target, and so may split it, and whether its result lists solids as its source did.
@@ -208,7 +214,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           const regions = resolveCadSketchRegions(sourceSketch, document.parameters, feature.kind === 'extrude' ? feature.regionSelection : undefined);
           instances = regions.length;
           if (feature.targetId !== null) instances = checkedInstances(instances + instancesOf(feature.targetId));
-          const sketched = fromSketch(feature, regions);
+          const sketched = fromSketch(feature, regions, profile(feature.sketchId));
           result = sketched.shape; topologyChecked = sketched.checked;
           if (feature.operation !== 'new') {
             if (!feature.targetId) throw new CadError('missing-target', 'Join and cut need a target body.');
@@ -249,13 +255,13 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
             const target = body(feature.targetId);
             instances = checkedInstances(1 + instancesOf(feature.targetId));
             at('sweep', 'curveId', feature.curveId);
-            const sweep = own(buildCadSweepSolid(inputs));
+            const sweep = own(buildCadSweepSolid(inputs, profile(feature.sketchId)));
             at(feature.operation, 'targetId', feature.targetId);
             removesMaterial = feature.operation === 'cut';
             if (feature.operation === 'join') fusedTool = sweep;
             result = own(feature.operation === 'join' ? cadKernelBuilders.fuse(target, sweep) : cutCadKernelConfirmedMaterial(target, sweep));
             topologyChecked = feature.operation === 'cut';
-          } else result = own(buildCadSweepSolid(inputs));
+          } else result = own(buildCadSweepSolid(inputs, profile(feature.sketchId)));
           break;
         }
         case 'pocket': {
@@ -266,7 +272,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           const inputs = resolveCadPocketInputs(feature, prefix, document.parameters);
           instances = checkedInstances(inputs.regionCount + instancesOf(feature.targetId));
           removesMaterial = true;
-          result = own(buildCadPocketCut(target, inputs)); break;
+          result = own(buildCadPocketCut(target, inputs, profile(feature.sketchId))); break;
         }
         case 'fillet': case 'chamfer': {
           at(feature.kind, 'targetId', feature.targetId);

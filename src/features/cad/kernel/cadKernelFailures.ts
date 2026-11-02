@@ -6,12 +6,18 @@ import { MAX_CAD_DIAGNOSTIC_MESSAGE, MAX_CAD_KERNEL_MESSAGE, cadBoundedText, typ
 export interface CadKernelStep { readonly operation: CadKernelOperation; readonly input: { readonly field: string; readonly id: string } | null }
 
 /**
+ * Runs `build`, which makes a feature's faces from its sketch profile, as the rebuild's step `profile` and returns what it built. Once the
+ * faces are built the step they interrupted resumes; a failure while building them names `profile` and the sketch.
+ */
+export type CadKernelProfileStep = <T>(build: () => T) => T;
+
+/**
  * What a step that failed in the kernel's own words tells the user: the step, its likely cause and the repair. The kernel's text says
  * none of these, so it is kept only as a detail.
  */
 const STEP_FAILURES: Readonly<Record<CadKernelOperation, string>> = {
   import: 'The imported solid could not be rebuilt. The file may hold damaged or open geometry; export it again from the program that made it.',
-  profile: 'The sketch profile could not be turned into a face. A contour may cross itself or be too small; edit the sketch.',
+  profile: 'The sketch profile could not be turned into a face. A contour may cross or touch itself, or be too small; edit the sketch.',
   extrude: 'The extrusion could not be built from its sketch. A contour may cross itself or the distance may be too small; edit the sketch or the distance.',
   revolve: 'The revolution could not be built from its sketch. The profile may cross or touch the axis; keep it on one side of the axis or change the angle.',
   loft: 'The loft could not connect its sections. The sections may twist against each other or differ too much; revise their shapes or try ruled mode.',
