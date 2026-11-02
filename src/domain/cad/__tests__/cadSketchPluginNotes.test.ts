@@ -68,5 +68,17 @@ describe('plugin notes on export and CAM handoff', () => {
     const drawn = applyCadEdits(document, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...generatorOf(document, 'wall'), construction: true } },
       { kind: 'set-sketch-generator', sketchId: 'sketch', generator: { id: 'disc', kind: 'generator', idPrefix: 'disc', construction: false, geometry: { kind: 'circle', x: 200, y: 0, radius: 5 } } }]);
     expect(dxfComments(cadSketchToDxf(drawn, 'sketch'))).not.toContain(dxfNote(CAD_STAR_PLUGIN));
+    // An offset of that construction offset still copies the star, so it keeps the star's notes.
+    const ring = compileCadSketchGraph(sketchOf(drawn).graph!, drawn.parameters).cycles.find(cycle => cycle.sourceRefs.every(ref => ref.entityId.startsWith('wall_')))!;
+    const outer = applyCadEdits(drawn, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { id: 'outer', kind: 'generator', idPrefix: 'outer', construction: false,
+      geometry: { kind: 'offset', chain: ring.sourceRefs.map(({ entityId, reversed }) => ({ entityId, reversed })), distance: 1 } } }]);
+    expect(dxfComments(cadSketchToDxf(outer, 'sketch')).filter(comment => comment === dxfNote(CAD_STAR_PLUGIN))).toHaveLength(1);
+  });
+
+  it('writes a material star that a material offset copies once in DXF, as the one shape it is', () => {
+    const star = placed(CAD_STAR_PLUGIN), cycle = compileCadSketchGraph(sketchOf(star).graph!, star.parameters).cycles.find(cycle => !cycle.construction)!;
+    const document = applyCadEdits(star, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
+      geometry: { kind: 'offset', chain: cycle.sourceRefs.map(({ entityId, reversed }) => ({ entityId, reversed })), distance: 1 } } }]);
+    expect(dxfComments(cadSketchToDxf(document, 'sketch')).filter(comment => comment === dxfNote(CAD_STAR_PLUGIN))).toHaveLength(1);
   });
 });
