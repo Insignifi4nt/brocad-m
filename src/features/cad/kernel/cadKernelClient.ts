@@ -42,6 +42,25 @@ type CommandWithoutId<T> = T extends CadKernelRequest ? Omit<T, 'id'> : never;
 type CadKernelCommand = CommandWithoutId<CadKernelRequest>;
 const abortError = () => new DOMException('CAD operation canceled.', 'AbortError');
 
+/** The browser refused to create the kernel's worker, for example under a content security policy. */
+export const CAD_KERNEL_NOT_STARTED = 'The browser could not start the CAD kernel. Reload the page; if this repeats, use another browser or turn off extensions that block this site\'s scripts.';
+/** The worker refused the request as it was handed over. */
+export const CAD_KERNEL_NOT_SENT = 'The request could not be handed to the CAD kernel, so the kernel was stopped. Retry the operation to restart it; if this repeats, reload the page.';
+/** The worker raised an error it did not catch, or its script failed to load. */
+export const CAD_KERNEL_STOPPED = 'The CAD kernel failed with an unexpected error and was stopped. Retry the operation to restart it; if this repeats, reload the page.';
+/** The worker's reply could not be deserialized, or does not follow the kernel protocol. */
+export const CAD_KERNEL_UNREADABLE = 'The CAD kernel\'s reply could not be read, so the kernel was stopped. Retry the operation to restart it; if this repeats, reload the page.';
+/**
+ * A failure of the worker itself rather than of the request, which fails every request it held alike, as a kernel that cannot load does:
+ * `kernel-unavailable`, with the browser's own words, or the check the reply failed, as its kernel message.
+ */
+function kernelUnavailable(message: string, cause: unknown): CadError {
+  // A DOMException, which a refused worker or hand-over raises, need not be an Error of this realm.
+  const words = typeof cause === 'object' && cause !== null ? (cause as { readonly message?: unknown }).message : cause;
+  const text = typeof words === 'string' ? words : '';
+  return CadError.received('kernel-unavailable', message, text ? { kernelMessage: text } : {});
+}
+
 function matchesTopologyRequest(request: CadKernelRequest, reply: CadKernelReply): boolean {
   if (reply.kind === 'error') return true;
   if (request.kind === 'build') return reply.kind === 'built';
@@ -99,22 +118,23 @@ export function createCadKernelClient(makeWorker: () => CadWorkerTransport = () 
     if (disposed || active || !queue.length) return;
     active = queue.shift();
     if (!active) return;
-    try {
-      if (!worker) {
-        const transport = makeWorker(); worker = transport;
-        transport.onmessage = event => {
-          if (worker !== transport) return;
-          if (isCadKernelEnvelope(event.data) && event.data.id !== active?.request.id) return;
-          if (!isCadKernelReply(event.data)) { fail(new Error('Invalid CAD worker response.')); return; }
-          if (event.data.id !== active?.request.id) return; // A stale worker can never overwrite a newer request.
-          if (!active || !matchesTopologyRequest(active.request, event.data)) { fail(new Error('CAD topology response does not match the requested body and build.')); return; }
-          finish(event.data.kind === 'error' ? event.data.code ? CadError.received(event.data.code, event.data.message, event.data) : new Error(event.data.message) : event.data);
-        };
-        transport.onerror = () => { if (worker === transport) fail(new Error('The CAD worker stopped. Retry the operation to restart it.')); };
-        transport.onmessageerror = () => { if (worker === transport) fail(new Error('The CAD worker response could not be read.')); };
-      }
-      worker.postMessage(active.request);
-    } catch (error) { fail(error instanceof Error ? error : new Error('Unable to start the CAD worker.')); }
+    if (!worker) {
+      let transport: CadWorkerTransport;
+      try { transport = makeWorker(); } catch (error) { fail(kernelUnavailable(CAD_KERNEL_NOT_STARTED, error)); return; }
+      worker = transport;
+      transport.onmessage = event => {
+        if (worker !== transport) return;
+        if (isCadKernelEnvelope(event.data) && event.data.id !== active?.request.id) return;
+        if (!isCadKernelReply(event.data)) { fail(kernelUnavailable(CAD_KERNEL_UNREADABLE, 'The reply does not follow the kernel protocol.')); return; }
+        if (event.data.id !== active?.request.id) return; // A stale worker can never overwrite a newer request.
+        if (!active || !matchesTopologyRequest(active.request, event.data)) { fail(new Error('CAD topology response does not match the requested body and build.')); return; }
+        finish(event.data.kind === 'error' ? event.data.code ? CadError.received(event.data.code, event.data.message, event.data) : new Error(event.data.message) : event.data);
+      };
+      // An error event carries the worker's own words; a script that failed to load gives a plain event without them.
+      transport.onerror = event => { if (worker === transport) fail(kernelUnavailable(CAD_KERNEL_STOPPED, (event as Partial<ErrorEvent> | null)?.message)); };
+      transport.onmessageerror = () => { if (worker === transport) fail(kernelUnavailable(CAD_KERNEL_UNREADABLE, 'The reply could not be deserialized.')); };
+    }
+    try { worker.postMessage(active.request); } catch (error) { fail(kernelUnavailable(CAD_KERNEL_NOT_SENT, error)); }
   }
   function request(command: CadKernelCommand, signal?: AbortSignal): Promise<CadKernelReply> {
     if (disposed) return Promise.reject(new Error('CAD kernel client has been disposed.'));

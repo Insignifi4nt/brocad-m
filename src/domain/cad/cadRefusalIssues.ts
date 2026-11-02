@@ -16,7 +16,8 @@ export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf;
  * an earlier operation that raised the same refusal. Its message is the refusal's own. It has no repairs, since a refused edit was never applied and leaves nothing to repair, and no causes.
  * Null for any other refusal, which its own producer reports (a sketch refusal) or which is no problem of the part (a stale version). A CAM
  * step's other failures are no problem of the step or its source either, so they give null too:
- * - `kernel-unavailable`: the kernel could not be loaded;
+ * - `kernel-unavailable`: the kernel could not be loaded, or its worker could not be started or handed the request, failed with an
+ *   unexpected error, or sent a reply that could not be read, which fails every request alike;
  * - a cancelled request, a stale version or workflow, or a kernel result that does not match the request, which are no `CadError`;
  * - a request the controller refuses before the step names its source, such as a malformed section request;
  * - a disposed model or kernel client, or a full request queue, which are no `CadError` either.

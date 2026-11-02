@@ -68,7 +68,7 @@ describe('Curve DXF worker and client boundaries',()=>{
   it('rejects malformed or inherited geometry before accepting a response',async()=>{
     const transport=new Transport(); const client=createCadKernelClient(()=>transport);
     try {
-      const pending=client.importDxfCurve(input);const rejected=expect(pending).rejects.toThrow('Invalid CAD worker response');
+      const pending=client.importDxfCurve(input);const rejected=expect(pending).rejects.toMatchObject({code:'kernel-unavailable',kernelMessage:'The reply does not follow the kernel protocol.'});
       const result=importCadDxfCurve(input); transport.reply({id:1,kind:'dxf-curve-imported',result:{...result,curve:Object.create(result.curve)}});
       await rejected;expect(transport.terminated).toBe(true);
     } finally {client.dispose();}
