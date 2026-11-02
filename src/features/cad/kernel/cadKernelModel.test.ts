@@ -6,6 +6,10 @@ import { setOC } from 'replicad';
 import { buildCadKernelModel } from './cadKernelModel';
 import type { CadDocument, CadFeature, CadProfile, CadSketchFeature } from '../../../domain/cad/cadDocument';
 import { cadEntitiesToCam } from '../../../domain/cad/cadCam';
+import { CadError } from '../../../domain/cad/cadError';
+import { cadRefusalIssue } from '../../../domain/cad/cadRefusalIssues';
+import { cadRefusalAt } from '../../../domain/cad/cadRefusalSubjects';
+import { cadKernelRequestFailure } from './cadKernelFailures';
 
 beforeAll(async () => {
   const wasmBinary = await readFile(new URL('../../../../node_modules/replicad-opencascadejs/dist/replicad_single.wasm', import.meta.url));
@@ -217,6 +221,16 @@ describe('real OpenCascade CAD kernel', () => {
       const points = section.entities.flatMap(entity => entity.type === 'line' ? [entity.start, entity.end] : []);
       expect(Math.max(...points.map(point => point.x))).toBeCloseTo(10, 6);
       expect(() => model.section({ bodyId: 'box_a', plane: 'XY', offset: 2 })).toThrow('unavailable');
+      // The worker replies with each refusal's own code, which a Section for CAM keeps in its issue.
+      for (const [request, code] of [[{ bodyId: 'box_a', plane: 'XY', offset: 2 }, 'missing-body'], [{ bodyId: 'cut', plane: 'XY', offset: 'depth / 2' }, 'unknown-parameter']] as const) {
+        let refusal: unknown;
+        try { model.section(request); } catch (error) { refusal = error; }
+        const reply = cadKernelRequestFailure('section', refusal);
+        expect(reply).toMatchObject({ code });
+        const received = CadError.received(reply.code, reply.message, reply);
+        expect(cadRefusalIssue(cadRefusalAt(received, { kind: 'cam-operation', operation: 'section', sourceId: request.bodyId })))
+          .toMatchObject({ namespace: 'cam', code, message: reply.message, subject: { operation: 'section', sourceId: request.bodyId } });
+      }
     });
   });
 

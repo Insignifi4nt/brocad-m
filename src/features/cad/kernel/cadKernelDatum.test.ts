@@ -158,7 +158,8 @@ describe('exact world datum Pad and Revolve', () => {
     });
     const model = buildCadKernelModel(documentInput);
     try {
-      expect(model.result.meshes.map(mesh => mesh.featureId)).toEqual(['stock']); expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'solid', message: 'Forced datum primitive failure' });
+      expect(model.result.meshes.map(mesh => mesh.featureId)).toEqual(['stock']); expect(model.result.diagnostics[0]).toEqual({ code: 'kernel-operation-failed', featureId: 'solid', message: expect.stringMatching(/^The extrusion could not be built from its sketch./),
+        details: { operation: 'extrude', input: { field: 'sketchId', id: 'sketch' }, kernelMessage: 'Forced datum primitive failure' } });
       expect(deleted).toHaveBeenCalledTimes(2); expect(deletedSketches).toHaveBeenCalled(); expect(() => model.export('step')).toThrow('Fix the feature diagnostics');
       expect(calls).toBe(3); const staged = transient; if (!staged) throw new Error('Missing staged region'); expect(() => staged.wrapped).toThrow();
     } finally { model.dispose(); extrude.mockRestore(); produced.mockRestore(); deleted.mockRestore(); deletedSketches.mockRestore(); }
@@ -174,7 +175,7 @@ describe('exact world datum Pad and Revolve', () => {
     });
     const model = buildCadKernelModel(parseCadDocument(document([datum(), sketch(onDatum), pad()])));
     try {
-      expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'solid', message: 'Forced native origin failure' });
+      expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'solid', message: expect.stringMatching(/^The extrusion could not be built/), details: { kernelMessage: 'Forced native origin failure' } });
       expect(model.result.meshes).toEqual([]); expect(deleted).toHaveBeenCalledTimes(1);
       const released = failedPlane; if (!released) throw new Error('Native plane was not allocated');
       expect(() => released.origin.wrapped).toThrow();

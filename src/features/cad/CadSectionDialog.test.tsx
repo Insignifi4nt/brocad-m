@@ -3,6 +3,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { CadSectionRequest, CadSectionResult } from '@/domain/cad/cadSection';
 import type { CadMesh } from '@/domain/cad/cadDocument';
+import { CadError } from '@/domain/cad/cadError';
+import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
 import { CadSectionDialog } from './CadSectionDialog';
 
 let host: HTMLDivElement; let root: Root;
@@ -49,6 +51,38 @@ it('aborts outstanding section computation and preserves the dialog on a reporte
   expect(button('Close').disabled).toBe(false);
   expect(button('Send section to CAM').disabled).toBe(true);
   expect(host.querySelector('[role=alert]')).toBeNull();
+});
+it('shows a refused Section with its own message and the code of its CAM issue', async () => {
+  const refusal = (recorded: boolean) => {
+    const error = new CadError('empty-section', 'The section plane does not cross the body.');
+    return recorded ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: 'pad' }) : error;
+  };
+  let recorded = true;
+  const inspect = vi.fn(async () => { throw refusal(recorded); });
+  await act(async () => root.render(<CadSectionDialog bodies={[body]} initialBodyId="pad" version="v1" onInspect={inspect} onSend={async () => undefined} onClose={vi.fn()} />));
+  await act(async () => button('Preview section').click());
+  const alert = () => host.querySelector<HTMLElement>('[role=alert]');
+  expect([alert()?.textContent, alert()?.dataset.cadIssueCode]).toEqual(['The section plane does not cross the body.', 'empty-section']);
+  // A failure no CAM step recorded keeps its message and gives no issue code.
+  recorded = false;
+  await act(async () => button('Preview section').click());
+  expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
+  // Nor does one a step recorded before this preview started, which the preview gives again unrecorded.
+  const earlier = refusal(true);
+  inspect.mockImplementation(async () => { throw earlier; });
+  await act(async () => button('Preview section').click());
+  expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
+  expect(host.querySelector('details')).toBeNull();
+});
+it('keeps the kernel\'s own words for a failed Section under a closed disclosure, out of the alert', async () => {
+  const message = 'The section could not be cut through this body, for a reason the kernel did not name. Move the section plane slightly or choose another body.';
+  const inspect = vi.fn(async () => { throw cadRefusalAt(CadError.received('kernel-operation-failed', message, { kernelMessage: 'BRepAlgoAPI_Section: not done' }),
+    { kind: 'cam-operation', operation: 'section', sourceId: 'pad' }); });
+  await act(async () => root.render(<CadSectionDialog bodies={[body]} initialBodyId="pad" version="v1" onInspect={inspect} onSend={async () => undefined} onClose={vi.fn()} />));
+  await act(async () => button('Preview section').click());
+  const alert = host.querySelector<HTMLElement>('[role=alert]'), disclosure = host.querySelector<HTMLDetailsElement>('details');
+  expect([alert?.textContent, alert?.dataset.cadIssueCode]).toEqual([message, 'kernel-operation-failed']);
+  expect([disclosure?.open, disclosure?.querySelector('summary')?.textContent, disclosure?.querySelector('p')?.textContent]).toEqual([false, 'Kernel message', 'BRepAlgoAPI_Section: not done']);
 });
 it('uses the selected raised body and signed plane midpoint while retaining exact custom offsets through review', async () => {
   const raised: typeof body = { featureId: 'raised', name: 'Raised', bounds: { min: [50, -20, 5], max: [70, -10, 10] } };

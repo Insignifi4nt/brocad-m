@@ -9,7 +9,8 @@ import { cadImportDataFields, isCadImportData } from './cadImportData';
 import { MAX_CAD_PATTERN_INSTANCES } from './cadPatterns';
 import { CadLabelSchema, CadNumberSchema } from './cadPrimitives';
 import type { CadResolvedFrame } from './cadDatumPlanes';
-import { cadFeatureInputs, cadFeatureProducesBody } from './cadFeatureInputs';
+import { cadFeatureInputField, cadFeatureInputs, cadFeatureProducesBody } from './cadFeatureInputs';
+import { cadRefusalAt, cadRefusalMark, type CadRefusalSubject } from './cadRefusalSubjects';
 import { createCadBodyLineage } from './cadBodies';
 import { validateCadSketchConstraints } from './cadSketchConstraints';
 import { assertNoReservedCadSketchIds, cadSketchGraphWithPlacements, isAcceptedCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
@@ -137,6 +138,12 @@ function refuseOutOfRange(scalar: CadFeatureScalar, size: number) {
   if (!cadFeatureScalarAccepts(scalar, size)) throw new CadError('invalid-dimension', scalar.refusal ?? 'Dimension is out of range.');
 }
 
+/** The input slot of `feature` that names `id` as giving `trait`, as the subject of a refusal of that input, or the feature when none does. */
+function slotOf(feature: CadFeature, id: string, trait: CadFeatureTrait): CadRefusalSubject {
+  const field = cadFeatureInputField(feature, id, trait);
+  return field === null ? { kind: 'feature', featureId: feature.id } : { kind: 'reference-slot', featureId: feature.id, field, inputId: id };
+}
+
 /**
  * `value` with the members of each edited sketch's generators left out where they are exactly what generation keeps for their inputs, as
  * a settled edit leaves them, so the copy below does not clone them and the sketch check regenerates the same objects. Any other sketch,
@@ -224,48 +231,53 @@ export function parseCadDocument(value: unknown): CadDocument {
       }
     }
   };
+  // A refusal recorded before this check is of an earlier propagation, which names no feature of it.
+  const since = cadRefusalMark();
   for (const feature of document.features) {
     if (previous.has(feature.id)) throw new CadError('duplicate-id', `Duplicate feature ID "${feature.id}".`);
-    const definition = cadFeatureDefinition(feature.kind), layout = cadFeatureLayout(feature), active = cadFeatureActive(feature, document);
-    context.active = active;
-    const inputs = cadFeatureInputs(feature);
-    for (const id of inputs.datumIds) {
-      if (!gives(previous.get(id), 'plane')) throw new CadError('invalid-reference', `Feature "${feature.name}" needs a preceding datum plane "${id}".`);
-    }
-    for (const id of inputs.sketchIds) {
-      if (!gives(previous.get(id), 'sketch')) throw new CadError('invalid-reference', `Feature "${feature.name}" needs a preceding sketch "${id}".`);
-    }
-    for (const id of inputs.curveIds) {
-      if (!gives(previous.get(id), 'curve')) throw new CadError('invalid-reference', `Feature "${feature.name}" needs a preceding reference curve "${id}".`);
-    }
-    for (const id of inputs.bodyIds) {
-      const referenced = previous.get(id);
-      if (!referenced) throw new CadError('invalid-reference', `Feature "${feature.name}" references missing or later feature "${id}".`);
-      if (!cadFeatureProducesBody(referenced)) throw new CadError('invalid-reference', `A solid operation cannot target ${referenced.kind === 'sketch' ? 'a sketch' : referenced.kind === 'curve' ? 'a reference curve' : 'a datum plane'}.`);
-    }
-    if (active) for (const id of inputs.bodyIds) {
-      if (!bodies.has(id)) throw new CadError('unavailable-body', `Feature "${feature.name}" references suppressed or already consumed body "${id}". Select its current successor.`);
-    }
-    const operandInstances = inputs.bodyIds.reduce((total, id) => total + (expandedInstances.get(id) ?? 1), 0);
-    for (const { name, field } of layout.checked) {
-      const held = storedField(feature, name);
-      if (held !== undefined && held !== null) field.check!(held, context);
-    }
-    // Pad and Revolve count their sketch as no operand, as saved histories were budgeted that way.
-    let instances = definition.instances ? definition.instances(feature, operandInstances, context) : definition.body === 'none' ? 0 : operandInstances || 1;
-    for (const name of layout.repeats) instances *= storedField(feature, name) as number;
-    if (instances > MAX_CAD_PATTERN_INSTANCES) throw new CadError('feature-limit', 'Nested pattern expansion exceeds 1000 solid instances.');
-    for (const { name, meaning } of layout.conditioned) {
-      if ((storedField(feature, meaning.field) === meaning.absentWhen) !== (storedField(feature, name) === null)) throw new CadError('invalid-operation', meaning.refusal);
-    }
-    definition.check?.(feature, context);
-    for (const name of layout.repeats) {
-      instanceBudget += storedField(feature, name) as number;
-      if (instanceBudget > MAX_CAD_PATTERN_INSTANCES) throw new CadError('feature-limit', 'Document has too many pattern instances.');
-    }
-    previous.set(feature.id, feature);
-    expandedInstances.set(feature.id, instances);
-    bodies.apply(feature, document);
+    // A refusal raised while checking the feature names it, or the input slot it was reading, as where it was raised.
+    try {
+      const definition = cadFeatureDefinition(feature.kind), layout = cadFeatureLayout(feature), active = cadFeatureActive(feature, document);
+      context.active = active;
+      const inputs = cadFeatureInputs(feature);
+      for (const id of inputs.datumIds) {
+        if (!gives(previous.get(id), 'plane')) throw cadRefusalAt(new CadError('invalid-reference', `Feature "${feature.name}" needs a preceding datum plane "${id}".`), slotOf(feature, id, 'plane'));
+      }
+      for (const id of inputs.sketchIds) {
+        if (!gives(previous.get(id), 'sketch')) throw cadRefusalAt(new CadError('invalid-reference', `Feature "${feature.name}" needs a preceding sketch "${id}".`), slotOf(feature, id, 'sketch'));
+      }
+      for (const id of inputs.curveIds) {
+        if (!gives(previous.get(id), 'curve')) throw cadRefusalAt(new CadError('invalid-reference', `Feature "${feature.name}" needs a preceding reference curve "${id}".`), slotOf(feature, id, 'curve'));
+      }
+      for (const id of inputs.bodyIds) {
+        const referenced = previous.get(id);
+        if (!referenced) throw cadRefusalAt(new CadError('invalid-reference', `Feature "${feature.name}" references missing or later feature "${id}".`), slotOf(feature, id, 'body'));
+        if (!cadFeatureProducesBody(referenced)) throw cadRefusalAt(new CadError('invalid-reference', `A solid operation cannot target ${referenced.kind === 'sketch' ? 'a sketch' : referenced.kind === 'curve' ? 'a reference curve' : 'a datum plane'}.`), slotOf(feature, id, 'body'));
+      }
+      if (active) for (const id of inputs.bodyIds) {
+        if (!bodies.has(id)) throw cadRefusalAt(new CadError('unavailable-body', `Feature "${feature.name}" references suppressed or already consumed body "${id}". Select its current successor.`), slotOf(feature, id, 'body'));
+      }
+      const operandInstances = inputs.bodyIds.reduce((total, id) => total + (expandedInstances.get(id) ?? 1), 0);
+      for (const { name, field } of layout.checked) {
+        const held = storedField(feature, name);
+        if (held !== undefined && held !== null) field.check!(held, context);
+      }
+      // Pad and Revolve count their sketch as no operand, as saved histories were budgeted that way.
+      let instances = definition.instances ? definition.instances(feature, operandInstances, context) : definition.body === 'none' ? 0 : operandInstances || 1;
+      for (const name of layout.repeats) instances *= storedField(feature, name) as number;
+      if (instances > MAX_CAD_PATTERN_INSTANCES) throw new CadError('feature-limit', 'Nested pattern expansion exceeds 1000 solid instances.');
+      for (const { name, meaning } of layout.conditioned) {
+        if ((storedField(feature, meaning.field) === meaning.absentWhen) !== (storedField(feature, name) === null)) throw new CadError('invalid-operation', meaning.refusal);
+      }
+      definition.check?.(feature, context);
+      for (const name of layout.repeats) {
+        instanceBudget += storedField(feature, name) as number;
+        if (instanceBudget > MAX_CAD_PATTERN_INSTANCES) throw new CadError('feature-limit', 'Document has too many pattern instances.');
+      }
+      previous.set(feature.id, feature);
+      expandedInstances.set(feature.id, instances);
+      bodies.apply(feature, document);
+    } catch (error) { throw cadRefusalAt(error, { kind: 'feature', featureId: feature.id }, since); }
   }
   // Detach from callers, then freeze the complete history so neither a caller's
   // edit payload nor a UI/tool snapshot can mutate an accepted revision later.
@@ -331,5 +343,5 @@ export function createCadSketchProfile(input: { readonly geometry: CadProfile; r
 
 export function validateCadDocument(document: CadDocument): readonly CadDiagnostic[] {
   try { parseCadDocument(document); return []; }
-  catch (error) { if (error instanceof CadError) return [{ code: error.code, message: error.message }]; throw error; }
+  catch (error) { if (error instanceof CadError) return [{ code: error.code, message: error.message, ...(error.facts ? { facts: error.facts } : {}) }]; throw error; }
 }

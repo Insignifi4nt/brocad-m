@@ -31,8 +31,8 @@ async function mount(kind: 'fillet' | 'chamfer' | 'shell', preview?: (command: C
   ] };
   let command: CadFeatureReferencePickCommand | null = null;
   const apply = vi.fn(), pending = vi.fn();
-  const render = async (version = 'v1', part = source) => { await act(async () => root.render(<CadFeatureEditor feature={feature} document={part} documentVersion={version} isNew={false}
-    topologyPickingEnabled onReferencePick={next => { command = next; }} onFeaturePreview={preview} onPendingChange={pending} onApply={apply} onCancel={vi.fn()} />)); };
+  const render = async (version = 'v1', part = source, focusTopologyPick = false) => { await act(async () => root.render(<CadFeatureEditor feature={feature} document={part} documentVersion={version} isNew={false}
+    topologyPickingEnabled focusTopologyPick={focusTopologyPick} onReferencePick={next => { command = next; }} onFeaturePreview={preview} onPendingChange={pending} onApply={apply} onCancel={vi.fn()} />)); };
   await render();
   const begin = async () => { await click(kind === 'shell' ? 'Choose opening' : 'Choose edges'); const current = command; if (current?.kind !== 'pick-topology') throw new Error('Missing topology picker'); return current; };
   const result: CadTopologyResolvePicksResult = kind === 'shell' ? { purpose: kind, bodyId: 'pad', buildId: 'prefix', opening: newOpening } : { purpose: kind, bodyId: 'pad', buildId: 'prefix', selection: replacement };
@@ -50,6 +50,13 @@ it.each(['fillet', 'chamfer', 'shell'] as const)('replaces the consumed %s input
   await click('Apply');
   expect(h.apply).toHaveBeenCalledWith(kind === 'shell' ? { ...h.feature, opening: newOpening } : { ...h.feature, selection: replacement }, { wall: 3 }, expect.any(AbortSignal));
   expect(h.source).toEqual(exact);
+});
+
+it.each(['fillet', 'shell'] as const)('moves focus to the %s choice when a repair asks for it again, and only then', async kind => {
+  const h = await mount(kind), choice = () => host.querySelector<HTMLButtonElement>('[data-cad-topology-pick]')!;
+  expect([choice().dataset.cadTopologyPick, document.activeElement === choice()]).toEqual([kind === 'shell' ? 'opening' : 'selection', false]);
+  await h.render('v1', h.source, true);
+  expect(document.activeElement).toBe(choice());
 });
 
 it('retains the newly chosen seeds when returning from an explicit all-edges scope', async () => {

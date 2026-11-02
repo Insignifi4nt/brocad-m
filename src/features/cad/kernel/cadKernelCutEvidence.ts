@@ -42,7 +42,7 @@ export function cadKernelSolidEvidence(shape: Shape3D, context: MaterialContext,
         ? 'No positive intersected target material was confirmed in this Pocket direction. Revise the profile or direction.'
         : 'No positive intersected target material was confirmed for this Cut. Check the cutting sketch or tool body, direction, extent and target.'
         : context === 'result' ? `${operation} removed the entire target. Revise the profile or choose another body.` : `${operation} could not form a closed cutting solid.`);
-    if (!cadKernelIsValid(shape)) throw new CadError(`${prefix}-invalid`, `OpenCascade rejected the ${operation} topology. Revise the profile or direction.`);
+    if (!cadKernelIsValid(shape)) throw new CadError(`${prefix}-invalid`, `The ${operation} left a body whose faces cross or leave gaps. Revise the profile or the direction.`);
     if (context !== 'common') {
       // Contact faces may coexist with Common material. Tools and committed
       // results must contain only solids; no loose geometry is discarded.

@@ -2,8 +2,10 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, t
 import { Button } from '@/components/ui/button';
 import { ConstraintIcon, MeasureIcon, WarningIcon } from '@wire-edm/icons-react';
 import type { CadSketchHighlight, CadSketchHighlightStore } from './cadSketchDimensionSelection';
+import type { CadIssueRepair } from '@/domain/cad/cadIssues';
 import type { CadSketchIssue, CadSketchIssues } from './cadSketchIssues';
 import { cadSketchCanvasOf, restoreFocus } from './cadFocus';
+import { CadKernelMessage, cadIssueKernelMessage } from './CadKernelMessage';
 import './cad-sketch-context-header.css';
 
 export interface CadSketchContextHeaderProps {
@@ -16,6 +18,10 @@ export interface CadSketchContextHeaderProps {
   /** Whether the issues can be opened on the canvas now; a pending edit of another sketch keeps them closed. */
   readonly issuesLocked: boolean;
   onInspectIssue(issue: CadSketchIssue | null): void;
+  /** Applies a repair an issue offers, such as deleting a redundant relation. */
+  onRepairIssue(repair: CadIssueRepair): void;
+  /** Whether repairs, which edit the sketch, are unavailable now. */
+  readonly repairsLocked: boolean;
   readonly highlight?: CadSketchHighlightStore;
   /** What hovering or focusing an issue lights up: its geometry, and the origin or axes its relation holds. */
   highlightOf(issue: CadSketchIssue): CadSketchHighlight & { readonly relationIds?: readonly string[] };
@@ -33,11 +39,12 @@ export interface CadSketchContextHeaderProps {
  * The thin bar over a sketch being edited: its name, its definition status, its constraint issues, the view toggles and Finish. The issues
  * open as a list under the bar; hovering a row lights its geometry and choosing it keeps that geometry shown on the canvas.
  */
-export function CadSketchContextHeader({ name, status, issues, inspectedIssue, issuesLocked, onInspectIssue, highlight, highlightOf, dimensionsShown, relationsShown,
-  onShowDimensions, onShowRelations, viewModes, actions }: CadSketchContextHeaderProps) {
+export function CadSketchContextHeader({ name, status, issues, inspectedIssue, issuesLocked, onInspectIssue, onRepairIssue, repairsLocked, highlight, highlightOf, dimensionsShown,
+  relationsShown, onShowDimensions, onShowRelations, viewModes, actions }: CadSketchContextHeaderProps) {
   const [open, setOpen] = useState(false), listId = useId(), owner = useId();
   const trigger = useRef<HTMLButtonElement>(null), shown = useRef<string | null>(null);
-  const count = issues.list.length + issues.omitted;
+  // A refusal that names no item, as a solver that failed rather than judged the sketch gives, is itself the one issue shown.
+  const count = issues.list.length + issues.omitted || (issues.refusal ? 1 : 0);
   useLayoutEffect(() => { if (!count) setOpen(false); }, [count]);
   const hide = () => { if (shown.current) highlight?.hide(owner); shown.current = null; };
   const show = (issue: CadSketchIssue) => { shown.current = issue.key; highlight?.show(owner, { kind: 'geometry', ...highlightOf(issue) }); };
@@ -45,22 +52,22 @@ export function CadSketchContextHeader({ name, status, issues, inspectedIssue, i
   useLayoutEffect(() => { if (shown.current && !issues.list.some(issue => issue.key === shown.current)) hide(); });
   useEffect(() => () => highlight?.hide(owner), [highlight, owner]);
   const close = () => { setOpen(false); hide(); trigger.current?.focus(); };
-  // While the issues hold focus, the place of the row holding it, or -1 for the button. An edit, such as Undo, can fix the focused row's issue,
-  // or the last issue, which closes the list and disables the button, or make the rows inactive; focus falling to the page then moves to the
-  // row now in that place, else the button, else the sketch canvas.
+  // While the issues hold focus, the place of the row holding it, its repair included, or -1 for the button. An edit, such as Undo or a
+  // repair, can fix the focused row's issue, or the last issue, which closes the list and disables the button, or make the rows inactive;
+  // focus falling to the page then moves to the row now in that place, else the button, else the sketch canvas.
   const area = useRef<HTMLDivElement>(null), held = useRef<number | null>(null);
   useLayoutEffect(() => {
     const element = area.current, at = held.current;
     if (!element || at === null) return;
     const active = document.activeElement;
     if (active && active !== document.body && !(element.contains(active) && active.matches(':disabled'))) return;
-    const rows = [...element.querySelectorAll<HTMLButtonElement>('li > button')];
+    const rows = [...element.querySelectorAll<HTMLButtonElement>('li > button[data-cad-issue-row]')];
     const target = restoreFocus(at >= 0 ? rows[Math.min(at, rows.length - 1)] : null, trigger.current, cadSketchCanvasOf(element));
     if (!target || !element.contains(target)) held.current = null;
   });
   const focused = (event: FocusEvent<HTMLDivElement>) => {
-    const control: EventTarget = event.target, rows: EventTarget[] = [...event.currentTarget.querySelectorAll('li > button')];
-    held.current = control === trigger.current ? -1 : rows.indexOf(control);
+    const control: Node = event.target, rows = [...event.currentTarget.querySelectorAll('li')];
+    held.current = control === trigger.current ? -1 : rows.findIndex(row => row.contains(control));
   };
   // Focus moving elsewhere ends the hold; focus falling to the page because its row went or was disabled does not. A row being removed can be
   // told blur while still in the page, so that case is decided once the render that removes it is done.
@@ -79,11 +86,16 @@ export function CadSketchContextHeader({ name, status, issues, inspectedIssue, i
         onClick={() => setOpen(value => !value)}><WarningIcon size={13} /><span>{count}</span></Button>
       {open && count > 0 && <div id={listId} className="cad-sketch-header-issue-list" onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); close(); } }}>
         {issues.message && <p className="cad-sketch-header-issue-message">{issues.message}</p>}
+        {/* The words of a solver that failed, closed under the message, which never repeats them. */}
+        {issues.refusal && <CadKernelMessage text={cadIssueKernelMessage(issues.refusal)} />}
         <ul aria-label="Constraint issues">{issues.list.map(issue => <li key={issue.key}>
-          <Button type="button" data-cad-diagnostic-source={issue.source.id} data-cad-issue-category={issue.category} aria-pressed={inspectedIssue === issue.key} disabled={issuesLocked}
+          <Button type="button" data-cad-issue-row="" data-cad-diagnostic-source={issue.source.id} data-cad-issue-category={issue.category} aria-pressed={inspectedIssue === issue.key} disabled={issuesLocked}
             title={issuesLocked ? 'Finish or cancel this edit before opening the affected sketch.' : issue.detail}
             onPointerEnter={() => show(issue)} onPointerLeave={hide} onFocus={() => show(issue)} onBlur={hide}
             onClick={() => onInspectIssue(inspectedIssue === issue.key ? null : issue)}><span>{issue.label}</span><small>{issue.state}</small></Button>
+          {issue.issue.repairs.map(repair => <Button key={repair.id} type="button" size="sm" className="cad-sketch-header-issue-repair" data-cad-issue-repair={repair.id}
+            aria-label={`${repair.label}: ${issue.label}`} title={repairsLocked ? 'Finish or cancel this edit before repairing the sketch.' : repair.label} disabled={repairsLocked || issuesLocked}
+            onPointerEnter={() => show(issue)} onPointerLeave={hide} onFocus={() => show(issue)} onBlur={hide} onClick={() => onRepairIssue(repair)}>{repair.label}</Button>)}
         </li>)}{issues.omitted > 0 && <li className="cad-sketch-header-issue-more">{issues.omitted} more affected items</li>}</ul>
       </div>}
     </div>

@@ -70,7 +70,9 @@ describe('native preview extraction precision', () => {
     const rawDisposed = vi.spyOn(oc.ReplicadMeshData.prototype, 'delete'); const transformDisposed = vi.spyOn(oc.BRepBuilderAPI_Transform.prototype, 'delete');
     const count = vi.spyOn(oc.ReplicadMeshData.prototype, 'getTrianglesSize').mockReturnValueOnce(countValue);
     try {
-      expect(() => preview(shape)).toThrow(expect.objectContaining({ code: 'invalid-mesh' })); expect(rawDisposed).toHaveBeenCalledTimes(1); expect(transformDisposed).toHaveBeenCalledTimes(1); count.mockRestore();
+      // The message names the cause; the check that failed is kept as the kernel's own account.
+      expect(() => preview(shape)).toThrow(expect.objectContaining({ code: 'invalid-mesh', message: 'The body could not be drawn: its display mesh came back incomplete. Rebuild the part.',
+        kernelMessage: 'The kernel returned an invalid preview buffer size.' })); expect(rawDisposed).toHaveBeenCalledTimes(1); expect(transformDisposed).toHaveBeenCalledTimes(1); count.mockRestore();
       const result = preview(shape); expect(topology.meshGroups(result.mesh, result.edgeMesh).faceGroups).toHaveLength(6); expect(measureVolume(shape)).toBeCloseTo(8, 6);
     } finally { topology.dispose(); shape.delete(); }
   });
@@ -81,7 +83,8 @@ describe('native preview extraction precision', () => {
       : kind === 'invalid-unsigned' ? 0x100000000 : oc.wasmMemory.buffer.byteLength;
     const pointer = vi.spyOn(oc.ReplicadMeshData.prototype, 'getVerticesPtr').mockReturnValueOnce(value);
     try {
-      expect(() => preview(shape)).toThrow(expect.objectContaining({ code: 'invalid-mesh' }));
+      const account = kind === 'unaligned' || kind === 'past-heap' ? 'The kernel returned an invalid preview buffer.' : 'The kernel returned an invalid preview buffer pointer.';
+      expect(() => preview(shape)).toThrow(expect.objectContaining({ code: 'invalid-mesh', kernelMessage: account }));
       expect(rawDisposed).toHaveBeenCalledTimes(1); expect(transformDisposed).toHaveBeenCalledTimes(1); pointer.mockRestore();
       const result = preview(shape);
       expect(topology.meshGroups(result.mesh, result.edgeMesh).faceGroups).toHaveLength(6);

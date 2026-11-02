@@ -24,11 +24,17 @@ import type { CadSketchEditWarning } from './cadEditPreparation';
 import { CadToolDocumentEnvelope, CadToolEditDefinitions, CadToolEditEnvelope, CadToolPluginPackageEnvelope, CadToolSketchEnvelope, CadToolSketchConstraintsQuerySchema, cadToolOpenObject } from './cadToolSchemas';
 import { pageCadSketchConstraints, summarizeCadSketchConstraintAnalysis } from './cadSketchConstraintInspection';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { cadSketchIssues } from './cadSketchIssues';
+import type { CadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { CadSketchRegionProposalSchema, CadSketchTrimAtSchema, CadSketchExtendAtSchema, CadSketchRegionReadTargetSchema } from '@/domain/cad/cadSketchRegionInspection';
 import { CadSketchCutAxesSchema } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchSplitDependencyError } from '@/domain/cad/cadSketchSplit';
 import { CadSketchTrimDependencyError, CadSketchExtendDependencyError } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchTangentOwnershipError } from '@/domain/cad/cadSketchTangentRelations';
+import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
+import { cadAgentIssue, cadAgentIssueDigest, cadAgentKernelMessage } from './cadAgentIssues';
+import type { CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { CadSketchGeneratorRemovalError } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CadSketchPlacementDependencyError } from '@/domain/cad/cadSketchPlacement';
 import { CAD_SKETCH_AGENT_RELATION_KINDS } from '@/domain/cad/sketch-relations/cadSketchRelationRegistry';
@@ -95,12 +101,36 @@ function withSharedDefinitions(schema: TSchema, shared: Readonly<Record<string, 
   return { ...visit(schema) as TSchema, $defs: Object.fromEntries(Object.entries(shared).map(([name, definition]) => [name, { ...members(definition), $id: name }])) };
 }
 const documentText = new WeakMap<CadDocument, string>();
-function diagnosticSummary(diagnostics: readonly CadDiagnostic[]) {
-  const summaries = diagnostics.slice(0, 10).map(summarizeDiagnostic);
-  // Body pages may use 24 KiB. Keep diagnostics bounded even for escaped Unicode.
+/**
+ * The diagnostics of a build and its issues as a reply gives them: at most 10 diagnostics within 4,096 bytes, each message summarized and
+ * its kernel words bounded (`cadAgentKernelMessage`), so the first always fits; then the issue digest (`cadAgentIssueDigest`), whose
+ * failures give the kernel words a listed diagnostic does not, so every listed failure keeps a bounded account of them.
+ */
+function buildProblems(diagnostics: readonly CadDiagnostic[], issues: CadBuildIssues) {
+  const summaries = diagnostics.slice(0, 10).map(diagnostic => {
+    const summary = summarizeDiagnostic(diagnostic), kernelMessage = diagnostic.details?.kernelMessage;
+    return kernelMessage ? { ...summary, details: { ...diagnostic.details, kernelMessage: cadAgentKernelMessage(kernelMessage) } } : summary;
+  });
   while (summaries.length && jsonByteLength(summaries) > 4096) summaries.pop();
-  return { diagnostics: summaries, omittedDiagnostics: diagnostics.length - summaries.length };
+  // The issues name their diagnostics by position only when they are the issues of these diagnostics.
+  const keys = issues.diagnosticKeys.length === diagnostics.length ? issues.diagnosticKeys.slice(0, summaries.length) : [];
+  return { diagnostics: summaries, omittedDiagnostics: diagnostics.length - summaries.length,
+    issues: cadAgentIssueDigest(issues.items, new Map(keys.map((key, index) => [key, index]))) };
 }
+/**
+ * The issues of a refused sketch edit as the sketch's header gives them (`cadSketchIssues`): the refusal and the attempted subjects it
+ * names, read against the accepted graph and the warnings of the current version, so a Delete relation repair is prepared only for a
+ * relation the accepted sketch has. A sketch the accepted document lacks, as a refused new sketch, has no accepted record to repair.
+ */
+function sketchRefusalIssues(error: CadSketchPreparationError, cad: CadController | undefined) {
+  const state = cad?.session.getSnapshot(), sketchId = error.feedback.sketchId;
+  const sketch = state?.document.features.find(feature => feature.id === sketchId);
+  const warnings = cad?.sketchWarnings && cad.sketchWarnings.version === state?.version ? cad.sketchWarnings.warnings : null;
+  // Without an accepted graph no repair is prepared, so no version is named.
+  return cadSketchIssues({ sketchId, graph: sketch?.kind === 'sketch' && sketch.graph ? sketch.graph : NO_ACCEPTED_SKETCH_GRAPH, version: state?.version ?? '',
+    feedback: error.feedback, warnings });
+}
+const NO_ACCEPTED_SKETCH_GRAPH: CadSketchGraph = Object.freeze({ points: [], entities: [], relations: [] });
 /** Tool summaries retain complete entries; the immutable document stays complete. */
 function parameterContext(document: CadDocument) {
   const parameters: Record<string, number> = {};
@@ -175,10 +205,18 @@ export function cadSiteTools(getController: () => CadController) {
     execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema,
     refuse?: (input: unknown) => void) {
     const operation = siteTool(name, description, schema, async (input, signal) => {
-      try { return await execute(getController(), input, signal); }
+      let cad: CadController | undefined;
+      const since = cadRefusalMark();
+      try { cad = getController(); return await execute(cad, input, signal); }
       catch (error) {
-        if (error instanceof CadSketchPreparationError) throw new ToolError(error.code, error.message, { feedback: error.feedback,
-          analysis: summarizeCadSketchConstraintAnalysis({ kind: 'rejected', reason: error.feedback.reason, message: error.solverMessage, diagnostics: error.diagnostics }) });
+        // A refused sketch edit gives the issues its sketch's header gives: the refusal, as `issue`, and the subjects it names.
+        if (error instanceof CadSketchPreparationError) {
+          const sketchIssues = sketchRefusalIssues(error, cad);
+          const { kernelMessage: _words, ...feedback } = error.feedback;
+          throw new ToolError(error.code, error.message, { feedback,
+            analysis: summarizeCadSketchConstraintAnalysis({ kind: 'rejected', reason: error.feedback.reason, message: error.solverMessage, diagnostics: error.diagnostics }),
+            ...(sketchIssues.refusal ? { issue: cadAgentIssue(sketchIssues.refusal) } : {}), issues: cadAgentIssueDigest(sketchIssues.issues) });
+        }
         if (error instanceof CadSketchSplitDependencyError) throw new ToolError(error.code, error.message, {
           relationIds: error.relationIds.slice(0, 8), relationCount: error.relationIds.length, omittedRelationCount: Math.max(0, error.relationIds.length - 8)
         });
@@ -193,7 +231,13 @@ export function cadSiteTools(getController: () => CadController) {
           const pinned = (input as { readonly expectedVersion?: unknown }).expectedVersion;
           throw new ToolError(error.code, removalMessage(error), removalPage(error, typeof pinned === 'string' ? pinned : getController().session.getSnapshot().version));
         }
-        if (error instanceof CadError || error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
+        // A refusal of a feature or a CAM step also gives its issue: the feature, input slot or CAM step this call's steps recorded it at. The
+        // kernel's own words go with the issue, or alone when no issue covers the refusal.
+        if (error instanceof CadError) {
+          const issue = cadRefusalIssue(error, 'refusal', since), kernelMessage = error.kernelMessage;
+          throw new ToolError(error.code, error.message, issue ? { issue: cadAgentIssue(issue, kernelMessage) } : kernelMessage ? { kernelMessage: cadAgentKernelMessage(kernelMessage) } : undefined);
+        }
+        if (error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }
     }, readOnly, refuse && (input => {
@@ -216,7 +260,7 @@ export function cadSiteTools(getController: () => CadController) {
       featureCount: state.document.features.length, ...parameterContext(state.document),
       canUndo: state.canUndo, canRedo: state.canRedo, workflowOpen: state.workflowOpen, busy: cad.isBusy(),
       buildState: cad.buildState, buildVersion: cad.buildVersion, buildId: cad.build?.buildId ?? null,
-      ...diagnosticSummary(cad.build?.diagnostics ?? []),
+      ...buildProblems(cad.build?.diagnostics ?? [], cad.buildIssues),
       supported: { sketchEntities: { schemaVersion: 2, definition: 'cad_describe_features(kind=sketch)', inspection: 'cad_inspect_sketch_constraints', edits: ['append-sketch-entities', 'delete-sketch-elements', 'set-sketch-construction', 'translate-sketch-geometry', 'place-sketch-geometry', 'move-sketch-point', 'set-sketch-relation', 'remove-sketch-relation', 'create-sketch-corner', 'split-sketch-entity', 'trim-sketch-entity', 'extend-sketch-entity', 'offset-sketch-loop', 'mirror-sketch-geometry', 'copy-sketch-profile', 'use-sketch-entity', 'set-sketch-generator', 'detach-sketch-generator'], relations: CAD_SKETCH_AGENT_RELATION_KINDS, generators: 'A shape is a generator record whose inputs size and place it; its members regenerate from them. Dimensions anchor on members, but only inputs or a reference dimension size them. Detach keeps the members as plain geometry.', material: 'Whole sketch retains simple closed cycles connected by shared point IDs or explicit coincidence. Deliberate graph-cells selection can Pad/Pocket exact bounded intersection cells; inspect mode=graph-cells and pack numeric cellIds with cad_read_sketch_region_reference. Unsupported contacts reject; new cells never become automatic material.' }, sketches: ['rectangle', 'circle', 'polygon', 'regular-polygon', 'slot', 'path', 'plugin', 'circular-pattern', 'offset'], sketchDimensions: { rectangle: ['width', 'height'], circle: ['diameter', 'radius'], slot: ['length', 'width', 'angle'], intent: 'Legacy profile dimensions bind their geometry scalars. Numeric geometry stays free; expressions stay driven. Radius/diameter share one freedom. Graph point/entity constraints are listed under sketchEntities.' }, sketchTranslation: ['rectangle', 'circle', 'slot', 'polygon', 'path'], sketchHandles: { inspection: 'cad_inspect_sketch_handles', edit: 'move-sketch-handle', scope: 'Accepted revision only; free components move without replacing dimensions or expressions.' }, plugins: { apiVersion: 2, acceptedApiVersions: [1, 2], instances: 'Exact package embedded in each profile; inputs accept named CAD parameter expressions.', relations: 'API 2 supports derived values, conditional editing, dynamic ranges, choices and constraints. Derived values cannot be stored as editable inputs.', generators: ['builtin-spur-gear', 'polygon-recipe'] }, references: ['curve', 'datum-plane'], planes: ['XY', 'XZ', 'YZ'],
         datumPlacement: { definition: 'world', supported: ['sketch', 'curve', 'extrude', 'revolve', 'loft', 'sweep'], unsupported: ['pocket'], inspection: 'cad_inspect_plane' },
         solids: ['imported', 'extrude', 'pocket', 'revolve', 'loft', 'sweep', 'fillet', 'chamfer', 'shell', 'boolean', 'transform', 'linear-pattern', 'circular-pattern', 'mirror'],
@@ -420,7 +464,7 @@ export function cadSiteTools(getController: () => CadController) {
       const result = await cad.inspectBuild(input.expectedVersion, signal);
       const bodies = page(result.meshes, input, mesh => ({ featureId: mesh.featureId, ...(mesh.bodyKey ? { bodyKey: mesh.bodyKey } : {}), name: mesh.name, volumeMm3: mesh.volume, solidCount: mesh.solidCount ?? null, boundsMm: mesh.bounds, triangles: mesh.indices.length / 3,
         previewFaces: new Set(mesh.faceGroups.map(group => group.key)).size, previewEdges: new Set(mesh.edgeGroups.map(group => group.key)).size }));
-      return { version: input.expectedVersion, buildId: result.buildId, durationMs: result.durationMs, ...diagnosticSummary(result.diagnostics),
+      return { version: input.expectedVersion, buildId: result.buildId, durationMs: result.durationMs, ...buildProblems(result.diagnostics, cad.buildIssuesOf(result)),
         bodies: bodies.items, totalBodies: bodies.total, nextBodyOffset: bodies.nextOffset };
     }),
     tool('cad_build_feature_input', 'Build the strict history before an existing Fillet, Chamfer or Shell to replace its selected edges/opening. Choose a body visible at that point; optional finite numeric parameterValues propose correlated edits without accepting them. Returns an ephemeral inputToken/buildId for the existing topology tools. The accepted document/build is unchanged. Use the resulting geometric selector and same parameter batch in cad_edit_document. Finish visible editors before agent calls.', object({ ...version, ...CadFeatureInputRequestSchema.properties }), async (cad, input, signal) => {
@@ -471,7 +515,7 @@ export function cadSiteTools(getController: () => CadController) {
     }),
     tool('cad_save_document', 'Save the exact shared CAD draft through the active workbench adapter with cross-tab conflict detection and journal recovery. Returns a durable save receipt. Does not generate controller output.', object(version), (cad, input, signal) => cad.save(input.expectedVersion, signal), false),
     tool('cad_inspect_section', 'Compute a final solid section on XY, XZ or YZ with a parameterized offset along the plane normal (+Z, -Y or +X respectively). Returns paginated exact local 2D lines/arcs/circles and closed-contour count. Choose a plane inside the material. Tangent, open, branching, ellipse and spline sections are rejected; no approximation. Does not save.', object({ ...version, section: CadSectionRequestSchema, ...pageFields }), async (cad, input, signal) => {
-      const result = await cad.inspectSection(input.section, input.expectedVersion, signal);
+      const result = await cad.inspectSection(input.section, input.expectedVersion, 'section', signal);
       const { entities, ...summary } = result;
       return { version: input.expectedVersion, ...summary, entities: page(entities, input) };
     }),

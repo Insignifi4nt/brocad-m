@@ -2,6 +2,7 @@ import { cast, Compound, getOC, isShape3D, type Drawing, type Shape3D, type Simp
 import type { CadBuildResult, CadDocument, CadFeature, CadMesh, CadScalar, CadSketchFeature } from '../../../domain/cad/cadDocument';
 import { evaluateCadAngle, evaluateCadScalar } from '../../../domain/cad/cadExpression';
 import { CadError } from '../../../domain/cad/cadError';
+import { isCadRefusalFactCode, isCadRefusalFacts } from '../../../domain/cad/cadIssueCodes';
 import { resolveCadSketchRegions, type CadSketchMaterialRegion } from '../../../domain/cad/cadSketchGeometry';
 import type { CadSectionRequest, CadSectionResult } from '../../../domain/cad/cadSection';
 import { createCadKernelPlane } from './cadKernelPlane';
@@ -33,6 +34,9 @@ import { createCadKernelFaceSources, type CadKernelFaceSources } from './cadKern
 import { cadFeatureActive } from '../../../domain/cad/features/cadFeatureActivity';
 import { cadFeatureScalar, cadFeatureScalarAccepts } from '../../../domain/cad/features/cadFeatureRegistry';
 import { cadKernelBounds, cadKernelVolume } from './cadKernelQueries';
+import { cadKernelOperationOf } from '../../../domain/cad/cadBuildIssues';
+import type { CadKernelOperation } from '../../../domain/cad/cadDocument';
+import { cadKernelFailure, type CadKernelProfileStep, type CadKernelStep } from './cadKernelFailures';
 
 /** BRep state stays inside the worker. Only tessellation and export bytes leave it. */
 export interface CadKernelModel {
@@ -62,7 +66,7 @@ function validateSolid(shape: Shape3D, topologyChecked = false): { solidCount: n
       throw new CadError('empty-solid', 'The operation must contain closed solids with positive volume.');
     }
   } finally { for (const solid of solids) cadKernelDisposeShape(solid); }
-  if (!topologyChecked && !cadKernelIsValid(shape)) throw new CadError('invalid-solid', 'OpenCascade rejected the resulting topology. Reduce the dimensions or choose a different feature.');
+  if (!topologyChecked && !cadKernelIsValid(shape)) throw new CadError('invalid-solid', 'The result is not a valid closed solid: some of its faces cross or leave gaps. Reduce the dimensions of this feature or revise its inputs.');
   const volume = cadKernelVolume(shape);
   if (!positiveVolume(volume)) throw new CadError('empty-solid', 'The operation must produce a closed solid with positive volume.');
   return { solidCount: solids.length, volume };
@@ -121,8 +125,8 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
     for (const shape of shapes) if (!retained.has(shape)) { cadKernelDisposeShape(shape); shapes.delete(shape); }
   }
 
-  /** A single region returns its checked shape unchanged; several regions return their fused, unchecked union. */
-  function fromSketch(feature: Extract<CadFeature, { kind: 'extrude' | 'revolve' }>, regions: readonly CadSketchMaterialRegion[]): { shape: Shape3D; checked: boolean } {
+  /** A single region returns its checked shape unchanged; several regions return their fused, unchecked union. Each region's face is built in `faces`. */
+  function fromSketch(feature: Extract<CadFeature, { kind: 'extrude' | 'revolve' }>, regions: readonly CadSketchMaterialRegion[], faces: CadKernelProfileStep): { shape: Shape3D; checked: boolean } {
     const sketch = sketches.get(feature.sketchId);
     if (!sketch) throw new CadError('missing-sketch', 'The source sketch is unavailable or suppressed.');
     const placement = resolveCadExtrudeRevolvePlacement(feature, sketch, document.parameters, frameLookup);
@@ -139,8 +143,9 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       let result: Shape3D | undefined;
       for (const region of regions) {
         const boundaries = [region.boundary, ...region.voids];
-        const wires = boundaries.map(item => { const drawing = cadKernelProfileDrawing(item.geometry, drawings); const wire = cadKernelSketchOnPlane(drawing, plane); consumedSketches.push(wire); return wire; });
-        const face = cadKernelSketchFace(wires), oc = getOC();
+        const face = faces(() => cadKernelSketchFace(boundaries.map(item => {
+          const drawing = cadKernelProfileDrawing(item.geometry, drawings); const wire = cadKernelSketchOnPlane(drawing, plane); consumedSketches.push(wire); return wire;
+        }))), oc = getOC();
         try {
           const vector = feature.kind === 'extrude' ? cadKernelScaledUnitVector(orientation.normal, distance) : null;
           const axis = feature.kind === 'revolve' ? cadKernelAx1(origin, revolutionAxis) : null;
@@ -152,7 +157,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
               const raw = builder.Shape();
               try {
                 const built = cast(raw);
-                if (!isShape3D(built)) { built.delete(); throw new CadError('empty-solid', 'The profile did not produce a native solid.'); }
+                if (!isShape3D(built)) { built.delete(); throw new CadError('empty-solid', 'The sketch profile made no closed solid. A contour may be open or too small; close or enlarge it in the sketch.'); }
                 const shape = own(built);
                 if (feature.operation === 'cut') cadKernelSolidEvidence(shape, 'tool', 'Cut');
                 else validateSolid(shape);
@@ -175,6 +180,14 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
     if (!cadFeatureActive(feature, document)) { lineage.apply(feature, document); continue; }
     // A pattern records each copy's faces before releasing it, so the copies' solids can be traced in its result.
     let copyFaces: CadKernelFaceSources | undefined;
+    // The step the rebuild of this feature is taking and the input it reads, which its failure names.
+    let step: CadKernelStep = { operation: cadKernelOperationOf(feature), input: null };
+    const at = (operation: CadKernelOperation, field?: string, id?: string | null) => { step = { operation, input: field && id ? { field, id } : null }; };
+    // Faces built from sketch `sketchId`'s profile are the step profile; the step they interrupted resumes once they are built.
+    const profile = (sketchId: string): CadKernelProfileStep => build => {
+      const resumed = step; at('profile', 'sketchId', sketchId);
+      const built = build(); step = resumed; return built;
+    };
     try {
       let result: Shape3D;
       // Whether the feature takes material from its target, and so may split it, and whether its result lists solids as its source did.
@@ -190,19 +203,22 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
         case 'sketch': sketches.set(feature.id, feature); references.set(feature.id, feature); continue;
         case 'curve': references.set(feature.id, feature); continue; // Exact reference geometry produces and consumes no native body.
         case 'imported': {
+          at('import');
           const imported = loadCadSolidImport(feature.source);
           result = own(imported.shape); instances = checkedInstances(imported.analysis.solidCount); break;
         }
         case 'extrude': case 'revolve': {
+          at(feature.kind, 'sketchId', feature.sketchId);
           const sourceSketch = sketches.get(feature.sketchId);
           if (!sourceSketch) throw new CadError('missing-sketch', 'The source sketch is unavailable or suppressed.');
           const regions = resolveCadSketchRegions(sourceSketch, document.parameters, feature.kind === 'extrude' ? feature.regionSelection : undefined);
           instances = regions.length;
           if (feature.targetId !== null) instances = checkedInstances(instances + instancesOf(feature.targetId));
-          const sketched = fromSketch(feature, regions);
+          const sketched = fromSketch(feature, regions, profile(feature.sketchId));
           result = sketched.shape; topologyChecked = sketched.checked;
           if (feature.operation !== 'new') {
             if (!feature.targetId) throw new CadError('missing-target', 'Join and cut need a target body.');
+            at(feature.operation, 'targetId', feature.targetId);
             const target = body(feature.targetId);
             removesMaterial = feature.operation === 'cut';
             if (feature.operation === 'join') fusedTool = result;
@@ -213,12 +229,16 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           break;
         }
         case 'loft': {
+          at('loft');
           const sections = resolveCadLoftSections(feature, references, document.parameters, frameLookup);
           if (feature.operation !== 'new') {
             if (!feature.targetId) throw new CadError('missing-target', 'Join and cut need a target body.');
+            at(feature.operation, 'targetId', feature.targetId);
             const target = body(feature.targetId);
             instances = checkedInstances(1 + instancesOf(feature.targetId));
+            at('loft');
             const loft = own(buildCadLoftSolid(sections, feature.ruled));
+            at(feature.operation, 'targetId', feature.targetId);
             removesMaterial = feature.operation === 'cut';
             if (feature.operation === 'join') fusedTool = loft;
             result = own(feature.operation === 'join' ? cadKernelBuilders.fuse(target, loft) : cutCadKernelConfirmedMaterial(target, loft));
@@ -227,28 +247,35 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           break;
         }
         case 'sweep': {
+          at('sweep', 'curveId', feature.curveId);
           const inputs = resolveCadSweepInputs(feature, references, document.parameters, frameLookup);
           if (feature.operation !== 'new') {
             if (!feature.targetId) throw new CadError('missing-target', 'Join and cut need a target body.');
+            at(feature.operation, 'targetId', feature.targetId);
             const target = body(feature.targetId);
             instances = checkedInstances(1 + instancesOf(feature.targetId));
-            const sweep = own(buildCadSweepSolid(inputs));
+            at('sweep', 'curveId', feature.curveId);
+            const sweep = own(buildCadSweepSolid(inputs, profile(feature.sketchId)));
+            at(feature.operation, 'targetId', feature.targetId);
             removesMaterial = feature.operation === 'cut';
             if (feature.operation === 'join') fusedTool = sweep;
             result = own(feature.operation === 'join' ? cadKernelBuilders.fuse(target, sweep) : cutCadKernelConfirmedMaterial(target, sweep));
             topologyChecked = feature.operation === 'cut';
-          } else result = own(buildCadSweepSolid(inputs));
+          } else result = own(buildCadSweepSolid(inputs, profile(feature.sketchId)));
           break;
         }
         case 'pocket': {
+          at('pocket', 'targetId', feature.targetId);
           const target = body(feature.targetId);
+          at('pocket', 'sketchId', feature.sketchId);
           const prefix = new Map(document.features.slice(0, featureIndex).map(entry => [entry.id, entry]));
           const inputs = resolveCadPocketInputs(feature, prefix, document.parameters);
           instances = checkedInstances(inputs.regionCount + instancesOf(feature.targetId));
           removesMaterial = true;
-          result = own(buildCadPocketCut(target, inputs)); break;
+          result = own(buildCadPocketCut(target, inputs, profile(feature.sketchId))); break;
         }
         case 'fillet': case 'chamfer': {
+          at(feature.kind, 'targetId', feature.targetId);
           const target = body(feature.targetId);
           instances = instancesOf(feature.targetId);
           const topology = entryOf(feature.targetId)?.topology;
@@ -258,6 +285,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           break;
         }
         case 'shell': {
+          at('shell', 'targetId', feature.targetId);
           const target = body(feature.targetId); const topology = entryOf(feature.targetId)?.topology;
           if (!topology) throw new CadError('missing-body', 'The shell target body is unavailable.');
           instances = instancesOf(feature.targetId);
@@ -265,12 +293,16 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           if (!(cadKernelVolume(result) < cadKernelVolume(target) - CAD_PRECISION.kernelMinimumVolumeMm3)) throw new CadError('shell-failed', 'The inward shell did not remove material. Reduce its thickness or choose another opening.');
           const [originalMin, originalMax] = cadKernelBounds(target); const [shellMin, shellMax] = cadKernelBounds(result);
           if (shellMin.some((value, axis) => value < originalMin[axis] - CAD_PRECISION.kernelBoundsSlackMm) || shellMax.some((value, axis) => value > originalMax[axis] + CAD_PRECISION.kernelBoundsSlackMm)) {
-            throw new CadError('shell-failed', 'The kernel shell extended outside the original body instead of producing inward walls.');
+            throw new CadError('shell-failed', 'The shell grew outside the body instead of making inward walls. Reduce the thickness or choose another opening.');
           }
           break;
         }
         case 'boolean': {
-          const target = body(feature.targetId); const tool = body(feature.toolId);
+          const operation = feature.operation === 'union' ? 'join' : feature.operation;
+          at(operation, 'targetId', feature.targetId);
+          const target = body(feature.targetId);
+          at(operation, 'toolId', feature.toolId);
+          const tool = body(feature.toolId);
           instances = checkedInstances(instancesOf(feature.targetId) + instancesOf(feature.toolId));
           removesMaterial = feature.operation !== 'union';
           if (feature.operation === 'union') fusedTool = tool;
@@ -279,6 +311,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           break;
         }
         case 'transform': {
+          at('transform', 'sourceId', feature.sourceId);
           instances = instancesOf(feature.sourceId);
           // A moved copy lists its solids in its source's order.
           sameSolidOrder = true;
@@ -291,8 +324,9 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           result = replace(result, shape => cadKernelBuilders.translate(shape, translation));
           break;
         }
-        case 'mirror': instances = instancesOf(feature.sourceId); result = replace(own(body(feature.sourceId).clone()), shape => cadKernelBuilders.mirror(shape, feature.plane)); break;
+        case 'mirror': at('mirror', 'sourceId', feature.sourceId); instances = instancesOf(feature.sourceId); result = replace(own(body(feature.sourceId).clone()), shape => cadKernelBuilders.mirror(shape, feature.plane)); break;
         case 'linear-pattern': {
+          at('pattern', 'sourceId', feature.sourceId);
           if (!cadFeatureScalarAccepts(cadFeatureScalar(feature.kind, 'count'), feature.count)) throw new CadError('pattern-limit', 'Patterns require 2–100 instances.');
           const source = body(feature.sourceId);
           instances = checkedPatternInstances(instancesOf(feature.sourceId) * feature.count);
@@ -311,6 +345,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
           break;
         }
         case 'circular-pattern': {
+          at('pattern', 'sourceId', feature.sourceId);
           const pattern = resolveCadCircularPattern(feature, document.parameters);
           const source = body(feature.sourceId);
           instances = checkedPatternInstances(instancesOf(feature.sourceId) * pattern.count);
@@ -330,7 +365,9 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
         }
         default: { const exhaustive: never = feature; throw new Error(`Unsupported feature: ${exhaustive}`); }
       }
+      at('check');
       const measured = validateSolid(result, topologyChecked);
+      at('record');
       const topology = new CadKernelTopology(result);
       try {
         const key = lineage.keyFor(feature, document);
@@ -358,8 +395,11 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       releaseTransientShapes();
     } catch (error) {
       releaseTransientShapes();
-      diagnostics.push({ code: error instanceof CadError ? error.code : 'kernel-operation-failed', featureId: feature.id,
-        message: error instanceof Error ? error.message : 'OpenCascade could not construct this feature. Reduce its dimensions or revise the sketch.' });
+      // The reply guard refuses a code that carries facts without them; in development the site that raised it is found here.
+      if (import.meta.env?.DEV && error instanceof CadError && isCadRefusalFactCode(error.code) && !isCadRefusalFacts(error.code, error.facts)) {
+        throw new Error(`Refusal ${error.code} of ${feature.id} is raised without its facts.`);
+      }
+      diagnostics.push(cadKernelFailure(feature.id, error, step));
       diagnostics.push({ code: 'rebuild-stopped', featureId: feature.id, message: 'Rebuild stopped here. The preview shows the preceding valid features; downstream features have not been evaluated.' });
       break;
     } finally { copyFaces?.dispose(); }
@@ -394,7 +434,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       if (disposed || parsed.expectedBuildId !== buildId) throw new CadError('STALE_BUILD', 'The topology snapshot is stale. Rebuild the current document and select again.');
       body(parsed.bodyId);
       const topology = entryOf(parsed.bodyId)?.topology;
-      if (!topology) throw new CadError('missing-body', 'The topology body is unavailable.');
+      if (!topology) throw new CadError('missing-body', 'This body has no faces or edges in the current build. Rebuild the part and select again.');
       return topology.inspect(parsed, buildId);
     },
     topologyAdjacency(request) {
@@ -402,14 +442,14 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       if (disposed || parsed.expectedBuildId !== buildId) throw new CadError('STALE_BUILD', 'The topology snapshot is stale. Rebuild the current document and select again.');
       body(parsed.bodyId);
       const topology = entryOf(parsed.bodyId)?.topology;
-      if (!topology) throw new CadError('missing-body', 'The topology body is unavailable.');
+      if (!topology) throw new CadError('missing-body', 'This body has no faces or edges in the current build. Rebuild the part and select again.');
       return topology.adjacency(parsed.bodyId, buildId);
     },
     topologyTangentChain(request) {
       const parsed = parseCadTopologyTangentChainRequest(request);
       if (disposed || parsed.expectedBuildId !== buildId) throw new CadError('STALE_BUILD', 'The topology snapshot is stale. Rebuild the current document and select again.');
       const shape = body(parsed.bodyId), topology = entryOf(parsed.bodyId)?.topology;
-      if (!topology) throw new CadError('missing-body', 'The topology body is unavailable.');
+      if (!topology) throw new CadError('missing-body', 'This body has no faces or edges in the current build. Rebuild the part and select again.');
       return topology.tangentChain(shape, parsed.bodyId, buildId, parsed.edgeKey);
     },
     resolveTopologyPicks(request, parameters = document.parameters) {
@@ -418,7 +458,7 @@ export function buildCadKernelModel(document: CadDocument): CadKernelModel {
       if (diagnostics.length) throw new CadError('invalid-selection', 'Fix the feature diagnostics before applying a topology selection.');
       body(parsed.bodyId);
       const topology = entryOf(parsed.bodyId)?.topology;
-      if (!topology) throw new CadError('missing-body', 'The selected topology body is unavailable.');
+      if (!topology) throw new CadError('missing-body', 'This body has no faces or edges in the current build. Rebuild the part and select again.');
       return topology.resolvePicks(parsed, buildId, parameters);
     },
     dispose() {

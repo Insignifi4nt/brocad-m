@@ -334,7 +334,7 @@ describe('body parts', () => {
     const deep = chain(13);
     expect(parts({ ...deep, facts: keeping(14, 1) })).toMatchObject({ pieces: deep.before.slice(0, 13), lost: [] });
     // Removing both loses every key: past the limit at thirteen levels, and exactly at it at twelve.
-    expect(parts({ ...deep, facts: keeping(14, 2) })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: true });
+    expect(parts({ ...deep, facts: keeping(14, 2) })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: 'key-limit' });
     const shallow = parts({ ...chain(12), facts: keeping(13, 2) });
     expect([shallow.untracked, shallow.lost.length, shallow.lost[0], shallow.lost.at(-1)])
       .toEqual([undefined, 2 ** 12, `pad${'/split(0)'.repeat(12)}`, `pad${'/split(1)'.repeat(12)}`]);
@@ -360,7 +360,7 @@ describe('body parts', () => {
     expect([shallow.result.lost.length, shallow.reads > budget]).toEqual([128, true]);
     // Thirteen levels lose 2 ** 19 keys. The first index alone passes the limit, so the body is untracked within the budget, which the getter
     // enforces, so a search that went on would fail before listing them.
-    expect(removing(13, budget).result).toMatchObject({ untracked: true, overflowed: true });
+    expect(removing(13, budget).result).toMatchObject({ untracked: true, overflowed: 'key-limit' });
   });
 
   it('never reads the keys of a removed piece that stays in a group, which can take more steps than the work bound', () => {
@@ -372,7 +372,7 @@ describe('body parts', () => {
     const before = [...inner, ...outer.slice(1)], orders = [outer, inner], gone = inner[1];
     const kept = before.flatMap((_, solid): (readonly Entry[])[] => solid === 1 ? [] : [[[0, solid, 1]]]);
     // Removed alone, none of its keys is lost, since each names a sibling left in another order, but finding that passes the bound.
-    expect(parts({ before, orders, facts: facts(kept.length, kept) })).toMatchObject({ untracked: true, overflowed: true });
+    expect(parts({ before, orders, facts: facts(kept.length, kept) })).toMatchObject({ untracked: true, overflowed: 'search-limit' });
     // In a group that a piece left descends from, its key stays, naming that piece, so no key naming it can be lost and none is read.
     const carried = parts({ before, orders, ambiguous: [[inner[0], gone]], facts: facts(kept.length, kept) });
     expect([carried.untracked, carried.lost, carried.ambiguous, carried.pieces?.length]).toEqual([undefined, [], [[inner[0], gone]], kept.length]);
@@ -449,10 +449,10 @@ describe('body parts', () => {
 
   it('stops tracking parts past the limits instead of failing the build', () => {
     const many = facts(MAX_CAD_BODY_LIST + 1, []);
-    expect(parts({ facts: many })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: true });
+    expect(parts({ facts: many })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: 'part-limit' });
     expect(many.provenance).not.toHaveBeenCalled();
     const long = `pad${'/split(0)'.repeat(Math.floor((MAX_CAD_BODY_KEY_LENGTH - 3) / 9))}`;
-    expect(parts({ before: [long], facts: facts(2, [[[0, 0, 1]], [[0, 0, 2]]]) })).toMatchObject({ untracked: true, overflowed: true });
+    expect(parts({ before: [long], facts: facts(2, [[[0, 0, 1]], [[0, 0, 2]]]) })).toMatchObject({ untracked: true, overflowed: 'key-limit' });
     expect(cadBodyParts({ featureId: 'cut', previous: { ...previous(), untracked: true }, beforeSolids: 9, facts: facts(9, []) })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [] });
   });
 
@@ -464,11 +464,11 @@ describe('body parts', () => {
       parts({ before: [A, B], ambiguous: [[A, ...earlier(kept)]], orders, facts: facts(3, [[[0, 0, 1]], [[0, 1, 7]], [[0, 1, 8]]]) });
     const full = split(MAX_CAD_BODY_LIST - 3);
     expect(new Set([...full.pieces!, ...full.ambiguous!.flat()]).size).toBe(MAX_CAD_BODY_LIST);
-    expect(split(MAX_CAD_BODY_LIST - 2)).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: true });
+    expect(split(MAX_CAD_BODY_LIST - 2)).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: 'key-limit' });
     // The keys an order numbers count too, while one of them leads to a key the body keeps.
     const numbered = [['round/split(0)', 'round/split(1)']];
     expect(split(MAX_CAD_BODY_LIST - 5, numbered).orders).toEqual([{ keys: numbered[0] }]);
-    expect(split(MAX_CAD_BODY_LIST - 4, numbered)).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: true });
+    expect(split(MAX_CAD_BODY_LIST - 4, numbered)).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: 'key-limit' });
     // The worker check holds replies to the same count.
     const body = (pieces: readonly string[], group: readonly string[]): CadBodyState =>
       ({ key: key('pad'), kind: 'solid', createdBy: 'pad', modifiedBy: ['round'], pieces: pieces.map(key), ambiguous: [group.map(key)] });
@@ -567,6 +567,8 @@ describe('body parts', () => {
     const issues = lineage.issues();
     expect(issues.map(issue => [issue.code, issue.featureId, issue.pieces.length]))
       .toEqual([['ambiguous-body-parts', 'comb', MAX_CAD_BODY_LIST], ['untracked-body-parts', `c${overflowing - 1}`, 0]]);
+    // The cause is named: the group's keys passed the list limit.
+    expect(issues[1]).toMatchObject({ reason: 'key-limit', message: `Body box has more part names, or longer ones, than are tracked after c${overflowing - 1}, so references to its parts resolve as missing.` });
     // Every part, even a piece the last tracked state had, resolves as missing from then on.
     const body = lineage.get(key('box'))!;
     expect(body).toMatchObject({ modifiedBy: expect.arrayContaining([`c${overflowing}`]), untracked: true });
@@ -585,7 +587,7 @@ describe('body parts', () => {
     const issues = lineage.issues();
     expect(issues).toHaveLength(MAX_CAD_BODY_ISSUES);
     expect(issues.every(isCadBodyIssue)).toBe(true);
-    expect(issues.at(-1)).toEqual({ code: 'more-body-issues', featureId: `c${MAX_CAD_BODY_ISSUES - 1}`, body: 'box', pieces: [],
+    expect(issues.at(-1)).toEqual({ code: 'more-body-issues', featureId: `c${MAX_CAD_BODY_ISSUES - 1}`, body: 'box', pieces: [], omitted: 21,
       message: `21 more body issues, from feature c${MAX_CAD_BODY_ISSUES - 1} on, are not listed.` });
   });
 
@@ -769,6 +771,15 @@ describe('body references, metadata and selection', () => {
     const issue = { code: 'lost-body-parts', featureId: 'slot', body: 'box', pieces: ['peg/split(0)'], message: 'x' };
     expect(isCadBodyIssue(issue)).toBe(true);
     expect(isCadBodyIssue({ ...issue, code: 'ambiguous-split-order' })).toBe(false);
+    // An untracked body names why, with one of its causes, and only it does.
+    expect(isCadBodyIssue({ ...issue, code: 'untracked-body-parts', pieces: [], reason: 'search-limit' })).toBe(true);
+    expect(isCadBodyIssue({ ...issue, code: 'untracked-body-parts', pieces: [], reason: 'too-many' })).toBe(false);
+    expect(isCadBodyIssue({ ...issue, code: 'untracked-body-parts', pieces: [] })).toBe(false);
+    expect(isCadBodyIssue({ ...issue, reason: 'part-limit' })).toBe(false);
+    // The summary of issues left out counts them, and only it does.
+    expect(isCadBodyIssue({ ...issue, code: 'more-body-issues', pieces: [], omitted: 21 })).toBe(true);
+    for (const omitted of [undefined, 0, 1.5, '21']) expect(isCadBodyIssue({ ...issue, code: 'more-body-issues', pieces: [], omitted }), String(omitted)).toBe(false);
+    expect(isCadBodyIssue({ ...issue, omitted: 21 })).toBe(false);
     expect(isCadBodyIssue({ ...issue, pieces: ['bad key'] })).toBe(false);
     expect(isCadBodyIssue({ ...issue, message: 'x'.repeat(8193) })).toBe(false);
   });

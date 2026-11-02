@@ -91,7 +91,7 @@ describe('bounded native linear-pattern staging', () => {
     });
     try {
       built([...seed, linear({ count: 6 })], model => {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'pattern', message: 'Interrupted linear pattern' });
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'pattern', code: 'kernel-operation-failed', details: { operation: 'pattern', input: { field: 'sourceId', id: 'seed' }, kernelMessage: 'Interrupted linear pattern' } });
         expect(model.result.meshes).toHaveLength(1); expect(model.result.meshes[0].featureId).toBe('seed'); expect(model.result.meshes[0].volume).toBeCloseTo(24, 7);
         if (!source) throw new Error('Expected original native source'); expect(measureVolume(source)).toBeCloseTo(24, 7);
         expect(copies).toHaveLength(failingCall); for (const shape of [...copies, ...unions]) expect(() => shape.wrapped).toThrow();
@@ -110,7 +110,7 @@ describe('bounded native linear-pattern staging', () => {
     });
     try {
       built([...seed, linear()], model => {
-        expect(model.result.diagnostics[0].message).toBe('Interrupted pattern translation'); expect(model.result.meshes[0].featureId).toBe('seed');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'pattern', kernelMessage: 'Interrupted pattern translation' } }); expect(model.result.meshes[0].featureId).toBe('seed');
         expect(clones).toHaveLength(2); for (const clone of clones) expect(() => clone.wrapped).toThrow();
         expect(model.result.meshes[0].volume).toBeCloseTo(24, 7);
         expect(watch.failed).toHaveLength(1); expect(watch.outstanding()).toBe(0);

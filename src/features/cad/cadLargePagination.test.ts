@@ -4,6 +4,7 @@ import { CadSession } from './cadSession';
 import { cadSiteTools } from './cadSiteTools';
 import type { CadController } from './useCadController';
 import type { CadBuildResult, CadMesh } from '@/domain/cad/cadDocument';
+import { NO_CAD_BUILD_ISSUES } from '@/domain/cad/cadBuildIssues';
 
 describe('complete CAD pagination without whole-document offset policies', () => {
   it('reads versioned exact text beyond the former 16 MiB offset and reaches the actual document end', async () => {
@@ -31,7 +32,7 @@ describe('complete CAD pagination without whole-document offset policies', () =>
     const meshes = Array.from({ length: 100_003 }, (_, index) => ({ ...mesh, featureId: `body_${index}`, name: `Body ${index}` }));
     const result: CadBuildResult = { buildId: 'complete-model', meshes, diagnostics: [], durationMs: 1 };
     const inspectBuild = vi.fn(async () => result);
-    const tool = cadSiteTools(() => ({ inspectBuild }) as unknown as CadController).find(tool => tool.name === 'cad_build');
+    const tool = cadSiteTools(() => ({ inspectBuild, buildIssuesOf: () => NO_CAD_BUILD_ISSUES }) as unknown as CadController).find(tool => tool.name === 'cad_build');
     if (!tool) throw new Error('Missing build inspector.');
     expect(await tool.execute({ expectedVersion: 'current', offset: 100_001, limit: 1 })).toMatchObject({ ok: true, data: {
       totalBodies: 100_003, nextBodyOffset: 100_002, bodies: [{ featureId: 'body_100001', solidCount: 1, triangles: 1 }],

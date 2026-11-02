@@ -47,13 +47,14 @@
 .cad-plane-list button { flex: 1; font-size: 12px; gap: 4px; padding: 3px; }
 .cad-feature-list { flex: 1; overflow: auto; padding: 2px 6px; }
 .cad-workbench .cad-tree-row { display: flex; width: 100%; min-height: 30px; padding: 5px 7px; gap: 7px; justify-content: flex-start; text-align: left; }
-.cad-tree-row span:not(.cad-tree-muted):not(.cad-tree-error) { overflow: hidden; text-overflow: ellipsis; }
+.cad-tree-row span:not(.cad-tree-muted):not(.cad-tree-error):not(.cad-tree-blocked) { overflow: hidden; text-overflow: ellipsis; }
 .cad-tree-row svg { flex-shrink: 0; }
 .cad-workbench .cad-tree-row.is-selected { background: var(--accent); border-color: var(--primary); }
 /* A plane hovered in the design area marks its row the way the pointer would. */
 .cad-workbench .cad-tree-row.is-hovered:not(.is-selected) { background: var(--accent); }
 .cad-tree-row.has-error { color: var(--destructive); }
 .cad-tree-error { color: var(--destructive); margin-left: auto; font-weight: 700; }
+.cad-tree-blocked { color: var(--muted-foreground); margin-left: auto; }
 .cad-tree-muted { margin-left: auto; font-size: 10px; color: var(--muted-foreground); }
 .cad-workbench .cad-tree-profile { padding-left: 42px; min-height: 26px; font-size: 12px; }
 .cad-center { display: flex; flex: 1; flex-direction: column; position: relative; overflow: hidden; min-height: 0; min-width: 0; background: linear-gradient(180deg, var(--cad-view-top), var(--cad-view-bottom)); }

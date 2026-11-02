@@ -1,5 +1,6 @@
 import { Type } from '@sinclair/typebox';
 import type { CadFeature } from '../cadDocument';
+import type { CadRefusalCode } from '../cadIssueCodes';
 import type { CadAnyFeatureDefinition, CadFeatureDefinition, CadFeatureDefinitions, CadFeatureField, CadFeatureKind, CadFeatureNestedQuantity, CadFeatureQuantityPath, CadFeatureScalar,
   CadFeatureSlot } from './cadFeatureDefinitionTypes';
 import { cadQuantitiesUnder } from './cadFeatureScalarMaps';
@@ -30,9 +31,9 @@ export function cadFeatureDefinitions() {
  * - `rebuild`: checking and meshing each solid the kernel builds, an unexpected kernel failure, and the stop that follows a refusal.
  */
 export const CAD_FEATURE_SHARED_DIAGNOSTICS = Object.freeze({
-  parse: Object.freeze(['duplicate-id', 'invalid-reference', 'unavailable-body', 'feature-limit', 'invalid-operation']),
-  expressions: Object.freeze(['invalid-scalar', 'invalid-expression', 'unknown-parameter', 'division-by-zero', 'expression-limit']),
-  rebuild: Object.freeze(['empty-solid', 'invalid-solid', 'invalid-mesh', 'topology-mapping', 'kernel-operation-failed', 'rebuild-stopped'])
+  parse: Object.freeze<readonly CadRefusalCode[]>(['duplicate-id', 'invalid-reference', 'unavailable-body', 'feature-limit', 'invalid-operation']),
+  expressions: Object.freeze<readonly CadRefusalCode[]>(['invalid-scalar', 'invalid-expression', 'unknown-parameter', 'division-by-zero', 'expression-limit']),
+  rebuild: Object.freeze<readonly CadRefusalCode[]>(['empty-solid', 'invalid-solid', 'invalid-mesh', 'topology-mapping', 'kernel-operation-failed', 'rebuild-stopped'])
 });
 
 /**

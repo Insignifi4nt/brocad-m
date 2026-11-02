@@ -6,6 +6,7 @@ import { hasValidCadSketchGeometry, parseCadDocument } from '@/domain/cad/cadSch
 import type { CadSketchSolveDiagnostics, CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import { cadSketchShrinkWarnings, type CadSketchShrinkWarning } from './cadSketchShrinkWarnings';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 import { Value } from '@sinclair/typebox/value';
 import { cadFeatureInputs } from '@/domain/cad/cadFeatureInputs';
 import { assertCadSketchExternalReferences, refreshCadSketchExternalReferences } from '@/domain/cad/cadSketchExternalReferences';
@@ -29,6 +30,9 @@ const geometryIntentErrors = {
 } as const satisfies Partial<Record<CadEdit['kind'], readonly [string, string]>>;
 type GeometryIntentEdit = Extract<CadEdit, { kind: keyof typeof geometryIntentErrors }>;
 const isGeometryIntentEdit = (edit: CadEdit): edit is GeometryIntentEdit => Object.hasOwn(geometryIntentErrors, edit.kind);
+/** What a solver that failed rather than judged a sketch knows of it: nothing. */
+const UNJUDGED: CadSketchSolveDiagnostics = Object.freeze({ status: null, degreesOfFreedom: null, conflictingIds: Object.freeze([]), redundantIds: Object.freeze([]),
+  partiallyRedundantIds: Object.freeze([]), issues: Object.freeze([]) });
 
 export function needsCadSketchPreparation(document: CadDocument, edits: readonly CadEdit[]): boolean {
   // Moving dimensions changes only where they are drawn, which the plain edit path accepts without solving or checking geometry.
@@ -107,7 +111,14 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
       }
       const input = { graph: refreshed.graph, parameters: target.parameters,
         ...(drag?.sketchId === feature.id ? { drag: { pointId: drag.pointId, position: drag.position } } : {}) };
-      const result = await solver.solve(input, signal);
+      const result = await solver.solve(input, signal).catch((error: unknown) => {
+        // A cancelled solve stays cancelled. A solver that failed rather than judged the sketch refuses its edit, as a solver that cannot load
+        // does, so the sketch shows it.
+        signal?.throwIfAborted();
+        if (!(error instanceof CadSketchSolverFailure)) throw error;
+        throw new CadSketchPreparationError({ sketchId: feature.id, sketchName: feature.name, graph: input.graph, unavailable: error.kernelMessage ? { kernelMessage: error.kernelMessage } : {},
+          rejection: { kind: 'rejected', reason: 'failed', message: error.message, diagnostics: UNJUDGED } });
+      });
       signal?.throwIfAborted();
       diagnostics.set(feature.id, result.diagnostics);
       if (result.kind !== 'solved') {

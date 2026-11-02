@@ -33,7 +33,7 @@ export interface CadSketchUnmet { readonly relationId: string; readonly relation
 export type CadSketchLoweringCapability = 'point' | 'edge' | 'support' | 'centre' | 'size' | 'value';
 
 /** An operand the lowering cannot read as a relation asked: no such operand, or one without that capability. */
-export class CadSketchLoweringRefusal extends CadError {
+export class CadSketchLoweringRefusal extends CadError<'unlowerable-sketch-operand'> {
   constructor(readonly operandId: string, readonly capability: CadSketchLoweringCapability) {
     super('unlowerable-sketch-operand', `Sketch operand "${operandId}" has no ${capability} the solver can use.`);
   }

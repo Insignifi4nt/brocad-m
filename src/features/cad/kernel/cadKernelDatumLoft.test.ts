@@ -136,6 +136,16 @@ describe('canonical datum loft construction', () => {
     const fresh = buildCadLoftSolid(resolved, false);
     try { expect(measureVolume(fresh)).toBeCloseTo(500 * Math.PI, 6); } finally { fresh.delete(); }
   });
+  it('names the next step when the kernel cannot place the loft, keeping its account of the failed check', () => {
+    const sections = [datum(), sketch('a', 0, circle(5)), sketch('b', 20, circle(5))];
+    const resolved = resolveCadLoftSections(loft(['a', 'b']), new Map(sections.map(feature => [feature.id, feature])), {});
+    const done = vi.spyOn(getOC().BRepBuilderAPI_Transform.prototype, 'IsDone').mockReturnValue(false);
+    try {
+      expect(() => buildCadLoftSolid(resolved, false)).toThrow(expect.objectContaining({ code: 'loft-placement',
+        message: 'The loft could not be moved onto its datum plane. The move copies the loft exactly, so the loft built before it is likely damaged; rebuild the part, and if this repeats, revise its sections or recreate the datum plane.',
+        kernelMessage: 'OpenCascade could not place the fitted loft in its datum frame.' }));
+    } finally { done.mockRestore(); }
+  });
   it('retains the original target preview and blocks export after a placement setup failure', () => {
     const oc = getOC();
     const fail = vi.spyOn(oc.gp_Trsf.prototype, 'SetDisplacement').mockImplementation(() => { throw new Error('Forced loft setup failure'); });
@@ -143,7 +153,7 @@ describe('canonical datum loft construction', () => {
       const model = buildCadKernelModel(document([...stock, datum(), sketch('a', 0, circle(5)), sketch('b', 20, circle(5)),
         loft(['a', 'b'], { operation: 'cut', targetId: 'stock' })]));
       try {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'loft', message: 'Forced loft setup failure' });
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'loft', code: 'kernel-operation-failed', details: { operation: 'loft', input: null, kernelMessage: 'Forced loft setup failure' } });
         expect(model.result.meshes.map(mesh => mesh.featureId)).toEqual(['stock']);
         expect(model.result.meshes[0].volume).toBeCloseTo(8000, 6);
         expect(() => model.section({ bodyId: 'stock', plane: 'XY', offset: 10 })).toThrow('Fix the model diagnostics');

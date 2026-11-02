@@ -7,6 +7,7 @@ import type { CadCurveFeature, CadDocument, CadFeature, CadPlane, CadProfile, Ca
 import { resolveCadSweepInputs } from '../../../domain/cad/cadSweep';
 import { parseCadDocument } from '../../../domain/cad/cadSchema';
 import { buildCadSweepSolid } from './cadKernelSweep';
+import type { CadKernelProfileStep } from './cadKernelFailures';
 import { cadKernelBuilders } from './cadKernelBuilders';
 import { watchCadKernelBuilders } from './__tests__/cadKernelBuilderWatch';
 import { buildCadKernelModel, type CadKernelModel } from './cadKernelModel';
@@ -16,6 +17,8 @@ beforeAll(async () => {
   const wasmBinary = await readFile(new URL('../../../../node_modules/replicad-opencascadejs/dist/replicad_single.wasm', import.meta.url));
   setOC(await initOpenCascade({ wasmBinary, print: () => undefined, printErr: () => undefined }));
 }, 60_000);
+/** Builds a section outside a rebuild, where no step is taken. */
+const unstepped: CadKernelProfileStep = build => build();
 const base = (id: string) => ({ id, name: id, suppressed: false });
 const circle = (radius: number | string = 1): CadProfile => ({ kind: 'circle', x: 0, y: 0, radius });
 const sketch = (geometry: CadProfile = circle(), plane: CadPlane = 'YZ', offset: number | string = 0): CadSketchFeature => ({
@@ -168,7 +171,7 @@ describe('exact segmented Sweep solids', () => {
       const segments = phase === 'LastShape'
         ? [{ kind: 'arc', center: [0, 10], radius: 10, startAngle: -90, sweep: 45 }, { kind: 'arc', center: [0, 10], radius: 10, startAngle: -45, sweep: 45 }] satisfies CadCurveFeature['segments']
         : [quarter];
-      expect(() => buildCadSweepSolid(inputs(sketch(), rail(segments)))).toThrow(`Interrupted Sweep ${phase}`);
+      expect(() => buildCadSweepSolid(inputs(sketch(), rail(segments)), unstepped)).toThrow(`Interrupted Sweep ${phase}`);
       expect(builders).toHaveLength(phase === 'LastShape' ? 2 : 1); expect(wires).toHaveLength(1); expect(faces.length).toBeGreaterThan(0);
       for (const builder of builders) expect(() => builder.IsDone()).toThrow();
       for (const wire of wires) expect(() => wire.wrapped).toThrow();
@@ -181,7 +184,7 @@ describe('exact segmented Sweep solids', () => {
     const fail = vi.spyOn(cadKernelBuilders, 'fuse').mockImplementation((left, other) => { target = left; generated = other; return native(left, other); });
     try {
       built([...block, sketch(), rail(), sweep({ operation: 'join', targetId: 'block' })], model => {
-        expect(model.result.diagnostics[0].message).toBe('Interrupted Sweep join'); expect(model.result.meshes[0].featureId).toBe('block');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'join', input: { field: 'targetId', id: 'block' }, kernelMessage: 'Interrupted Sweep join' } }); expect(model.result.meshes[0].featureId).toBe('block');
         if (!generated || !target) throw new Error('Expected native operands');
         const released = generated; expect(() => released.wrapped).toThrow(); expect(measureVolume(target)).toBeCloseTo(500, 7);
         expect(watch.failed).toHaveLength(1); expect(watch.outstanding()).toBe(0);
@@ -196,7 +199,7 @@ describe('exact segmented Sweep solids', () => {
     });
     try {
       built([...block, sketch(), rail(mixed), sweep()], model => {
-        expect(model.result.diagnostics[0].message).toBe('Interrupted staged Sweep fuse'); expect(model.result.meshes[0].featureId).toBe('block');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'sweep', kernelMessage: 'Interrupted staged Sweep fuse' } }); expect(model.result.meshes[0].featureId).toBe('block');
         expect(staged).toHaveLength(2); for (const shape of staged) expect(() => shape.wrapped).toThrow();
         expect(model.result.meshes[0].volume).toBeCloseTo(500, 7);
         expect(watch.failed).toHaveLength(1); expect(watch.outstanding()).toBe(0);
@@ -221,7 +224,7 @@ describe('exact segmented Sweep solids', () => {
     const wires: Wire[] = []; const originalSketchDelete = Sketch.prototype.delete;
     const sketchDelete = vi.spyOn(Sketch.prototype, 'delete').mockImplementation(function(this: Sketch) { wires.push(this.wire); originalSketchDelete.call(this); });
     try {
-      expect(() => buildCadSweepSolid(inputs())).toThrow('planar closed face');
+      expect(() => buildCadSweepSolid(inputs(), unstepped)).toThrow('planar closed face');
       expect(builders).toHaveLength(1); expect(wires).toHaveLength(1);
       for (const builder of builders) expect(() => builder.Face()).toThrow();
       for (const wire of wires) expect(() => wire.wrapped).toThrow();

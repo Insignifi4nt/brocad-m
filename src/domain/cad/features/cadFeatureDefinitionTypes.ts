@@ -1,3 +1,4 @@
+import type { CadRefusalCode } from '../cadIssueCodes';
 import type { TObject, TSchema } from '@sinclair/typebox';
 import type { CadDocument, CadFeature, CadScalar, CadSketchFeature } from '../cadDocument';
 import type { CadDatumFrameLookup, CadResolvedFrame } from '../cadDatumPlanes';
@@ -209,7 +210,7 @@ export interface CadAnyFeatureDefinition {
    * code can tell. Codes of evaluating an input feature on its own, such as solving a sketch, are the input's: it is refused first.
    * `cadFeatureDiagnostics.test.ts` holds each list to the codes its checks and kernel evaluation can reach. D1 maps them to issues.
    */
-  readonly diagnostics: readonly string[];
+  readonly diagnostics: readonly CadRefusalCode[];
   /**
    * The solid instances the feature makes from `operands`, the instances of its body inputs, before any repeating count multiplies
    * them. Absent: none for a kind that makes no body, otherwise as many as its operands, and at least one.

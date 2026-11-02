@@ -13,6 +13,10 @@ import { CAD_BUDGET_APP_ID, CAD_FORMER_DOCUMENT_BYTES, cadBudgetFixture, cadBudg
 import { CadSession } from './cadSession';
 import { useCadController, type CadController } from './useCadController';
 import { cadSiteTools } from './cadSiteTools';
+import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { CAD_SKETCH_SOLVER_NOT_LOADED } from './sketch-solver/cadSketchSolverFailure';
+import { cadSketchIssues } from './cadSketchIssues';
+import { cadAgentIssue, cadAgentIssueDigest } from './cadAgentIssues';
 import { CAD_STAR_PLUGIN, CAD_GEAR_V2_PLUGIN, createCadPluginProfile, fingerprintCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
 import type { CadRenderedViewState, CadViewportCapture, CadViewportState } from './cadViewportControls';
 import { cadReferenceFeatureIds, cadReferencePlanes, prepareCadViewportReferences, selectCadViewportReferences } from './cadViewportReferences';
@@ -33,6 +37,10 @@ import type { CadSketchEndTrimPreparation } from '@/domain/cad/cadSketchTrimExte
 import { extendPart, lineExtend } from '@/domain/cad/__tests__/cadSketchExtendFixtures';
 import type { CadSketchLineExtendPreparation } from '@/domain/cad/cadSketchTrimExtend';
 import { graphCellSelectionAt, intersectingCircleSketch, lensAreaMm2 } from '@/domain/cad/__tests__/cadIntersectingCellFixtures';
+import { CadError } from '@/domain/cad/cadError';
+import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { CAD_KERNEL_NOT_LOADED } from './kernel/cadKernelLoader';
+import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
 
 const kernel = vi.hoisted(() => ({ build: vi.fn(), section: vi.fn(), export: vi.fn(), importSolid: vi.fn(), importDxf: vi.fn(), importDxfCurve: vi.fn(), inspectTopology: vi.fn(), resolveTopologyPicks: vi.fn(), dispose: vi.fn() }));
 const createClient = vi.hoisted(() => vi.fn());
@@ -43,6 +51,19 @@ vi.mock('./sketch-solver/cadSketchSolverClient', () => ({ createCadSketchSolverC
 // Counts how often edit preparation looks for solve warnings, and stands in for what it finds.
 const shrinkWarnings = vi.hoisted(() => vi.fn());
 vi.mock('./cadSketchShrinkWarnings', () => ({ cadSketchShrinkWarnings: shrinkWarnings }));
+// The DXF writer, which refuses the next export once a test sets `refuse`: a section read back against its schema gives it nothing to refuse.
+const dxfWriter = vi.hoisted(() => ({ refuse: null as null | (() => unknown) }));
+vi.mock('@/domain/cad/cadDxfExport', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/domain/cad/cadDxfExport')>();
+  return { ...actual, cadEntitiesToDxf: (...input: Parameters<typeof actual.cadEntitiesToDxf>) => {
+    const refuse = dxfWriter.refuse; dxfWriter.refuse = null;
+    if (refuse) throw refuse();
+    return actual.cadEntitiesToDxf(...input);
+  } };
+});
+// Loaded with that writer before any test: a section export imports this module and the writer at once, and a module first loaded while the
+// writer's mock still awaits the original would keep the original writer, which a sketch export then calls.
+import '@/domain/cad/cadCam';
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
@@ -160,6 +181,81 @@ describe('sketch solve warnings', () => {
       diagnostics: { status: 'failed', degreesOfFreedom: null, conflictingIds: ['length'], redundantIds: [], partiallyRedundantIds: [], issues: [] } }));
     expect(await tool.execute({ expectedVersion: h.session.getSnapshot().version, edits: length(' span ') })).toMatchObject({ ok: false });
     expect(toast).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a sketch edit or inspection as the solver failing when its module cannot be loaded, for the workbench and the agent alike, and loads it on the next request', async () => {
+    const toast = vi.fn(), h = await harness(false, false, toast); await act(async () => h.session.replace(inspectedSketchDocument()));
+    const words = 'Failed to fetch dynamically imported module: https://example.test/assets/cadSketchSolverClient-1a2b3c.js';
+    const unloaded = () => { throw new TypeError(words); };
+    sketchSolver.solve.mockImplementation(async (input: CadSketchSolveInput) => inspectedSolve(input));
+    const before = h.session.getSnapshot(), tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
+    // The workbench's edit names the sketch it was solving and the browser's words, and changes nothing.
+    createSketchClient.mockImplementationOnce(unloaded);
+    let refused: unknown;
+    await act(async () => { refused = await Promise.resolve(h.cad().edit(length(20))).then(() => null, (error: unknown) => error); });
+    expect(refused).toBeInstanceOf(CadSketchPreparationError);
+    expect((refused as CadSketchPreparationError).feedback).toMatchObject({ sketchId: 'sketch', reason: 'failed', message: `Line: ${CAD_SKETCH_SOLVER_NOT_LOADED}`,
+      cause: 'solver-unavailable', kernelMessage: words });
+    expect(h.session.getSnapshot()).toMatchObject({ document: before.document, version: before.version, workflowOpen: false });
+    // So does a preview of that edit.
+    createSketchClient.mockImplementationOnce(unloaded);
+    let previewed: unknown;
+    await act(async () => { previewed = await h.cad().preparePreviewEdits(length(20), new AbortController().signal).then(() => null, (error: unknown) => error); });
+    expect((previewed as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable', kernelMessage: words });
+    // The agent's edit and inspection give the same failure.
+    createSketchClient.mockImplementationOnce(unloaded);
+    expect(await tool('cad_edit_document').execute({ expectedVersion: before.version, edits: length(20) })).toMatchObject({ ok: false, error: { code: 'sketch-failed',
+      message: `Line: ${CAD_SKETCH_SOLVER_NOT_LOADED}`, details: { feedback: { reason: 'failed', cause: 'solver-unavailable' },
+        issue: { code: 'sketch-failed', details: { cause: 'solver-unavailable', kernelMessage: words } } } } });
+    createSketchClient.mockImplementationOnce(unloaded);
+    expect(await tool('cad_inspect_sketch_constraints').execute({ expectedVersion: before.version, sketchId: 'sketch' })).toMatchObject({ ok: true,
+      data: { analysis: { kind: 'unavailable', message: CAD_SKETCH_SOLVER_NOT_LOADED, cause: 'solver-unavailable', kernelMessage: words } } });
+    // So does a commit while the sketch is edited in place under a feature that uses it.
+    const [line] = inspectedSketchDocument().features;
+    if (line?.kind !== 'sketch' || !line.graph) throw new Error('Missing sketch');
+    await act(async () => h.session.replace(parseCadDocument({ ...inspectedSketchDocument(), features: [{ ...line, graph: { ...line.graph!, points: [...line.graph!.points, { id: 'c', position: [10, 10] }],
+      entities: [...line.graph!.entities, { id: 'rise', kind: 'line', construction: false, startPointId: 'b', endPointId: 'c' }, { id: 'fall', kind: 'line', construction: false, startPointId: 'c', endPointId: 'a' }] } },
+      { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null }] })));
+    act(() => h.cad().sketchEditing.begin('sketch'));
+    expect(h.cad().sketchEditing.sketchId).toBe('sketch');
+    createSketchClient.mockImplementationOnce(unloaded);
+    let committed: unknown;
+    await act(async () => { committed = await Promise.resolve(h.cad().sketchEditing.edit(length(20))).then(() => null, (error: unknown) => error); });
+    expect((committed as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable', kernelMessage: words });
+    act(() => h.cad().sketchEditing.cancel());
+    expect(sketchSolver.solve).not.toHaveBeenCalled();
+    // The next request loads the solver again and solves with it.
+    await act(async () => { await h.cad().edit(length(20)); });
+    expect(createSketchClient).toHaveBeenCalledTimes(6); expect(sketchSolver.solve).toHaveBeenCalledOnce();
+    expect(h.session.getSnapshot().version).not.toBe(before.version);
+  });
+
+  it('refuses a kernel request as an unavailable kernel when the kernel client\'s module cannot be loaded, a request waiting on that load included, and loads it for the next', async () => {
+    const words = 'Failed to fetch dynamically imported module: https://example.test/assets/cadKernelClient-1a2b3c.js';
+    const unloaded = () => { throw new TypeError(words); };
+    const h = await harness(true); const version = h.session.getSnapshot().version, request = { bodyId: 'p', plane: 'XY' as const, offset: 5 };
+    kernel.section.mockResolvedValue({ bodyId: 'p', plane: 'XY', offset: 5, contourCount: 1, entities: [{ type: 'circle', layer: 'CAD', center: { x: 0, y: 0 }, radius: 10 }] });
+    // The shared client: a request that waits on the failing load fails with it.
+    createClient.mockImplementationOnce(unloaded);
+    let refusals: unknown[] = [];
+    await act(async () => { refusals = await Promise.all([1, 2].map(() => h.cad().inspectSection(request, version, 'section').then(() => null, (error: unknown) => error))); });
+    const unavailable = { name: 'CadError', code: 'kernel-unavailable', message: CAD_KERNEL_NOT_LOADED, kernelMessage: words };
+    expect(refusals).toEqual([expect.objectContaining(unavailable), expect.objectContaining(unavailable)]);
+    expect(createClient).toHaveBeenCalledOnce();
+    await act(async () => { await h.cad().inspectSection(request, version, 'section'); });
+    expect(createClient).toHaveBeenCalledTimes(2); expect(kernel.section).toHaveBeenCalledOnce();
+    // A feature input's own client fails the same way, and the next input loads one.
+    await act(async () => h.session.edit([
+      { kind: 'add-feature', feature: { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null } },
+      { kind: 'add-feature', feature: { kind: 'fillet', id: 'round', name: 'Round', suppressed: false, targetId: 'pad', radius: 1, selection: null } }
+    ]));
+    const before = h.session.getSnapshot();
+    const mesh = { featureId: 'pad', name: 'Pad', positions: [], normals: [], indices: [], edges: [], faceGroups: [], edgeGroups: [], volume: 2000, bounds: { min: [0, 0, 0] as const, max: [20, 10, 10] as const } };
+    kernel.build.mockResolvedValue({ buildId: 'input-pad', meshes: [mesh], diagnostics: [], durationMs: 1 } satisfies CadBuildResult);
+    await act(async () => { await h.cad().inspectBuild(before.version); });
+    createClient.mockImplementationOnce(unloaded);
+    expect(await h.cad().buildFeatureInput({ featureId: 'round', bodyId: 'pad' }, before.version).catch((error: unknown) => error)).toMatchObject(unavailable);
+    expect((await h.cad().buildFeatureInput({ featureId: 'round', bodyId: 'pad' }, before.version)).result.buildId).toBe('input-pad');
   });
 
   it('looks for solve warnings only once an edit is committed, never while one is previewed', async () => {
@@ -542,6 +638,7 @@ describe('CAD controller asynchronous guards', () => {
     const h = await harness(true), acceptedBuild: CadBuildResult = { buildId: 'accepted-build', meshes: [], diagnostics: [], durationMs: 1 };
     kernel.build.mockResolvedValue(acceptedBuild);
     await act(async () => { await h.cad().inspectBuild(); });
+    const acceptedIssues = h.cad().buildIssues;
     const before = h.session.getSnapshot(), pending = deferred<CadBuildResult>(), previewClient = { build: vi.fn(() => pending.promise), dispose: vi.fn() };
     createClient.mockReturnValueOnce(previewClient);
     await act(async () => {
@@ -554,9 +651,27 @@ describe('CAD controller asynchronous guards', () => {
     await act(async () => { pending.resolve({ buildId: 'candidate-build', meshes: [], diagnostics: [], durationMs: 1 }); });
     expect(h.cad().featurePreview).toMatchObject({ kind: 'ready', result: { buildId: 'candidate-build' } });
     expect(h.cad().build).toBe(acceptedBuild); expect(h.cad().buildVersion).toBe(before.version);
+    // A preview makes no issues: those shown stay the accepted build's.
+    expect(h.cad().buildIssues).toBe(acceptedIssues);
     await act(async () => { h.cad().previewFeature({ kind: 'clear', owner: 'pad-editor' }); h.session.setWorkflowOpen(false, 'editor'); });
     expect(previewClient.dispose).toHaveBeenCalledOnce(); expect(kernel.dispose).not.toHaveBeenCalled();
     expect(h.cad().featurePreview).toEqual({ kind: 'idle' }); expect(h.cad().build).toBe(acceptedBuild); expect(h.session.getSnapshot()).toEqual(before); expect(h.session.getSnapshot().document).toBe(before.document);
+  });
+  it('makes the issues of a build once, as it is published, prepared at its version', async () => {
+    const h = await harness(true);
+    kernel.build.mockImplementation(async (): Promise<CadBuildResult> => ({ buildId: 'failed', meshes: [], durationMs: 1,
+      diagnostics: [{ code: 'kernel-operation-failed', featureId: 'pad', message: 'The extrusion failed.' }] }));
+    await act(async () => h.session.edit([{ kind: 'add-feature', feature: { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null } }]));
+    const version = h.session.getSnapshot().version;
+    await act(async () => { await h.cad().inspectBuild(); });
+    expect(h.cad().buildVersion).toBe(version);
+    const issues = h.cad().buildIssues;
+    expect(issues.items.map(issue => [issue.code, issue.state, issue.subject, issue.repairs.map(repair => [repair.id, repair.preparedAt])])).toEqual([
+      ['kernel-operation-failed', 'failed', { kind: 'feature', featureId: 'pad' }, [['command:edit-feature:pad', version]]]]);
+    expect(issues.byFeature.get('pad')).toBe(issues.items[0]);
+    // Rendering again makes no new issues.
+    await act(async () => { h.session.setWorkflowOpen(true, 'editor'); }); await act(async () => { h.session.setWorkflowOpen(false, 'editor'); });
+    expect(h.cad().buildIssues).toBe(issues);
   });
   it('borrows a consumed feature input through the controller without replacing the accepted build or granting tools editor access', async () => {
     const h = await harness(true);
@@ -1879,6 +1994,151 @@ describe('CAD controller asynchronous guards', () => {
     await expect(loadCadDocument(h.workbench().adapter, before.document.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(h.cad().isBusy()).toBe(false); expect(h.cad().isOpen()).toBe(true);
   });
+  it('names the CAM step and its source in a refusal of a Section for CAM or a sketch handoff, and the export and its source in the section of a DXF export', async () => {
+    const h = await harness(true, true), version = h.session.getSnapshot().version;
+    const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
+    kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
+    const exported = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, 'dxf-export', undefined, 'dxf-export'));
+    expect(cadRefusalIssue(exported)).toMatchObject({ namespace: 'export', code: 'empty-section', subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
+    await act(async () => h.session.setWorkflowOpen(true, 'section'));
+    kernel.section.mockRejectedValueOnce(new CadError('empty-section', 'The section plane misses the body.'));
+    const inspected = await refusal(() => h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, 'section', undefined, 'section'));
+    expect(cadRefusalIssue(inspected)).toMatchObject({ namespace: 'cam', code: 'empty-section', message: 'The section plane misses the body.',
+      subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
+    kernel.section.mockRejectedValueOnce(new CadError('tangent-section', 'The plane only touches the body.'));
+    const sent = await refusal(() => h.cad().sendSectionToCam({ bodyId: 'pad', plane: 'XY', offset: 5 }, version, undefined, 'section'));
+    expect(cadRefusalIssue(sent)).toMatchObject({ namespace: 'cam', code: 'tangent-section', subject: { operation: 'section', sourceId: 'pad' } });
+    await act(async () => h.session.setWorkflowOpen(false, 'section'));
+    const sketch = await refusal(() => h.cad().sendToCam('missing', version));
+    expect(cadRefusalIssue(sketch)).toMatchObject({ namespace: 'cam', code: 'missing-sketch', message: (sketch as CadError).message,
+      subject: { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'missing' } });
+    expect(h.workbench().manifest.projects).toHaveLength(0);
+  });
+  it.each([
+    { code: 'empty-section', refuse: () => new CadError('empty-section', 'The section plane misses the body.') },
+    { code: 'kernel-operation-failed', refuse: () => CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.',
+      { kernelMessage: 'BRepAlgoAPI_Section failed' }) },
+    // The body the request names was consumed, and the offset names no parameter: refusals of the step as the worker replies them.
+    { code: 'missing-body', refuse: () => CadError.received('missing-body',
+      'Body pad is unavailable or has already been consumed. Choose a current body from the feature tree.', {}) },
+    { code: 'unknown-parameter', refuse: () => CadError.received('unknown-parameter', 'Unknown parameter "depth".', {}) },
+  ])('gives the Section for CAM dialog and the agent the same $code issue, and the DXF export dialog and the agent the same export issue', async ({ code, refuse }) => {
+    const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
+    const tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
+    const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
+    kernel.section.mockImplementation(async () => { throw refuse(); });
+    // The dialog previews inside its own workflow, as App wires it; the agent owns no workflow and states the same intent.
+    await act(async () => h.session.setWorkflowOpen(true, 'section'));
+    const shown = await refusal(() => h.cad().inspectSection(request, version, 'section', undefined, 'section'));
+    await act(async () => h.session.setWorkflowOpen(false, 'section'));
+    const issue = cadRefusalIssue(shown);
+    expect(issue).toMatchObject({ namespace: 'cam', code, subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
+    const reply = await tool('cad_inspect_section').execute({ expectedVersion: version, section: request });
+    expect(reply).toEqual({ ok: false, error: { code, message: (shown as CadError).message, details: { issue: cadAgentIssue(issue!, (shown as CadError).kernelMessage) } } });
+    // A DXF export's section is no CAM step: the export dialog's preview and download, as App wires them, and the agent name the export and
+    // its body, with the refusal's own code.
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    const previewed = await refusal(() => h.cad().inspectSection(request, version, 'dxf-export', undefined, 'dxf-export'));
+    const exported = await refusal(() => h.cad().exportSectionDxf(request, version, undefined, 'dxf-export'));
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    const exportIssue = cadRefusalIssue(exported);
+    expect(exportIssue).toMatchObject({ namespace: 'export', code, message: (exported as CadError).message, subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
+    expect(cadRefusalIssue(previewed)).toEqual(exportIssue);
+    const exportReply = await tool('cad_export_section_dxf').execute({ expectedVersion: version, section: request });
+    expect(exportReply).toEqual({ ok: false, error: { code, message: (exported as CadError).message, details: { issue: cadAgentIssue(exportIssue!, (exported as CadError).kernelMessage) } } });
+    expect(kernel.section).toHaveBeenCalledTimes(5);
+    expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
+  });
+  it('names only the steps of the operation that raised a refusal again, so a reused refusal keeps no CAM step of its earlier use', async () => {
+    const h = await harness(true, true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
+    const tool = (name: string) => cadSiteTools(h.cad).find(entry => entry.name === name)!;
+    const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
+    // A kernel that gives one cached refusal to every request, which an earlier check recorded at its feature.
+    const cached = CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.', { kernelMessage: 'BRepAlgoAPI_Section failed' });
+    kernel.section.mockRejectedValue(cached); kernel.export.mockRejectedValue(cached);
+    const earlier = { kind: 'feature', featureId: 'pad' } as const, step = { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } as const;
+    cadRefusalAt(cached, earlier);
+    await act(async () => h.session.setWorkflowOpen(true, 'section'));
+    expect(await refusal(() => h.cad().sendSectionToCam(request, version, undefined, 'section'))).toBe(cached);
+    expect(cadRefusalIssue(cached)?.subject).toEqual(step);
+    await act(async () => h.session.setWorkflowOpen(false, 'section'));
+    cadRefusalAt(cached, earlier);
+    expect(await refusal(() => h.cad().inspectSection(request, version, 'section'))).toBe(cached);
+    expect(cadRefusalIssue(cached)?.subject).toEqual(step);
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    expect(await refusal(() => h.cad().exportSectionDxf(request, version, undefined, 'dxf-export'))).toBe(cached);
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    expect(cadRefusalIssue(cached)).toMatchObject({ namespace: 'export', subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
+    // The next Section for CAM is the step's again, and a solid export, which records no step, gives the agent no step of either.
+    expect(await tool('cad_inspect_section').execute({ expectedVersion: version, section: request })).toMatchObject({ ok: false,
+      error: { code: 'kernel-operation-failed', details: { issue: { namespace: 'cam', subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } } } } });
+    expect(await tool('cad_export_solid').execute({ expectedVersion: version, format: 'step' })).toMatchObject({ ok: false,
+      error: { code: 'kernel-operation-failed', details: { issue: { namespace: 'feature', subject: { kind: 'document' } } } } });
+    expect(kernel.export).toHaveBeenCalledTimes(1);
+  });
+  it('gives curves the DXF writer refuses as the export\'s issue, through the export dialog and the agent alike', async () => {
+    const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
+    const refuse = () => new CadError('dxf-geometry', 'DXF coordinates must be finite.');
+    kernel.section.mockResolvedValue(section);
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    dxfWriter.refuse = refuse;
+    let exported: unknown;
+    await act(async () => { exported = await h.cad().exportSectionDxf(request, version, undefined, 'dxf-export').then(() => undefined, (error: unknown) => error); });
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    const issue = cadRefusalIssue(exported);
+    expect(issue).toMatchObject({ namespace: 'export', code: 'dxf-geometry', message: 'DXF coordinates must be finite.',
+      subject: { kind: 'export-operation', format: 'dxf-section', sourceId: 'pad' } });
+    dxfWriter.refuse = refuse;
+    const reply = await cadSiteTools(h.cad).find(entry => entry.name === 'cad_export_section_dxf')!.execute({ expectedVersion: version, section: request });
+    expect(reply).toEqual({ ok: false, error: { code: 'dxf-geometry', message: 'DXF coordinates must be finite.', details: { issue: cadAgentIssue(issue!, undefined) } } });
+  });
+  it.each([
+    // The sketch named is gone, suppressed or only construction geometry, or the DXF writer refuses its curves.
+    { format: 'dxf-sketch', sourceId: 'absent', code: 'missing-sketch', writer: false },
+    { format: 'dxf-sketch', sourceId: 'hidden', code: 'suppressed-sketch', writer: false },
+    { format: 'dxf-sketch', sourceId: 'guide', code: 'empty-sketch', writer: false },
+    { format: 'dxf-sketch', sourceId: 'outline', code: 'dxf-geometry', writer: true },
+    // The curve named is gone or suppressed.
+    { format: 'dxf-curve', sourceId: 'absent', code: 'missing-curve', writer: false },
+    { format: 'dxf-curve', sourceId: 'quiet', code: 'suppressed-curve', writer: false }
+  ] as const)('gives the DXF export dialog and the agent the same $format export issue for $code', async ({ format, sourceId, code, writer }) => {
+    const h = await harness(), tools = cadSiteTools(h.cad), tool = (name: string) => tools.find(entry => entry.name === name)!;
+    const circle = (id: string, construction: boolean) => ({ id, name: id, construction, geometry: { kind: 'circle', x: 0, y: 0, radius: 5 } }) as const;
+    const sketch = (id: string, suppressed: boolean, profiles: readonly ReturnType<typeof circle>[]) => ({ id, name: id, kind: 'sketch', suppressed, plane: 'XY', offset: 0, profiles }) as const;
+    const curve = (id: string, suppressed: boolean) => ({ id, name: id, kind: 'curve', suppressed, plane: 'XY', offset: 0, segments: [{ kind: 'line', start: [0, 0], end: [10, 0] }] }) as const;
+    await act(async () => h.session.replace(parseCadDocument({ ...createCadDocument('Exports', 'cad_exports'), features: [
+      sketch('outline', false, [circle('plate', false)]), sketch('hidden', true, [circle('plate', false)]), sketch('guide', false, [circle('reference', true)]),
+      curve('rail', false), curve('quiet', true)] })));
+    const version = h.session.getSnapshot().version, refuse = () => new CadError('dxf-geometry', 'DXF coordinates must be finite.');
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    // The dialog's download, inside its own workflow as App wires it.
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    if (writer) dxfWriter.refuse = refuse;
+    let shown: unknown;
+    await act(async () => { shown = await (format === 'dxf-sketch' ? h.cad().exportDxf(sourceId, version, undefined, 'dxf-export')
+      : h.cad().exportCurveDxf(sourceId, version, undefined, 'dxf-export')).then(() => undefined, (error: unknown) => error); });
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    const issue = cadRefusalIssue(shown);
+    expect(issue).toMatchObject({ namespace: 'export', code, message: (shown as CadError).message, subject: { kind: 'export-operation', format, sourceId } });
+    // A sketch export's refusal names the export, never CAM, which sends sketches through the same checks.
+    expect((shown as CadError).message).not.toContain('CAM');
+    if (writer) dxfWriter.refuse = refuse;
+    const reply = await tool(format === 'dxf-sketch' ? 'cad_export_dxf' : 'cad_export_curve_dxf').execute({ expectedVersion: version,
+      ...format === 'dxf-sketch' ? { sketchId: sourceId } : { curveId: sourceId } });
+    expect(reply).toEqual({ ok: false, error: { code, message: (shown as CadError).message, details: { issue: cadAgentIssue(issue!, undefined) } } });
+    expect(click).not.toHaveBeenCalled();
+    expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
+  });
+  it('reads the section back as part of the step, so an offset naming no parameter is the step\'s refusal there too', async () => {
+    const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 'depth / 2' } as const;
+    kernel.section.mockResolvedValue(section);
+    let shown: unknown;
+    await act(async () => { shown = await h.cad().inspectSection(request, version, 'section').then(() => undefined, (error: unknown) => error); });
+    expect(cadRefusalIssue(shown)).toMatchObject({ namespace: 'cam', code: 'unknown-parameter', message: 'Unknown parameter "depth".',
+      subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } });
+    const reply = await cadSiteTools(h.cad).find(entry => entry.name === 'cad_inspect_section')!.execute({ expectedVersion: version, section: request });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'unknown-parameter', details: { issue: { namespace: 'cam', code: 'unknown-parameter' } } } });
+  });
   it('hands a reviewed final-solid section through the ordinary saved CAD and portable CAM operations', async () => {
     const h = await harness(true, true); kernel.section.mockResolvedValue(section);
     const version = h.session.getSnapshot().version;
@@ -1933,7 +2193,7 @@ describe('CAD controller asynchronous guards', () => {
   it('rejects a section result after a draft edit while the kernel was running', async () => {
     const h = await harness(true); const result = deferred<CadSectionResult>(); kernel.section.mockReturnValue(result.promise);
     const before = h.session.getSnapshot(); let operation: Promise<unknown> | undefined;
-    await act(async () => { operation = h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, before.version); });
+    await act(async () => { operation = h.cad().inspectSection({ bodyId: 'pad', plane: 'XY', offset: 5 }, before.version, 'section'); });
     await act(async () => h.session.edit([{ kind: 'rename-document', name: 'Changed' }]));
     await act(async () => { result.resolve(section); await expect(operation).rejects.toMatchObject({ code: 'STALE_STATE' }); });
   });
@@ -2197,5 +2457,65 @@ describe('CAD controller asynchronous guards', () => {
     });
     expect(click).not.toHaveBeenCalled();
     expect(h.cad().isBusy()).toBe(false);
+  });
+});
+
+describe('CAD issues agents receive through the controller', () => {
+  it('gives a refused sketch edit the issues its sketch header shows: the refusal, its attempted subjects and the warnings of the version', async () => {
+    const warning = { code: 'mirror-shrank', relationId: 'length', curves: [{ entityId: 'edge', beforeMm: 20, afterMm: 1e-5 }],
+      message: 'Symmetric shrank Line 1 from 20.000 mm to 0.00001 mm. Check the mirror and its relations.' } as const;
+    const h = await harness(); await act(async () => h.session.replace(inspectedSketchDocument()));
+    sketchSolver.solve.mockImplementation(async (input: CadSketchSolveInput) => inspectedSolve(input));
+    shrinkWarnings.mockReturnValue([warning]);
+    await act(async () => { await h.cad().edit([{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'length', kind: 'distance', pointIds: ['a', 'b'], value: 20 } }]); });
+    const { document, version } = h.session.getSnapshot();
+    sketchSolver.solve.mockImplementation(async () => ({ kind: 'rejected', reason: 'conflicting', message: 'Sketch constraints conflict.',
+      diagnostics: { status: 'failed', degreesOfFreedom: null, conflictingIds: ['length', 'extra'], redundantIds: [], partiallyRedundantIds: [], issues: [] } }));
+    // The edit proposes relation extra, which the accepted sketch does not have.
+    const edits: CadEdit[] = [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'extra', kind: 'distance', pointIds: ['a', 'b'], value: 30 } }];
+    let refused: unknown;
+    await act(async () => { refused = await Promise.resolve(h.cad().edit(edits)).then(() => null, (error: unknown) => error); });
+    if (!(refused instanceof CadSketchPreparationError)) throw new Error('Expected a refused sketch edit');
+    // The header reads the refused edit's feedback against the accepted sketch, at the version it shows, with that version's warnings.
+    const sketch = document.features.find(feature => feature.id === 'sketch'), record = h.cad().sketchWarnings;
+    if (sketch?.kind !== 'sketch' || !sketch.graph || record?.version !== version) throw new Error('Missing accepted sketch or its warnings');
+    const header = cadSketchIssues({ sketchId: 'sketch', graph: sketch.graph, version, feedback: refused.feedback, warnings: record.warnings });
+    const reply = await cadSiteTools(h.cad).find(tool => tool.name === 'cad_edit_document')!.execute({ expectedVersion: version, edits });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'sketch-conflicting', details: { feedback: refused.feedback, analysis: { conflicting: { ids: ['length', 'extra'] } } } } });
+    const details = (reply as { error: { details: { issue: unknown; issues: unknown } } }).error.details;
+    expect(details.issue).toEqual(cadAgentIssue(header.refusal!));
+    expect(details.issues).toEqual(cadAgentIssueDigest(header.issues));
+    // Both subjects are the edit's; only the accepted relation has a repair, prepared at the version shown; the warning follows them.
+    expect(header.issues.map(issue => [issue.code, issue.subject, 'origin' in issue.details ? issue.details.origin : null, issue.repairs.map(repair => [repair.id, repair.preparedAt])])).toEqual([
+      ['sketch-conflicting', { kind: 'feature', featureId: 'sketch' }, null, []],
+      ['relation-conflicting', { kind: 'sketch-relation', sketchId: 'sketch', relationId: 'length' }, 'edit', [['delete-relation:length', version]]],
+      ['relation-conflicting', { kind: 'sketch-relation', sketchId: 'sketch', relationId: 'extra' }, 'edit', []],
+      ['mirror-shrank', { kind: 'sketch-relation', sketchId: 'sketch', relationId: 'length' }, null, []]]);
+    expect(header.refusal?.causes).toEqual(header.list.slice(0, 2).map(row => row.key));
+    expect(h.session.getSnapshot().version).toBe(version);
+    // Undo shows a version the warnings were not given for, so neither the header nor the reply lists them.
+    await act(async () => h.session.undo());
+    const undone = h.session.getSnapshot().version, restored = h.session.getSnapshot().document.features.find(feature => feature.id === 'sketch');
+    if (restored?.kind !== 'sketch' || !restored.graph) throw new Error('Missing restored sketch');
+    expect([undone === version, h.cad().sketchWarnings?.version]).toEqual([false, version]);
+    const again = await cadSiteTools(h.cad).find(tool => tool.name === 'cad_edit_document')!.execute({ expectedVersion: undone, edits });
+    const repeated = cadSketchIssues({ sketchId: 'sketch', graph: restored.graph, version: undone, feedback: refused.feedback, warnings: null });
+    expect((again as { error: { details: { issues: unknown } } }).error.details.issues).toEqual(cadAgentIssueDigest(repeated.issues));
+    expect(repeated.issues.map(issue => issue.code)).toEqual(['sketch-conflicting', 'relation-conflicting', 'relation-conflicting']);
+  });
+
+  it('keeps a bounded account of long kernel words for the one failure of a build', async () => {
+    kernel.build.mockResolvedValue({ buildId: 'built', meshes: [], durationMs: 0, diagnostics: [{ code: 'kernel-operation-failed', featureId: 'sketch', message: 'The profile failed. Edit the sketch.',
+      details: { operation: 'profile', input: null, kernelMessage: '孔'.repeat(2048) } }] });
+    const h = await harness(true), version = h.session.getSnapshot().version;
+    const tools = cadSiteTools(h.cad);
+    let built: { ok: boolean; data: { diagnostics: { details: { kernelMessage: string } }[]; omittedDiagnostics: number; issues: { items: { diagnostic?: number }[] } } } | undefined;
+    await act(async () => { built = await tools.find(tool => tool.name === 'cad_build')!.execute({ expectedVersion: version }) as typeof built; });
+    const context = await tools.find(tool => tool.name === 'cad_get_context')!.execute({}) as typeof built;
+    for (const reply of [built!, context!]) {
+      expect(reply.ok).toBe(true);
+      expect([reply.data.diagnostics.length, reply.data.omittedDiagnostics, reply.data.issues.items[0].diagnostic]).toEqual([1, 0, 0]);
+      expect(reply.data.diagnostics[0].details.kernelMessage).toMatch(/^孔+…$/);
+    }
   });
 });

@@ -106,7 +106,7 @@ describe('confirmed material removal across existing Cut families', () => {
     try {
       const model = buildCadKernelModel(parseCadDocument(input.document));
       try {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'cut', message: `Interrupted ${family} ${phase}` });
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'cut', code: 'kernel-operation-failed', details: { operation: 'cut', kernelMessage: `Interrupted ${family} ${phase}` } });
         expect(model.result.meshes.map(mesh => mesh.featureId)).toEqual(input.prefix);
         if (!target || !tool) throw new Error('Expected native operands'); expect(measureVolume(target)).toBeCloseTo(4000, 7);
         const retainedTool = tool;

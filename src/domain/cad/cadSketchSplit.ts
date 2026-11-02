@@ -25,7 +25,7 @@ export interface CadSketchSplitResult {
   readonly splitPointId: string;
 }
 
-export class CadSketchSplitDependencyError extends CadError {
+export class CadSketchSplitDependencyError extends CadError<'dependent-sketch-split'> {
   readonly relationIds: readonly string[];
   constructor(relationIds: readonly string[]) {
     super('dependent-sketch-split', 'Remove or recreate the relations that reference this whole edge before splitting it.');

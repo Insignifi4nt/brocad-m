@@ -105,7 +105,7 @@ export function resolveCadLoftSections(
     const sketch = precedingFeatures.get(id);
     if (sketch?.kind !== 'sketch') throw new CadError('invalid-reference', `Loft "${feature.name}" needs a preceding sketch "${id}".`);
     const inspection = inspectCadLoftSketch(sketch, parameters, frames);
-    if (!inspection.eligible) throw new CadError(inspection.code, inspection.message);
+    if (!inspection.eligible) throw CadError.checked(inspection.code, inspection.message);
     return inspection.section;
   });
   return resolveCadLoftSectionPlacements(sections);

@@ -8,7 +8,9 @@ import { CadSketchContextHeader } from './CadSketchContextHeader';
 import { CadSketchRelationList, CAD_SKETCH_RELATION_ROW_HEIGHT, cadSketchRelationRow, type CadSketchRelationListProps } from './CadSketchRelationList';
 import { CadSketchSelectionActions, cadSketchCenterSymmetryOffer, cadSketchSelectionActions, cadSketchSelectionRelationActions, placeCadSketchSelectionActions, type CadSketchSelectionActionsModel } from './CadSketchSelectionActions';
 import { createCadSketchHighlightStore } from './cadSketchDimensionSelection';
-import { cadSketchIssuesStandInForD1, type CadSketchIssues } from './cadSketchIssues';
+import { cadSketchIssues, type CadSketchIssues } from './cadSketchIssues';
+import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { CAD_SKETCH_SOLVER_STOPPED } from './sketch-solver/cadSketchSolverFailure';
 
 let container: HTMLDivElement, root: Root;
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container = document.createElement('div'); document.body.append(container); root = createRoot(container); });
@@ -214,7 +216,7 @@ describe('relations under the sketch in the feature tree', () => {
     entities: Array.from({ length: count }, (_, index) => line(`l${index}`, `p${index}`, `p${index + 1}`)),
     relations: Array.from({ length: count }, (_, index) => ({ id: `h${index}`, kind: 'horizontal', pointIds: [`p${index}`, `p${index + 1}`] }))
   });
-  const noIssues = (graph: CadSketchGraph) => cadSketchIssuesStandInForD1({ sketchId: 'sketch', graph });
+  const noIssues = (graph: CadSketchGraph) => cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1' });
   function props(graph: CadSketchGraph, extra: Partial<CadSketchRelationListProps> = {}): CadSketchRelationListProps {
     return { graph, parameters: {}, issues: noIssues(graph), selectedIds: [], selection: [], onlySelection: false, onOnlySelection: vi.fn(), locked: false,
       onSelect: vi.fn(), onOpen: vi.fn(), onDelete: vi.fn(), onMenu: vi.fn(), expanded: true, onExpandedChange: vi.fn(), ...extra };
@@ -314,7 +316,7 @@ describe('relations under the sketch in the feature tree', () => {
   it('shows each row pressed with its mark, its value and its issue states, lights its geometry, and lists only the selection on request', async () => {
     const graph = graphOf({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }, { id: 'c', position: [10, 10] }], entities: [line('ab', 'a', 'b'), line('bc', 'b', 'c')],
       relations: [{ id: 'size', kind: 'distance', pointIds: ['a', 'b'], value: 'w' }, { id: 'up', kind: 'vertical', pointIds: ['b', 'c'] }, { id: 'tall', kind: 'distance', pointIds: ['b', 'c'], value: 10 }] }, { w: 10 });
-    const issues = cadSketchIssuesStandInForD1({ sketchId: 'sketch', graph, analysis: { kind: 'rejected', reason: 'conflicting',
+    const issues = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', analysis: { kind: 'rejected', reason: 'conflicting',
       diagnostics: { conflictingIds: ['up'], redundantIds: ['tall'], partiallyRedundantIds: [], issues: [] } } });
     const highlight = createCadSketchHighlightStore(), onOnlySelection = vi.fn();
     const base = props(graph, { parameters: { w: 10 }, issues, highlight, selectedIds: ['size'], onOnlySelection });
@@ -367,12 +369,12 @@ describe('relations under the sketch in the feature tree', () => {
 describe('sketch context header', () => {
   const graph = () => graphOf({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }], entities: [line('ab', 'a', 'b')],
     relations: [{ id: 'level', kind: 'horizontal', pointIds: ['a', 'b'] }, { id: 'again', kind: 'horizontal', pointIds: ['b', 'a'] }] });
-  const redundant = (source: CadSketchGraph): CadSketchIssues => cadSketchIssuesStandInForD1({ sketchId: 'sketch', graph: source, analysis: { kind: 'solved', reason: null,
+  const redundant = (source: CadSketchGraph): CadSketchIssues => cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1', analysis: { kind: 'solved', reason: null,
     diagnostics: { conflictingIds: [], redundantIds: ['again'], partiallyRedundantIds: [], issues: [] } } });
-  function mount(issues: CadSketchIssues, extra: { inspected?: string | null; locked?: boolean } = {}) {
-    const handlers = { onInspectIssue: vi.fn(), onShowDimensions: vi.fn(), onShowRelations: vi.fn() }, highlight = createCadSketchHighlightStore();
+  function mount(issues: CadSketchIssues, extra: { inspected?: string | null; locked?: boolean; repairsLocked?: boolean } = {}) {
+    const handlers = { onInspectIssue: vi.fn(), onRepairIssue: vi.fn(), onShowDimensions: vi.fn(), onShowRelations: vi.fn() }, highlight = createCadSketchHighlightStore();
     const render = (next: CadSketchIssues, more = extra) => act(async () => root.render(<CadSketchContextHeader name="Sketch 1" status={<span>Fully defined</span>} issues={next}
-      inspectedIssue={more.inspected ?? null} issuesLocked={more.locked ?? false} highlight={highlight} highlightOf={issue => ({ pointIds: issue.pointIds, entityIds: issue.entityIds })}
+      inspectedIssue={more.inspected ?? null} issuesLocked={more.locked ?? false} repairsLocked={more.repairsLocked ?? false} highlight={highlight} highlightOf={issue => ({ pointIds: issue.pointIds, entityIds: issue.entityIds })}
       dimensionsShown relationsShown={false} viewModes={<span data-testid="modes" />} actions={<button type="button" aria-label="Finish sketch">Finish</button>} {...handlers} />));
     return { handlers, highlight, render };
   }
@@ -397,6 +399,21 @@ describe('sketch context header', () => {
     expect(container.querySelector('ul[aria-label="Constraint issues"]')).toBeNull(); expect(document.activeElement).toBe(count); expect(h.highlight.getSnapshot()).toBeNull();
   });
 
+  it('offers each issue\'s repairs beside its row, and keeps them unavailable while an edit is pending', async () => {
+    const source = graph(), issues = redundant(source), h = mount(issues);
+    await h.render(issues);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!.click());
+    const repair = () => container.querySelector<HTMLButtonElement>('ul[aria-label="Constraint issues"] [data-cad-issue-repair]')!;
+    expect([repair().textContent, repair().getAttribute('aria-label'), repair().dataset.cadIssueRepair, repair().disabled])
+      .toEqual(['Delete relation', 'Delete relation: Horizontal relation 2 · Point 2 and Point 1', 'delete-relation:again', false]);
+    // Hovering the repair lights what it removes, as its row does.
+    await act(async () => repair().focus()); expect(h.highlight.getSnapshot()).toMatchObject({ kind: 'geometry', pointIds: ['b', 'a'] });
+    await act(async () => repair().click());
+    expect(h.handlers.onRepairIssue).toHaveBeenCalledExactlyOnceWith(issues.list[0].issue.repairs[0]); expect(h.handlers.onInspectIssue).not.toHaveBeenCalled();
+    await h.render(issues, { repairsLocked: true });
+    expect(repair().disabled).toBe(true);
+  });
+
   it('closes the list and drops a lit row when the issues go, and counts what a refusal left out', async () => {
     const source = graph(), issues = redundant(source), h = mount(issues);
     await h.render(issues);
@@ -404,7 +421,7 @@ describe('sketch context header', () => {
     await act(async () => container.querySelector<HTMLButtonElement>('ul[aria-label="Constraint issues"] button')!.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })));
     await act(async () => container.querySelector<HTMLButtonElement>('ul[aria-label="Constraint issues"] button')!.focus());
     expect(h.highlight.getSnapshot()).not.toBeNull();
-    const none = cadSketchIssuesStandInForD1({ sketchId: 'sketch', graph: source });
+    const none = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1' });
     await h.render(none);
     const count = container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!;
     expect([count.getAttribute('aria-label'), count.disabled]).toEqual(['No constraint issues', true]);
@@ -418,16 +435,49 @@ describe('sketch context header', () => {
     expect(container.querySelector<HTMLButtonElement>('ul[aria-label="Constraint issues"] button')!.disabled).toBe(true);
   });
 
+  it('counts a refusal that names no item, as a solver that failed gives, as one issue whose list shows its message and the solver\'s words closed under it', async () => {
+    const source = graph(), unjudged = { status: null, degreesOfFreedom: null, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] };
+    const failure = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Sketch 1', graph: source, unavailable: { kernelMessage: 'Uncaught RangeError: out of memory' },
+      rejection: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_SOLVER_STOPPED, diagnostics: unjudged } });
+    const issues = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1', feedback: failure.feedback }), h = mount(issues);
+    await h.render(issues);
+    const count = container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!;
+    expect([count.getAttribute('aria-label'), count.disabled]).toEqual(['1 constraint issue', false]);
+    // Closed, the header shows neither the words nor their disclosure.
+    expect(container.querySelector('[data-cad-sketch-header]')!.textContent).not.toContain('out of memory');
+    expect(container.querySelector('details')).toBeNull();
+    await act(async () => count.click());
+    const message = container.querySelector('.cad-sketch-header-issue-message'), disclosure = container.querySelector<HTMLDetailsElement>('.cad-sketch-header-issue-list details');
+    expect(message?.textContent).toBe(`Sketch 1: ${CAD_SKETCH_SOLVER_STOPPED}`);
+    expect(container.querySelectorAll('ul[aria-label="Constraint issues"] > li')).toHaveLength(0);
+    // The solver's own words are under a closed disclosure after the message, which never repeats them, and the count's title neither.
+    expect([disclosure?.open, disclosure?.querySelector('summary')?.textContent, disclosure?.querySelector('p')?.textContent]).toEqual([false, 'Kernel message', 'Uncaught RangeError: out of memory']);
+    expect(message?.nextElementSibling).toBe(disclosure);
+    expect(message?.textContent).not.toContain('out of memory');
+    await act(async () => count.focus());
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(`Sketch 1: ${CAD_SKETCH_SOLVER_STOPPED}`);
+  });
+
+  it('shows no disclosure for a refusal that carries no words of a solver', async () => {
+    const source = graph(), issues = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1', analysis: { kind: 'rejected', reason: 'conflicting',
+      diagnostics: { conflictingIds: ['level'], redundantIds: [], partiallyRedundantIds: [], issues: [] } } });
+    const h = mount(issues);
+    await h.render(issues);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!.click());
+    expect(container.querySelector('.cad-sketch-header-issue-message')).not.toBeNull();
+    expect(container.querySelector('details')).toBeNull();
+  });
+
   it('keeps focus as an edit fixes the issues: on the row taking the fixed one\'s place, then the count, then the sketch canvas', async () => {
-    const source = graph(), both = cadSketchIssuesStandInForD1({ sketchId: 'sketch', graph: source, analysis: { kind: 'rejected', reason: 'conflicting',
+    const source = graph(), both = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1', analysis: { kind: 'rejected', reason: 'conflicting',
       diagnostics: { conflictingIds: ['level'], redundantIds: ['again'], partiallyRedundantIds: [], issues: [] } } });
-    const one = { ...both, list: both.list.slice(0, 1) }, none = cadSketchIssuesStandInForD1({ sketchId: 'sketch', graph: source });
+    const one = { ...both, list: both.list.slice(0, 1) }, none = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1' });
     const render = (issues: CadSketchIssues, locked = false) => act(async () => root.render(<div className="cad-workbench">
       <svg className="cad-sketch-canvas" tabIndex={0} aria-label="Sketch drawing canvas" />
-      <CadSketchContextHeader name="Sketch 1" status={null} issues={issues} inspectedIssue={null} issuesLocked={locked} highlightOf={issue => ({ pointIds: issue.pointIds, entityIds: issue.entityIds })}
+      <CadSketchContextHeader name="Sketch 1" status={null} issues={issues} inspectedIssue={null} issuesLocked={locked} repairsLocked={locked} onRepairIssue={vi.fn()} highlightOf={issue => ({ pointIds: issue.pointIds, entityIds: issue.entityIds })}
         onInspectIssue={vi.fn()} dimensionsShown relationsShown={false} onShowDimensions={vi.fn()} onShowRelations={vi.fn()} actions={null} />
     </div>));
-    const count = () => container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!, items = () => [...container.querySelectorAll<HTMLButtonElement>('ul[aria-label="Constraint issues"] button')];
+    const count = () => container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!, items = () => [...container.querySelectorAll<HTMLButtonElement>('ul[aria-label="Constraint issues"] button[data-cad-issue-row]')];
     const canvas = () => container.querySelector('svg.cad-sketch-canvas');
     await render(both); expect(both.list).toHaveLength(2);
     await act(async () => count().click()); await act(async () => items()[1]!.focus());
@@ -444,5 +494,9 @@ describe('sketch context header', () => {
     const outside = document.createElement('button'); document.body.append(outside);
     await act(async () => outside.focus()); await render(none);
     expect(document.activeElement).toBe(outside); outside.remove();
+    // A repair holding focus holds its row's place: its issue fixed, the row now in that place takes focus.
+    await render(both); await act(async () => count().click());
+    await act(async () => container.querySelectorAll<HTMLButtonElement>('[data-cad-issue-repair]')[1]!.focus());
+    await render(one); expect(document.activeElement).toBe(items()[0]);
   });
 });

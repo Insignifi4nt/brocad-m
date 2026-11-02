@@ -177,7 +177,7 @@ describe('exact target-derived Through-all Pocket', () => {
     const released = vi.spyOn(Sketch.prototype, 'delete').mockImplementation(function(this: Sketch) { wires.push(this.wire); originalDelete.call(this); });
     try {
       built([...stock(), profile(), pocket()], model => {
-        expect(model.result.diagnostics[0].message).toBe(`Interrupted Pocket ${phase}`); expect(model.result.meshes[0].featureId).toBe('stock');
+        expect(model.result.diagnostics[0]).toMatchObject({ code: 'kernel-operation-failed', details: { operation: 'pocket', input: { field: 'sketchId', id: 'profile' }, kernelMessage: `Interrupted Pocket ${phase}` } }); expect(model.result.meshes[0].featureId).toBe('stock');
         if (!target || !tool) throw new Error('Expected native Pocket operands');
         expect(measureVolume(target)).toBeCloseTo(4000, 6); const releasedTool = tool; expect(() => releasedTool.wrapped).toThrow();
         for (const wire of wires) expect(() => wire.wrapped).toThrow();
@@ -205,7 +205,7 @@ describe('exact target-derived Through-all Pocket', () => {
     const sketchDelete = vi.spyOn(Sketch.prototype, 'delete').mockImplementation(function(this: Sketch) { wires.push(this.wire); originalSketchDelete.call(this); });
     try {
       built([...stock(), profile(), pocket()], model => {
-        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'pocket', message: 'Interrupted Pocket extrusion' }); expect(model.result.meshes[0].featureId).toBe('stock');
+        expect(model.result.diagnostics[0]).toMatchObject({ featureId: 'pocket', code: 'kernel-operation-failed', details: { operation: 'pocket', input: { field: 'sketchId', id: 'profile' }, kernelMessage: 'Interrupted Pocket extrusion' } }); expect(model.result.meshes[0].featureId).toBe('stock');
         expect(builders).toHaveLength(2); for (const builder of builders) expect(() => builder.IsDone()).toThrow();
         for (const wire of wires) expect(() => wire.wrapped).toThrow();
       });

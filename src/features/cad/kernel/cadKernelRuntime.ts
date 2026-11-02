@@ -6,6 +6,7 @@ import { parseCadSectionRequest } from '../../../domain/cad/cadSection';
 import { parseCadTopologyInspectRequest, parseCadTopologyResolvePicksRequest } from '../../../domain/cad/cadTopology';
 import { parseCadTopologyAdjacencyRequest, parseCadTopologyTangentChainRequest } from '../../../domain/cad/cadTopologyAdjacency';
 import { buildCadKernelModel, type CadKernelModel } from './cadKernelModel';
+import { cadKernelMessage, cadKernelRequestFailure } from './cadKernelFailures';
 import type { CadKernelReply } from './cadKernelProtocol';
 import { parseCadSolidImportSource } from '../../../domain/cad/cadImports';
 import { prepareCadSolidImport } from './cadKernelImport';
@@ -14,8 +15,19 @@ import { importCadDxfCurve, parseCadDxfCurveImportInput } from '../../../domain/
 import { inspectCadParameters } from '../../../domain/cad/cadParameters';
 import { cadSketchGraphWithoutPlacement } from '../../../domain/cad/cadSketchPlacedDimensions';
 
-/** Inspections never initialize WASM or reconstruct a missing/stale native snapshot. */
+/**
+ * Inspections never initialize WASM or reconstruct a missing/stale native snapshot. `initialize` loads the kernel each time it is called;
+ * the runtime keeps a load that succeeded, and never one that failed.
+ */
 export function createCadKernelRuntime(initialize: () => Promise<void>) {
+  // A kernel that fails to load fails every request alike, so the reply names that cause rather than the request's. The load is not kept,
+  // so the next request that needs the kernel loads it again, though the client retires a worker that replies so.
+  let loaded: Promise<void> | undefined;
+  const load = () => loaded ??= new Promise<void>(resolve => resolve(initialize())).catch((error: unknown) => {
+    loaded = undefined;
+    const kernelMessage = cadKernelMessage(error);
+    throw CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', kernelMessage ? { kernelMessage } : {});
+  });
   let cached: { key: string; modelKey: string; model: CadKernelModel } | undefined;
   return {
     async evaluate(request: Record<string, unknown> & { id: number; kind: string }): Promise<CadKernelReply> {
@@ -25,7 +37,7 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
         if (request.kind === 'import-dxf-curve') return { id: request.id, kind: 'dxf-curve-imported', result: importCadDxfCurve(parseCadDxfCurveImportInput(request.input)) };
         if (request.kind === 'import-solid') {
           const source = parseCadSolidImportSource(request.source);
-          await initialize();
+          await load();
           return { id: request.id, kind: 'solid-imported', result: prepareCadSolidImport(source) };
         }
         if (request.kind === 'export' && request.format !== 'step' && request.format !== 'stl') throw new CadError('unsupported-format', 'Unsupported CAD export format.');
@@ -53,7 +65,7 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
           if (!cached || cached.key !== key || cached.model.result.buildId !== selection.expectedBuildId) throw new CadError('STALE_BUILD', 'The displayed exact model is no longer cached. Rebuild and select again.');
           return { id: request.id, kind: 'topology-resolved', result: cached.model.resolveTopologyPicks(selection, document.parameters) };
         }
-        if (document.features.some(feature => cadFeatureActive(feature, document) && cadFeatureProducesBody(feature))) await initialize();
+        if (document.features.some(feature => cadFeatureActive(feature, document) && cadFeatureProducesBody(feature))) await load();
         // Document/profile labels, parameter organization, dimension intent and
         // where dimensions are drawn have no native effect. Feature names remain
         // part of the key for mesh and STEP labels; validation and inspection use
@@ -91,8 +103,7 @@ export function createCadKernelRuntime(initialize: () => Promise<void>) {
         cached = { key, modelKey, model };
         return reply;
       } catch (error) {
-        return { id: request.id, kind: 'error', message: error instanceof Error ? error.message : 'The CAD kernel could not complete this operation.',
-          ...(error instanceof CadError ? { code: error.code } : {}) };
+        return { id: request.id, kind: 'error', ...cadKernelRequestFailure(request.kind, error) };
       }
     },
     dispose() { cached?.model.dispose(); cached = undefined; },

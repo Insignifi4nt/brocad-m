@@ -1,5 +1,6 @@
 import { Type } from '@sinclair/typebox';
 import { CadError } from '../../cadError';
+import type { CadRefusalCode } from '../../cadIssueCodes';
 import { CadSketchRegionSelectionSchema, validateCadSketchRegionSelection, type CadSketchRegionSelection } from '../../cadSketchRegionSelection';
 import type { CadFeatureChoice } from '../cadFeatureDefinitionTypes';
 import { cadFeatureField, cadFeatureOptionalReference, cadFeatureReference } from '../cadFeatureFields';
@@ -36,10 +37,10 @@ export const cadRegionSelectionField = cadFeatureField<typeof optionalRegionSele
 // Refusals that several kinds share.
 
 /** Reading a solid's material regions from its sketch: an empty sketch or profile, or a region selection that no longer fits it. */
-export const cadSketchRegionDiagnostics = ['empty-sketch', 'empty-profile', 'invalid-profile', 'invalid-region-selection', 'stale-sketch-region',
+export const cadSketchRegionDiagnostics: readonly CadRefusalCode[] = ['empty-sketch', 'empty-profile', 'invalid-profile', 'invalid-region-selection', 'stale-sketch-region',
   'invalid-sketch-cells', 'invalid-sketch-cell-id', 'unsupported-sketch-cells'];
 /** Confirming the material a cut (`cut`) or a Pocket (`pocket`) removes, as the kernel's material evidence names its refusals. */
-export function cadMaterialDiagnostics(operation: 'cut' | 'pocket'): readonly string[] {
+export function cadMaterialDiagnostics(operation: 'cut' | 'pocket'): readonly CadRefusalCode[] {
   return [`${operation}-tool`, `${operation}-invalid`, `${operation}-open`, `${operation}-no-material`, `${operation}-erased`,
     `unsupported-${operation}-target`, `unsupported-${operation}-removal`, `unsupported-${operation}-precision`];
 }

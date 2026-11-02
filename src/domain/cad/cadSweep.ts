@@ -50,7 +50,7 @@ export function resolveCadSweepInputs(feature: CadSweepFeature, precedingFeature
   if (sketch?.kind !== 'sketch' || curveFeature?.kind !== 'curve') throw new CadError('invalid-reference', 'Sweep requires one preceding sketch and one preceding reference curve.');
   const frames = lookup ?? prepareCadDatumFrames([...precedingFeatures.values()], parameters);
   const sectionInspection = inspectCadSweepSketch(sketch, parameters, frames);
-  if (!sectionInspection.eligible) throw new CadError(sectionInspection.code, sectionInspection.message);
+  if (!sectionInspection.eligible) throw CadError.checked(sectionInspection.code, sectionInspection.message);
   if (!cadFeatureActive(curveFeature, { parameters })) throw new CadError('suppressed-curve', `Sweep curve "${curveFeature.name}" is suppressed.`);
   const section = sectionInspection.section; const curve = resolveCadCurve(curveFeature, parameters, frames);
   const resolvedPlacement = resolveCadSweepPlacement(section, curve);

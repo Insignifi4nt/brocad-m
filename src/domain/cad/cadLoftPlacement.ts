@@ -155,7 +155,7 @@ export function resolveCadLoftSectionPlacements(sections: readonly CadLoftSectio
     // Force the canonical frame for every section of a mixed Loft, even for a
     // principal/principal pair, so stations never mix absolute and relative data.
     const inspection = inspectSectionPair(first, section, legacyPrincipalPlane === null);
-    if (!inspection.compatible) throw new CadError(inspection.code, inspection.message);
+    if (!inspection.compatible) throw CadError.checked(inspection.code, inspection.message);
     placementUncertaintyMm = Math.max(placementUncertaintyMm, inspection.placementUncertaintyMm);
     return Object.freeze({ ...section, stationMm: inspection.stationMm, tangentialOffsetMm: inspection.tangentialOffsetMm });
   });
