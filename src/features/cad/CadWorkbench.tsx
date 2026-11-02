@@ -8,7 +8,7 @@ import type { CadPrepareEdits } from './useCadPreparedPreview';
 import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { isCadSketchGraphSelected, reconcileCadSketchGraphSelection, toggleCadSketchGraphSelection, type CadSketchGeometryPick } from './cadSketchGraphSelection';
 import { cadSketchFixedElementError, cadSketchVirtualSubject, isCadSketchVirtualId, isCadSketchVirtualSelection } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
-import type { CadSketchGraph, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
+import type { CadSketchGenerator, CadSketchGraph, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
 import { cadSketchProfileEdits, cadSketchProfileGenerator, cadSketchProfileViews, cadSketchShapeEdits, withCadSketchProfile, withoutCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { createCadFreshSketchDrawing, createCadFreshSketchGraph, type CadFreshSketchDrawing } from '@/domain/cad/cadFreshSketchGraph';
 import { createCadPathDraftGraph } from './cadPathDraftGraph';
@@ -18,6 +18,7 @@ import { CadSketchContextHeader } from './CadSketchContextHeader';
 import { CadSketchDimensionValueEditor, isCadSketchValueRelation } from './CadSketchDimensionValueEditor';
 import { CadSketchCornerEditor, CadSketchMoveEditor } from './CadSketchGeometryEditors';
 import { CadSketchSelectionInspector } from './CadSketchSelectionInspector';
+import { CadSketchGeneratorInputsEditor } from './CadSketchGeneratorInputsEditor';
 import { CadSketchRelationList } from './CadSketchRelationList';
 import { cadSketchSelectionRelationActions, type CadSketchSelectionAction, type CadSketchSelectionActionsModel } from './CadSketchSelectionActions';
 import { cadSketchAnalysisIssues, cadSketchIssuesStandInForD1, NO_CAD_SKETCH_ISSUES_BY_RELATION, type CadSketchAnalysisIssues, type CadSketchIssue } from './cadSketchIssues';
@@ -134,6 +135,8 @@ function renamedProfile(sketch: CadSketchFeature, profileId: string, name: strin
   const view = cadSketchProfileViews(sketch).find(entry => entry.id === profileId);
   return view ? withCadSketchProfile(sketch, { ...view, name }) : sketch;
 }
+/** The generator record `id` of the sketch, which the inspector configures as it does a profile. */
+const shapeGeneratorOf = (sketch: CadSketchFeature, id: string) => sketch.graph?.relations.find((relation): relation is CadSketchGenerator => relation.kind === 'generator' && relation.id === id);
 function afterCadEdit(completion: CadEditCompletion, accepted: () => void, signal?: AbortSignal): CadEditCompletion {
   const finish = (result: Awaited<CadEditCompletion>) => { signal?.throwIfAborted(); accepted(); return result; };
   return completion && 'then' in completion ? completion.then(finish) : finish(completion);
@@ -770,6 +773,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const selectedSketch = selected?.kind === 'sketch' ? selected : sketch;
   // A generator of a profile's shape is configured as that profile was.
   const profile = sketch ? cadSketchProfileViews(sketch).find((entry) => entry.id === profileId) : undefined;
+  // A generator without a profile form, a regular polygon, is configured by its own inputs editor.
+  const shapeGenerator = sketch && profileId && !profile ? shapeGeneratorOf(sketch, profileId) : undefined;
   const offsetSource = useMemo(() => sketch ? cadSketchOffsetSource(sketch, document.parameters, graphGeometry, profileId) : null, [sketch, document.parameters, graphGeometry, profileId]);
   const currentOffset = offsetCommand?.sketchId === sketch?.id ? offsetCommand : null;
   const currentPattern = patternCommand?.sketchId === sketch?.id ? patternCommand : null;
@@ -1028,7 +1033,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (selectedId && !document.features.some((feature) => feature.id === selectedId)) setSelectedId(null);
     if (curveId && !document.features.some(feature => feature.kind === 'curve' && feature.id === curveId)) setCurveId(null);
     if (sketchId && !document.features.some((feature) => feature.id === sketchId && feature.kind === 'sketch')) { setSketchId(null); setProfileId(null); }
-    else if (profileId && !(sketch && cadSketchProfileViews(sketch).some((entry) => entry.id === profileId))) setProfileId(null);
+    else if (profileId && !(sketch && (cadSketchProfileViews(sketch).some((entry) => entry.id === profileId) || shapeGeneratorOf(sketch, profileId)))) setProfileId(null);
   }, [document.id, document.features, selectedId, sketchId, curveId, profileId, sketch]);
   const cancel = useCallback(() => {
     if (dimensionToolOwner.current) { commandSubmission.cancel(); endDimensionTool(); return; }
@@ -2208,7 +2213,9 @@ export function CadWorkbench(props: CadWorkbenchProps) {
             key={JSON.stringify([document.id, sketch.id, graphGeometry, cancelSignal])} document={document} sketch={sketch} graph={sketch.graph} selection={graphGeometry} onEditMany={props.onEditMany}
             onPrepareEdits={props.onPrepareEdits} onPendingChange={setEditorPending} onPreviewDocument={publishSketchPreview} onFeedback={reportEditFeedback} interactionLocked={sketchCommandLocked}
             onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })}
-            onEditGenerator={id => { selectGraph(null); selectProfile(id); setInspectorCollapsed(false); }} /> : profile && sketch ? selectedProfileEditor : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
+            onEditGenerator={id => { selectGraph(null); selectProfile(id); setInspectorCollapsed(false); }} /> : profile && sketch ? selectedProfileEditor : shapeGenerator && sketch ? <CadSketchGeneratorInputsEditor key={`${shapeGenerator.id}-${cancelSignal}`} generator={shapeGenerator} sketch={sketch} document={document}
+            onApply={async (edits, signal) => { await props.onEditMany(edits, signal); signal?.throwIfAborted(); setEditorPending(false); }} onCancel={cancel} onPendingChange={setEditorPending}
+            onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} /> : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
         </div>
       </CadInspectorTitleContext.Provider></aside>}
     </div>

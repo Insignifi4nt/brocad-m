@@ -19,6 +19,7 @@
       "New rectangles, circles, slots, polygons, paths and plugin shapes such as gears are generators. Their edges and points are sketch geometry you can relate free geometry to, and their inputs, numbers or parameter expressions, size and place them.",
       "Changing a generator's inputs or parameters regenerates its geometry in one undo step. Teeth, sides and repetitions that remain keep their relations.",
       "When a change would remove relations on geometry a shape no longer has, the shape editor, the parameter editor and Finish of a sketch edit list them and ask before applying.",
+      "Edit shape, on a selected shape's edge or point, opens its inputs, including a regular polygon's centre, radius, number of sides and direction line.",
       "Detach turns a generator's geometry into ordinary lines, arcs and points.",
       "Saved profiles load and stay editable as before."
     ],

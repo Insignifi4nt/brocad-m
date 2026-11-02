@@ -357,6 +357,38 @@ describe('CAD sketch interaction', () => {
     expect(copy.graph.entities).toHaveLength(4);
     expect(begin).toHaveBeenCalledExactlyOnceWith(copy.id);
   });
+  it('edits a regular polygon\'s count, radius expression and direction line in place, confirming the relation a lost vertex takes', async () => {
+    const corner = (index: number, sides: number) => { const turn = 2 * Math.PI * index / sides; return [10 * Math.cos(turn), 10 * Math.sin(turn)] as [number, number]; };
+    const polygon = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 6, directionId: '@h' } } as const;
+    await mount(parseCadDocument({ ...createCadDocument('Hexagon', 'generated-hexagon'), parameters: { size: 4 }, schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [{ id: 'u', position: corner(5, 6) }, { id: 'd0', position: [30, 0] }, { id: 'd1', position: [30, 10] }],
+        entities: [{ id: 'dir', kind: 'line', construction: false, startPointId: 'd0', endPointId: 'd1' }],
+        relations: [polygon, { id: 'tie', kind: 'coincident', pointIds: ['u', 'poly_v5'] }] } }] }));
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    await act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: 'poly_e0' } }));
+    await click('Edit shape');
+    const before = currentDocument;
+    // Five sides drop the sixth vertex, and the relation tying the free point to it, which Apply confirms.
+    await input(field('Sides'), '5');
+    expect(currentDocument).toBe(before);
+    expect([...container.querySelectorAll('[role="status"]')].some(element => element.textContent?.startsWith('This removes one relation on geometry the shape no longer has: Coincident relation'))).toBe(true);
+    // The canvas previews the pentagon the confirmed edit makes.
+    expect(container.querySelector('[data-cad-sketch-entity="poly_e4"]')).not.toBeNull(); expect(container.querySelector('[data-cad-sketch-entity="poly_e5"]')).toBeNull();
+    await click('Apply');
+    const generated = () => sketchGraph().relations.find(relation => relation.id === 'poly');
+    expect(generated()).toEqual({ ...polygon, geometry: { ...polygon.geometry, sides: 5 } });
+    expect(sketchGraph().relations.some(relation => relation.id === 'tie')).toBe(false);
+    expect(sketchGraph().points.filter(point => point.id.startsWith('poly_')).map(point => point.id)).toEqual(['poly_v0', 'poly_v1', 'poly_v2', 'poly_v3', 'poly_v4']);
+    // The radius follows a parameter, and the first vertex turns to lie along the chosen line, still without detaching.
+    await input(field('Radius'), 'size * 2');
+    const direction = container.querySelector<HTMLSelectElement>('select[aria-label="Direction"]'); if (!direction) throw new Error('Direction missing.');
+    expect([...direction.options].map(option => option.value)).toEqual(['@h', '@v', 'dir']);
+    await act(async () => { direction.value = 'dir'; direction.dispatchEvent(new Event('change', { bubbles: true })); });
+    await click('Apply');
+    expect(generated()).toEqual({ ...polygon, geometry: { ...polygon.geometry, sides: 5, radius: 'size * 2', directionId: 'dir' } });
+    const tip = sketchGraph().points.find(point => point.id === 'poly_v0')!.position;
+    expect(tip[0]).toBeCloseTo(0, 9); expect(tip[1]).toBeCloseTo(8, 9);
+  });
   it('keeps its mirror axis chooser alive through an owned keyboard menu without replacing the copied source selection', async () => {
     const source = pairedBoreMirrorPart(); await mount(source);
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));

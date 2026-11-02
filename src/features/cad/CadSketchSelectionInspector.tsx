@@ -21,7 +21,6 @@ import type { CadSketchGeometryEditorProps } from './CadSketchGeometryEditors';
 import './cad-sketch-profile.css';
 import { useCadSketchDraft } from './useCadSketchDraft';
 import { cadSketchGeneratorName, cadSketchGeneratorOwner } from '@/domain/cad/sketch-generators/cadSketchGenerators';
-import { cadSketchProfileGenerator } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 type Measurement = CadSketchReferenceDimension['measurement'];
 
@@ -82,7 +81,6 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
   const pattern = singleton ? cadSketchLinearPatternForSelection(graph, singleton) : null;
   const patternLock = selection.map(atom => cadSketchOwnedGeometryLockReason(graph, atom)).find(Boolean) ?? null;
   const generator = selection.map(atom => cadSketchGeneratorOwner(graph, atom.id)).find(Boolean);
-  const configurable = generator && cadSketchProfileGenerator(sketch, generator.id);
   const reference = singleton ? cadSketchExternalReferenceForSelection(graph, singleton) : undefined;
   const referenceSource = reference ? cadDocument.features.find(feature => feature.id === reference.sourceSketchId)?.name : null;
   const radialDriver = entity ? cadSketchRadialRelationForEntity(graph, entity.id) : undefined;
@@ -114,7 +112,7 @@ export function CadSketchSelectionInspector({ selection, onApply, onEditPattern,
         <Button type="button" disabled={draft.pending || !onEditPattern} title="Detach all occurrences and retain their current geometry" onClick={() => onEditPattern?.(pattern.relation.id, true)}>Detach pattern</Button>
         <CadContextHelp label="Pattern ownership">Copies follow the seed and pitch. Edit the pattern to omit or restore copies; detach before moving or resizing one independently.</CadContextHelp></div>}
       {generator && <div className="cad-sketch-profile-actions"><span>{cadSketchGeneratorName(generator)}</span>
-        {configurable && <Button type="button" disabled={draft.pending || !onEditGenerator} onClick={() => onEditGenerator?.(generator.id)}>Edit shape</Button>}
+        <Button type="button" disabled={draft.pending || !onEditGenerator} onClick={() => onEditGenerator?.(generator.id)}>Edit shape</Button>
         <Button type="button" disabled={draft.pending} title="Keep the generated geometry as ordinary sketch geometry"
           onClick={() => onApply([{ kind: 'detach-sketch-generator', sketchId: sketch.id, generatorId: generator.id }])}>Detach</Button>
         <CadContextHelp label="Generated geometry">This geometry follows its shape's inputs and parameters. Edit the shape to change it; detach it to move or trim its edges on their own.</CadContextHelp></div>}
