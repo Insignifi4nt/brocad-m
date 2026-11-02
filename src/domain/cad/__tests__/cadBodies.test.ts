@@ -334,7 +334,7 @@ describe('body parts', () => {
     const deep = chain(13);
     expect(parts({ ...deep, facts: keeping(14, 1) })).toMatchObject({ pieces: deep.before.slice(0, 13), lost: [] });
     // Removing both loses every key: past the limit at thirteen levels, and exactly at it at twelve.
-    expect(parts({ ...deep, facts: keeping(14, 2) })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: 'search-limit' });
+    expect(parts({ ...deep, facts: keeping(14, 2) })).toEqual({ untracked: true, ambiguousNow: [], inherited: [], lost: [], overflowed: 'key-limit' });
     const shallow = parts({ ...chain(12), facts: keeping(13, 2) });
     expect([shallow.untracked, shallow.lost.length, shallow.lost[0], shallow.lost.at(-1)])
       .toEqual([undefined, 2 ** 12, `pad${'/split(0)'.repeat(12)}`, `pad${'/split(1)'.repeat(12)}`]);
@@ -360,7 +360,7 @@ describe('body parts', () => {
     expect([shallow.result.lost.length, shallow.reads > budget]).toEqual([128, true]);
     // Thirteen levels lose 2 ** 19 keys. The first index alone passes the limit, so the body is untracked within the budget, which the getter
     // enforces, so a search that went on would fail before listing them.
-    expect(removing(13, budget).result).toMatchObject({ untracked: true, overflowed: true });
+    expect(removing(13, budget).result).toMatchObject({ untracked: true, overflowed: 'key-limit' });
   });
 
   it('never reads the keys of a removed piece that stays in a group, which can take more steps than the work bound', () => {
@@ -372,7 +372,7 @@ describe('body parts', () => {
     const before = [...inner, ...outer.slice(1)], orders = [outer, inner], gone = inner[1];
     const kept = before.flatMap((_, solid): (readonly Entry[])[] => solid === 1 ? [] : [[[0, solid, 1]]]);
     // Removed alone, none of its keys is lost, since each names a sibling left in another order, but finding that passes the bound.
-    expect(parts({ before, orders, facts: facts(kept.length, kept) })).toMatchObject({ untracked: true, overflowed: true });
+    expect(parts({ before, orders, facts: facts(kept.length, kept) })).toMatchObject({ untracked: true, overflowed: 'search-limit' });
     // In a group that a piece left descends from, its key stays, naming that piece, so no key naming it can be lost and none is read.
     const carried = parts({ before, orders, ambiguous: [[inner[0], gone]], facts: facts(kept.length, kept) });
     expect([carried.untracked, carried.lost, carried.ambiguous, carried.pieces?.length]).toEqual([undefined, [], [[inner[0], gone]], kept.length]);

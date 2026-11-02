@@ -240,8 +240,9 @@ export function cadBodyFeatureId(state: Pick<CadBodyState, 'createdBy' | 'modifi
  *   removed or merged their solids. It lists every such key, whether or not this build gave it, digits by value, so every kernel order
  *   reports the same. References to them resolve as missing.
  * - `untracked-body-parts`: after `featureId`, the lineage stops tracking the parts of `body`, so it keeps none from then on. `reason`
- *   gives the cause: more solids than it tracks (`part-limit`), more part names or longer ones (`key-limit`), or more work to find
- *   which keys were lost, or more lost keys, than a rebuild allows (`search-limit`); the work limit can stop it even when none was.
+ *   gives the bound it passed: more solids than it tracks (`part-limit`); more part names or longer ones than it tracks, whether names
+ *   the body keeps or names it lost (`key-limit`); or more work to find which names were lost than a rebuild allows (`search-limit`),
+ *   which can stop it even when none was.
  * - `more-body-issues`: the issues from `featureId` on did not fit in the list; the message gives how many were left out.
  */
 export interface CadBodyIssue {
@@ -379,7 +380,7 @@ const NO_PAIRS: readonly (readonly [CadBodyKey, CadBodyKey])[] = freeze([]);
 const WHOLE: CadBodyParts = freeze({ ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
 const UNTRACKED: CadBodyParts = freeze({ untracked: true as const, ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE });
 const overflowed = (reason: CadBodyUntrackedReason): CadBodyParts => freeze({ untracked: true as const, ambiguousNow: NONE, inherited: NO_PAIRS, lost: NONE, overflowed: reason });
-const OVERFLOWED = { parts: overflowed('part-limit'), keys: overflowed('key-limit'), search: overflowed('search-limit') } as const;
+const OVERFLOWED: Readonly<Record<CadBodyUntrackedReason, CadBodyParts>> = { 'part-limit': overflowed('part-limit'), 'key-limit': overflowed('key-limit'), 'search-limit': overflowed('search-limit') };
 /** What every tool solid passes on: never a key, since a key is never empty. Solids of a fused tool alone get fresh keys. */
 const TOOL = '' as CadBodyKey;
 
@@ -672,7 +673,7 @@ export function cadBodyParts(input: {
   const patterned = facts.sources.some(source => source.kind === 'copy'), fused = facts.sources.some(source => source.kind === 'tool');
   const beforeSolids = input.beforeSolids ?? 1;
   if (!before && (count <= 1 || fused && !patterned || !patterned && !facts.removesMaterial && count <= beforeSolids)) return WHOLE;
-  if (count > MAX_CAD_BODY_LIST) return OVERFLOWED.parts;
+  if (count > MAX_CAD_BODY_LIST) return OVERFLOWED['part-limit'];
   const traced = facts.provenance();
   if (traced.length !== count) throw new Error('Each solid of the result needs its sources.');
   if (!before && (patterned ? traced.every(sources => sources.some(entry => entry.source === 0)) : !splits(traced, count, beforeSolids))) return WHOLE;
@@ -819,7 +820,7 @@ export function cadBodyParts(input: {
   const leads = addLeads(new Set(), [...pieces, ...parent.keys()]);
   const kept = [...(previous.orders ?? []).filter(order => order.keys.some(part => leads.has(part))), ...orders];
   const all = new Set<CadBodyKey>([...pieces, ...parent.keys(), ...kept.flatMap(order => order.keys)]);
-  if (all.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED.keys;
+  if (all.size > MAX_CAD_BODY_LIST || pieces.some(piece => piece.length > MAX_CAD_BODY_KEY_LENGTH)) return OVERFLOWED['key-limit'];
   const groups = new Map<CadBodyKey, CadBodyKey[]>();
   for (const part of parent.keys()) { const top = root(part), group = groups.get(top); if (group) group.push(part); else groups.set(top, [part]); }
   const ambiguous = [...groups.values()].map(group => freeze(group));
@@ -834,7 +835,7 @@ export function cadBodyParts(input: {
   // greater cost, so they are skipped.
   const homeless = previous.ambiguous?.filter((_, g) => !descent.has(`${g} 0`)).flat() ?? [], stays = passer(after, () => true);
   const lost = lostKeys(previous, after, [...(before ?? []).filter(piece => !continuedFrom.has(piece)), ...homeless].filter(part => !stays(part)), continuedFrom);
-  if (!lost) return OVERFLOWED.search;
+  if (typeof lost === 'string') return OVERFLOWED[lost];
   // The keys this feature made ambiguous: its groups' keys and the pieces its orders may place otherwise, unless they were ambiguous before
   // or are ambiguous through a key that was.
   const descended = new Set(inherited.map(([piece]) => piece));
@@ -914,7 +915,7 @@ function piecesOf(n: number): string { return n === 1 ? '1 piece' : `${n} pieces
 const UNTRACKED_MESSAGES: Readonly<Record<CadBodyUntrackedReason, (body: CadBodyKey, featureId: string) => string>> = {
   'part-limit': (body, featureId) => `Body ${body} has more parts than are tracked after ${featureId}, so references to its parts resolve as missing.`,
   'key-limit': (body, featureId) => `Body ${body} has more part names, or longer ones, than are tracked after ${featureId}, so references to its parts resolve as missing.`,
-  'search-limit': (body, featureId) => `Finding which parts of body ${body} were lost after ${featureId} takes more work, or finds more of them, than a rebuild tracks, so its parts are no longer tracked and references to them resolve as missing.`
+  'search-limit': (body, featureId) => `Finding which parts of body ${body} were lost after ${featureId} takes more work than a rebuild allows, so its parts are no longer tracked and references to them resolve as missing.`
 };
 
 export function createCadBodyLineage(): CadBodyLineage {
@@ -1227,17 +1228,17 @@ function keyReader(body: CadBodyPartsView) {
 
 /**
  * The keys that named one of `parts` of `previous` in some kernel order and name no piece of `after` in any, none naming a piece before
- * that `continued` holds, digits by value; `undefined` past `MAX_CAD_BODY_LIST` of them, or past `MAX_CAD_BODY_ORDER_WORK` steps of
- * reading. A part's keys are read a step at a time, before and after together: a split step one of `previous`'s orders numbers may be any
+ * that `continued` holds, digits by value; `key-limit` past `MAX_CAD_BODY_LIST` of them, for one part or in all, or `search-limit` past
+ * `MAX_CAD_BODY_ORDER_WORK` steps of reading. A part's keys are read a step at a time, before and after together: a split step one of `previous`'s orders numbers may be any
  * index that order may place the part at, and every other step stays. Keys whose readings reach the same lists at a step are lost or not
  * alike whatever follows, so each pair of readings is followed once, and the work grows with the keys lost, not with every key naming a part.
  */
-function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: readonly CadBodyKey[], continued: ReadonlySet<string>): CadBodyKey[] | undefined {
+function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: readonly CadBodyKey[], continued: ReadonlySet<string>): CadBodyKey[] | 'key-limit' | 'search-limit' {
   if (!parts.length) return [];
   const before = keyReader(previous), now = keyReader(after), index = orderIndex(previous.orders);
   const namedBefore = passer(previous, () => true), continues = passer(previous, piece => continued.has(piece)), namedNow = passer(after, () => true);
   const indices = new Map<Places, readonly string[]>(), numbers = new Map<Places, number>(), read = new Set<string>(), lost = new Set<CadBodyKey>();
-  let work = 0;
+  let work = 0, stopped: 'key-limit' | 'search-limit' = 'search-limit';
   for (const part of parts) {
     // What each step of a key naming the part may be, and those choices as text, the same for parts named by the same keys' steps.
     const steps = part.split('/'), choices: (readonly string[])[] = [];
@@ -1272,11 +1273,11 @@ function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: re
         const found: string[] = [];
         for (const choice of choices[at]) {
           work += now.readingKeys(nowRead).length + before.readingKeys(beforeRead).length + 1;
-          if (work > MAX_CAD_BODY_ORDER_WORK) return undefined;
+          if (work > MAX_CAD_BODY_ORDER_WORK) { stopped = 'search-limit'; return undefined; }
           const rest = follow(at + 1, now.nextReading(nowRead, choice), before.nextReading(beforeRead, choice));
           if (!rest) return undefined;
           for (const end of rest) found.push(`/${choice}${end}`);
-          if (found.length > MAX_CAD_BODY_LIST) return undefined;
+          if (found.length > MAX_CAD_BODY_LIST) { stopped = 'key-limit'; return undefined; }
         }
         ends = found;
       }
@@ -1284,9 +1285,9 @@ function lostKeys(previous: CadBodyPartsView, after: CadBodyPartsView, parts: re
       return ends;
     };
     const ends = follow(0, now.rootReading(steps[0]), before.rootReading(steps[0]));
-    if (!ends) return undefined;
+    if (!ends) return stopped;
     for (const end of ends) if (steps[0].length + end.length <= MAX_CAD_BODY_KEY_LENGTH) lost.add(`${steps[0]}${end}` as CadBodyKey);
-    if (lost.size > MAX_CAD_BODY_LIST) return undefined;
+    if (lost.size > MAX_CAD_BODY_LIST) return 'key-limit';
   }
   return [...lost].sort(compareCadBodyKeys);
 }
