@@ -746,7 +746,7 @@ test('DXF exchange preserves exact rounded contours and reconstructs a standalon
   expect(await call(page, 'cad_build', { expectedVersion: opened.version })).toMatchObject({ diagnostics: [], bodies: [{ volumeMm3: expect.closeTo(expectedVolume, 5) }] });
 });
 
-test('an imported path is selected by a pointer click on its edge and edited atomically through segment fields', async ({ page }) => {
+test('an imported path is selected by its interior and edited atomically through segment fields', async ({ page }) => {
   const { draft } = await createBox(page);
   await call(page, 'cad_save_document', { expectedVersion: draft.version });
   const download = page.waitForEvent('download');
@@ -772,9 +772,9 @@ test('an imported path is selected by a pointer click on its edge and edited ato
   await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'edit-sketch', sketchId: imported.sketchId } });
   await openViewControls(page);
   await page.getByRole('button', { name: 'Fit sketch', exact: true }).click();
-  // The imported contour is sketch geometry, which is picked by its edges: a genuine pointer click on its upper edge selects that edge,
-  // and the selection opens the shape that owns it. The public centre is in world millimetres; the visible SVG renders relative to that
-  // centre before applying its Y flip.
+  // A genuine pointer click inside the shape must select it even though the
+  // drawing uses transparent fills. The public centre is in world millimetres;
+  // the visible SVG renders relative to that centre before applying its Y flip.
   const viewport = await call(page, 'cad_get_viewport', { expectedVersion: current.version });
   const view = viewport.view;
   if (!view || typeof view !== 'object' || !('mode' in view) || view.mode !== 'sketch' || !('centerMm' in view)
@@ -782,16 +782,24 @@ test('an imported path is selected by a pointer click on its edge and edited ato
     throw new Error('Missing current sketch world centre');
   }
   const centerMm: [number, number] = [view.centerMm[0], view.centerMm[1]];
-  const point = await page.getByLabel('Sketch drawing canvas').evaluate((element, center) => {
+  const pixel = (x: number, y: number) => page.getByLabel('Sketch drawing canvas').evaluate((element, { center, at }) => {
     const canvas = element as SVGSVGElement;
     const transform = canvas.getScreenCTM();
     if (!transform) throw new Error('Missing visible sketch transformation');
-    const edge = canvas.createSVGPoint(); edge.x = 10 - center[0]; edge.y = center[1] - 10;
-    const pixels = edge.matrixTransform(transform);
+    const world = canvas.createSVGPoint(); world.x = at[0] - center[0]; world.y = center[1] - at[1];
+    const pixels = world.matrixTransform(transform);
     return { x: pixels.x, y: pixels.y };
-  }, centerMm);
-  await page.mouse.click(point.x, point.y);
+  }, { center: centerMm, at: [x, y] as [number, number] });
+  // The contour's edges are its sketch geometry: a click on its upper edge selects that edge, whose shape Edit shape opens.
+  const edge = await pixel(10, 10);
+  await page.mouse.click(edge.x, edge.y);
   await page.getByRole('form', { name: 'Sketch selection' }).getByRole('button', { name: 'Edit shape', exact: true }).click();
+  await expect(page.getByLabel('Path segment', { exact: true })).toBeVisible();
+  await call(page, 'cad_set_viewport', { expectedVersion: current.version, command: { kind: 'select-profile', profileId: null } });
+  await expect(page.getByLabel('Path segment', { exact: true })).toHaveCount(0);
+  // Its interior selects the shape itself, which opens straight to its exact segments.
+  const point = await pixel(10, 5);
+  await page.mouse.click(point.x, point.y);
   await expect(page.getByLabel('Path segment', { exact: true })).toBeVisible();
   await page.getByLabel('Path segment', { exact: true }).fill(String(segmentIndex + 1));
   await page.getByRole('textbox', { name: 'End X mm', exact: true }).fill('tipX');

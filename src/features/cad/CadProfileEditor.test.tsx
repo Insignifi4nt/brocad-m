@@ -1,4 +1,4 @@
-import { act, useState, useSyncExternalStore } from 'react';
+import { act, StrictMode, useState, useSyncExternalStore } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { importCadDxfSketch } from '@/domain/cad/cadDxfImport';
@@ -179,6 +179,24 @@ describe('imported analytic profile editing', () => {
 });
 
 describe('generator profile editing', () => {
+  it('opens at the shape a grip moved a generator to, as a pending draft Apply applies, until a later revision of the part resets it', async () => {
+    const rect = { id: 'rect', kind: 'generator', idPrefix: 'g-rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } } as const;
+    const document = parseCadDocument({ ...createCadDocument('Moved plate', 'cad_moved_plate'), schemaVersion: 2, parameters: { size: 2 }, features: [{ id: 'sketch', name: 'Sketch',
+      kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [], entities: [], relations: [rect] } }] });
+    const revised = parseCadDocument({ ...document, parameters: { size: 3 } }), profile = cadSketchProfileViews(document.features[0] as CadSketchFeature)[0];
+    if (cadSketchProfileViews(revised.features[0] as CadSketchFeature)[0] !== profile) throw new Error('Expected the revision to keep its view');
+    const pending = vi.fn<(pending: boolean) => void>(), applied = vi.fn<(geometry: CadProfile) => void>();
+    // The app runs its effects twice on mount, which must not reset the opening shape.
+    const render = (part: CadDocument) => act(async () => root.render(<StrictMode><CadProfileEditor document={part} profile={profile} initialGeometry={{ ...rect.geometry, width: 30 }}
+      onApply={next => applied(next.geometry)} onPendingChange={pending} onCancel={() => undefined} /></StrictMode>));
+    await render(document);
+    expect(field('Width').value).toBe('30'); expect(pending).toHaveBeenLastCalledWith(true);
+    await click('Apply');
+    expect(applied).toHaveBeenCalledExactlyOnceWith({ ...rect.geometry, width: 30 });
+    await render(revised);
+    expect(field('Width').value).toBe('20'); expect(pending).toHaveBeenLastCalledWith(false);
+  });
+
   it('shows the relations a regeneration removes, and applies exactly the previewed edit when Apply confirms them', async () => {
     const document = parseCadDocument({ ...createCadDocument('Rounded plate', 'cad_rounded_plate'), schemaVersion: 2, features: [{ id: 'sketch', name: 'Sketch',
       kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [0, 0] }], entities: [], relations: [

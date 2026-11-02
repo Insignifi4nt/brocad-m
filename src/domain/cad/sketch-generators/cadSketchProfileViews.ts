@@ -5,7 +5,7 @@ import type { CadEdit } from '../cadOperations';
 import type { CadSketchGenerator } from '../cadSketchGraph';
 import { deleteCadSketchElements } from '../cadSketchGraphEdits';
 import { cadSketchGeneratorPrefixFor } from './cadSketchGeneratorEdits';
-import { cadSketchGeneratorKind, cadSketchGenerators } from './cadSketchGenerators';
+import { cadSketchGeneratorKind, cadSketchGeneratorOutlines, cadSketchGenerators } from './cadSketchGenerators';
 
 // The shapes people configure as profiles: a sketch's saved legacy profiles, then each generator of a profile's geometry, seen as the
 // profile it replaces. The profile editor, the plugin panel, the parameter bindings and CAM notes read generators through these views,
@@ -39,6 +39,24 @@ export function cadSketchProfileViews(sketch: CadSketchFeature): readonly CadSke
   const generators = sketch.graph ? cadSketchGenerators(sketch.graph).filter(isProfileGenerator) : [];
   const result = generators.length ? Object.freeze([...sketch.profiles, ...generators.map(generatorProfile)]) : sketch.profiles;
   if (Object.isFrozen(sketch)) sketchViews.set(sketch, result);
+  return result;
+}
+
+const outlineViews = new WeakMap<CadSketchGenerator, { readonly shape: unknown; readonly view: CadSketchProfile }>();
+/**
+ * Each generator of the sketch with no profile view that draws a closed outline, such as a regular polygon, as a profile of that outline
+ * from `parameters`, in relation order: what a canvas picks and selects as the generator, never a view an edit writes back.
+ */
+export function cadSketchOutlineViews(sketch: CadSketchFeature, parameters: Readonly<Record<string, number>>): readonly CadSketchProfile[] {
+  if (!sketch.graph) return [];
+  const result: CadSketchProfile[] = [];
+  for (const { generator, shape } of cadSketchGeneratorOutlines(sketch.graph, parameters).values()) {
+    if (isProfileGenerator(generator)) continue;
+    let kept = outlineViews.get(generator);
+    if (kept?.shape !== shape) outlineViews.set(generator, kept = { shape, view: Object.freeze({ id: generator.id,
+      name: generator.name ?? cadSketchGeneratorKind(generator.geometry).label(generator.geometry), construction: generator.construction, geometry: shape }) });
+    result.push(kept.view);
+  }
   return result;
 }
 

@@ -265,7 +265,7 @@ describe('graph spatial selection', () => {
     const held = new Set<number>(), release = vi.fn();
     Object.assign(canvas, { setPointerCapture: (id: number) => held.add(id), hasPointerCapture: (id: number) => held.has(id),
       releasePointerCapture: (id: number) => { held.delete(id); release(id); } });
-    const pointer = async (type: string, x: number, y: number, shiftKey = false, pointerId = 7, button = 0, target: Element = canvas, modifiers: Pick<MouseEventInit, 'ctrlKey' | 'metaKey'> = {}, isPrimary = true) => {
+    const pointer = async (type: string, x: number, y: number, shiftKey = false, pointerId = 7, button = 0, target: Element = canvas, modifiers: Pick<MouseEventInit, 'ctrlKey' | 'metaKey' | 'detail'> = {}, isPrimary = true) => {
       const state = currentControls().getState(); if (state.mode === 'solid') throw new Error('Sketch state missing.');
       const event = new MouseEvent(type, { button, buttons: type === 'pointerup' ? 0 : button === 2 ? 2 : 1, bubbles: true, cancelable: true, shiftKey,
         clientX: 510 + (x - state.centerMm[0]) / (state.heightSpanMm * 2) * 1000,
@@ -396,6 +396,44 @@ describe('graph spatial selection', () => {
     expect(translate).toHaveBeenCalledOnce(); expect(translate.mock.calls[0][0]).toBe('legacy');
     await h.pointer('pointerdown', -25, 0); await h.pointer('pointerup', -25, 0); await click();
     expect(fixed.mock.calls).toEqual([[H_AXIS, false], [H_AXIS, false]]); expect(translate).toHaveBeenCalledOnce(); expect(move).toHaveBeenCalledOnce();
+  });
+  it('picks a generator by its interior, opens it from its button, and grips, drags and menus it as a saved profile, its members keeping their edge picks', async () => {
+    const h = await spatialFixture(), selectProfile = vi.fn(), move = vi.fn(), translate = vi.fn(), menu = vi.fn();
+    const document = parseCadDocument({ ...createCadDocument('Generated'), schemaVersion: 2, features: [{ ...sketch, graph: { points: [], entities: [], relations: [
+      { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 20, y: 20, width: 20, height: 10, cornerRadius: 0 } },
+      { id: 'hex', kind: 'generator', idPrefix: 'hex', construction: false, geometry: { kind: 'regular-polygon', x: -30, y: 30, radius: 5, sides: 6, directionId: '@h' } }] } }] });
+    const feature = document.features[0] as CadSketchFeature;
+    await h.show({ sketch: feature, parameters: document.parameters, onSelectProfile: selectProfile, onMoveHandle: move, onTranslateProfile: translate, onContextMenu: menu,
+      graphControls: { ...h.props().graphControls!, document } });
+    const button = (name: string) => { const found = container.querySelector<SVGGElement>(`[role="button"][aria-label="Select ${name} profile"]`); if (!found) throw new Error(`${name} missing.`); return found; };
+    const grip = (key: string) => container.querySelector<SVGCircleElement>(`[data-cad-sketch-grip="${key}"]`);
+    const tap = async (x: number, y: number) => { await h.pointer('pointerdown', x, y); await h.pointer('pointerup', x, y); await h.pointer('click', x, y, false, 7, 0, h.canvas, { detail: 1 }); };
+    // Unselected, its members draw it, so its button draws nothing over them.
+    expect(button('Plate').childElementCount).toBe(0);
+    await tap(30, 25); expect(selectProfile).toHaveBeenLastCalledWith('plate');
+    await tap(-30, 30); expect(selectProfile).toHaveBeenLastCalledWith('hex');
+    // Focused from the keyboard, it shows its outline until focus leaves.
+    await act(async () => button('Plate').focus()); expect(button('Plate').childElementCount).toBeGreaterThan(0);
+    await act(async () => button('Plate').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })));
+    expect(selectProfile).toHaveBeenLastCalledWith('plate');
+    await act(async () => button('Plate').blur()); expect(button('Plate').childElementCount).toBe(0);
+    // An edge press takes the member edge, as the sketch geometry it is.
+    selectProfile.mockClear(); await tap(30, 20);
+    expect(h.selected).toHaveBeenCalledWith({ kind: 'entity', id: 'plate_e0' }, false); expect(selectProfile).not.toHaveBeenCalledWith('plate');
+    await h.pointer('pointerdown', 30, 25, false, 7, 2); await h.pointer('pointerup', 30, 25, false, 7, 2);
+    expect(menu).toHaveBeenLastCalledWith(expect.objectContaining({ trigger: 'pointer', profileId: 'plate' }));
+    // Selected, its outline shows, and its grips lie over its members and take their presses.
+    await h.show({ selectedProfileId: 'plate' });
+    expect(button('Plate').classList.contains('is-selected')).toBe(true); expect(button('Plate').childElementCount).toBeGreaterThan(0);
+    const side = grip('plate/rectangle-side/1'); if (!side) throw new Error('Side grip missing.');
+    await h.pointer('pointerdown', 40, 25, false, 7, 0, side); await h.pointer('pointermove', 46, 25); await h.pointer('pointerup', 46, 25);
+    expect(move).toHaveBeenCalledOnce(); expect(move.mock.calls[0].slice(0, 3)).toEqual(['plate', { kind: 'rectangle-side', index: 1 }, [6, 0]]);
+    await h.pointer('pointerdown', 30, 25); await h.pointer('pointermove', 30, 33); await h.pointer('pointerup', 30, 33);
+    expect(translate).toHaveBeenCalledOnce(); expect(translate.mock.calls[0].slice(0, 2)).toEqual(['plate', [0, 8]]);
+    // A regular polygon's outline selects it, but it has no profile grips: its inputs editor sizes it.
+    await h.show({ selectedProfileId: 'hex' });
+    expect(button('Regular polygon').classList.contains('is-selected')).toBe(true);
+    expect(container.querySelector('[data-cad-sketch-grip^="hex/"]')).toBeNull(); expect(container.querySelector('[data-cad-sketch-grip]')).toBeNull();
   });
   it('drops a press on an axis, and its click, when the document, cancellation, lock, focus or canvas frame changes, or another contact lands, before release', async () => {
     const h = await spatialFixture(), fixed = vi.fn(), selectProfile = vi.fn();

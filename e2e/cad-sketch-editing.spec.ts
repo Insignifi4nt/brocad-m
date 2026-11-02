@@ -100,3 +100,41 @@ test('edits slot sizes and an analytic arc joint without translating their profi
   expect(await call(page, 'cad_get_feature', { expectedVersion: current.version, featureId: 'curves' }))
     .toMatchObject({ feature: { profiles: [{ geometry: { length: 30, width: 20 } }, { geometry: arc }] } });
 });
+
+test('drags a generated rectangle by its side grip and by its interior, each as one undoable edit of its inputs', async ({ page }) => {
+  await prepareCadTools(page);
+  await call(page, 'cad_open_workspace');
+  const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } };
+  await importCadDraft(page, [{ kind: 'sketch', id: 'outline', name: 'Outline', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+    graph: { points: [], entities: [], relations: [plate] } }], { name: 'Generated plate' });
+  const initial = await context(page);
+  await expect.poll(() => rawCall(page, 'cad_get_viewport', { expectedVersion: initial.version }))
+    .toMatchObject({ ok: true, data: { view: { available: true, referenceVersion: initial.version } } });
+  await call(page, 'cad_set_viewport', { expectedVersion: initial.version, command: { kind: 'edit-sketch', sketchId: 'outline' } });
+  await call(page, 'cad_set_viewport', { expectedVersion: initial.version, command: { kind: 'select-profile', profileId: 'plate' } });
+  const scale = await page.getByLabel('Sketch drawing canvas').evaluate(element => {
+    const canvas = element as SVGSVGElement, bounds = canvas.getBoundingClientRect();
+    return { x: bounds.width / canvas.viewBox.baseVal.width, y: bounds.height / canvas.viewBox.baseVal.height };
+  });
+  const centre = async (name: string) => {
+    const box = await page.getByRole('button', { name, exact: true }).boundingBox(); if (!box) throw new Error(`Missing ${name} grip.`);
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  };
+  const drag = async (from: { x: number; y: number }, [dx, dy]: readonly [number, number]) => {
+    await page.mouse.move(from.x, from.y); await page.mouse.down();
+    await page.mouse.move(from.x + dx * scale.x, from.y - dy * scale.y, { steps: 4 }); await page.mouse.up();
+  };
+  const geometry = async () => {
+    const feature = (await call(page, 'cad_get_feature', { expectedVersion: (await context(page)).version, featureId: 'outline' })).feature as { graph: { relations: { id: string; geometry?: unknown }[] } };
+    return feature.graph.relations.find(relation => relation.id === 'plate')?.geometry;
+  };
+  // The right side's grip lies on the generated edge, and takes the press from it.
+  await drag(await centre('Right side of Plate'), [5, 0]);
+  await expect.poll(geometry).toEqual({ ...plate.geometry, width: 25 });
+  // A press inside the shape, away from its edges, moves the whole shape.
+  const left = await centre('Left side of Plate'), right = await centre('Right side of Plate');
+  await drag({ x: (left.x + right.x) / 2, y: (left.y + right.y) / 2 }, [0, 5]);
+  await expect.poll(geometry).toEqual({ ...plate.geometry, y: 5, width: 25 });
+  await page.keyboard.press('Control+z'); await expect.poll(geometry).toEqual({ ...plate.geometry, width: 25 });
+  await page.keyboard.press('Control+z'); await expect.poll(geometry).toEqual(plate.geometry);
+});

@@ -357,6 +357,34 @@ describe('CAD sketch interaction', () => {
     expect(copy.graph.entities).toHaveLength(4);
     expect(begin).toHaveBeenCalledExactlyOnceWith(copy.id);
   });
+  it('moves a generator\'s grip as one input edit, and opens its editor at the moved shape to ask when the move would remove relations', async () => {
+    // A rounded plate as wide as its two radii has no bottom side, so "tie" on the bottom side's end goes with it.
+    const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
+      geometry: { kind: 'rectangle', x: 0, y: 0, width: 15, height: 30, cornerRadius: 5 } } as const;
+    const initial = parseCadDocument({ ...createCadDocument('Plate', 'gripped-plate'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [{ id: 'u', position: [10, 0] }], entities: [],
+        relations: [plate, { id: 'tie', kind: 'coincident', pointIds: ['u', 'plate_t1'] }] } }] });
+    await mount(initial);
+    await act(async () => { viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }); viewport().apply({ kind: 'select-profile', profileId: 'plate' }); });
+    const nudge = async (side: string, key: string) => {
+      const grip = container.querySelector<SVGCircleElement>(`[data-cad-sketch-grip="plate/rectangle-side/${side}"]`); if (!grip) throw new Error(`Side ${side} grip missing.`);
+      await act(async () => { grip.focus(); grip.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); });
+    };
+    const generated = () => sketchGraph().relations.find(relation => relation.id === 'plate');
+    // Raising the top side keeps every member, so it applies at once as the generator's new height.
+    await nudge('2', 'ArrowUp');
+    expect(generated()).toEqual({ ...plate, geometry: { ...plate.geometry, height: 35 } });
+    expect(sketchGraph().relations.some(relation => relation.id === 'tie')).toBe(true);
+    const raised = currentDocument;
+    // Narrowing it to its two radii would drop the bottom side's end: nothing applies, and its editor opens at the moved width to ask.
+    await nudge('1', 'ArrowLeft');
+    expect(currentDocument).toBe(raised); expect(field('Width').value).toBe('10'); expect(field('Height').value).toBe('35');
+    expect([...container.querySelectorAll('[role="status"]')].some(element => element.textContent?.startsWith('This removes one relation on geometry the shape no longer has: Coincident'))).toBe(true);
+    await click('Apply');
+    expect(generated()).toEqual({ ...plate, geometry: { ...plate.geometry, width: 10, height: 35 } });
+    expect(sketchGraph().relations.some(relation => relation.id === 'tie')).toBe(false);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(raised);
+  });
   it('edits a regular polygon\'s count, radius expression and direction line in place, confirming the relation a lost vertex takes', async () => {
     const corner = (index: number, sides: number) => { const turn = 2 * Math.PI * index / sides; return [10 * Math.cos(turn), 10 * Math.sin(turn)] as [number, number]; };
     const polygon = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 6, directionId: '@h' } } as const;

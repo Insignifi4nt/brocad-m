@@ -3,7 +3,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ContextType } from 'react';
 import { CloseIcon, ConfirmIcon, SelectIcon } from '@wire-edm/icons-react';
-import type { CadDocument, CadFeature, CadPoint3, CadScalar, CadSketchProfile } from '@/domain/cad/cadDocument';
+import type { CadDocument, CadFeature, CadPoint3, CadProfile, CadScalar, CadSketchProfile } from '@/domain/cad/cadDocument';
 import { CadError } from '@/domain/cad/cadError';
 import { resolveCadProfile } from '@/domain/cad/cadSketchGeometry';
 import { cadSketchSourceAvailability } from '@/domain/cad/cadSketchSources';
@@ -417,8 +417,10 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
   </form>;
 }
 
-export function CadProfileEditor({ profile, document, onApply, onCancel, onPendingChange, onInspectInput, onPreviewProfile, onPreviewParameters, onPrepareEdits, onPreviewDocument }: {
+export function CadProfileEditor({ profile, initialGeometry, document, onApply, onCancel, onPendingChange, onInspectInput, onPreviewProfile, onPreviewParameters, onPrepareEdits, onPreviewDocument }: {
   profile: CadSketchProfile;
+  /** The shape the draft opens at instead of the profile's, such as one a grip moved a generator to, which Apply confirms as any draft. */
+  initialGeometry?: CadProfile;
   document: CadDocument;
   /** Applies `profile` after `parameters`, confirming that a generator's regeneration removes `removedRelationIds`. */
   onApply(profile: CadSketchProfile, parameters: Readonly<Record<string, number>>, signal?: AbortSignal, removedRelationIds?: readonly string[]): CadEditCompletion;
@@ -431,8 +433,8 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   onPreviewDocument?(document: CadDocument | null, marks?: CadSketchDiagnosisMarks | null): void;
 }) {
   const submission = useCadEditSubmission();
-  const [draft, setDraft] = useState(profile);
-  const [changed, setChanged] = useState(false);
+  const [draft, setDraft] = useState(() => initialGeometry ? { ...profile, geometry: initialGeometry } : profile);
+  const [changed, setChanged] = useState(Boolean(initialGeometry));
   const [error, setError] = useState<string | null>(null);
   const [parameterDrafts, setParameterDrafts] = useState<Record<string, string>>({});
   const [bindingPending, setBindingPending] = useState(false);
@@ -441,7 +443,13 @@ export function CadProfileEditor({ profile, document, onApply, onCancel, onPendi
   if (baseline.current.profile !== profile || baseline.current.document !== document
     && document.features.some(feature => feature.kind === 'sketch' && cadSketchProfileViews(feature).includes(profile))) baseline.current = { profile, document };
   const accepted = baseline.current;
-  useEffect(() => { setDraft(profile); setChanged(false); setError(null); setParameterDrafts({}); }, [profile, accepted]);
+  // The opening shape holds for the revision the editor opened on; a later revision of the profile resets the draft to it.
+  const opening = useRef<{ readonly geometry: CadProfile; on?: object } | null>(initialGeometry ? { geometry: initialGeometry } : null);
+  useEffect(() => {
+    const open = opening.current && (opening.current.on ??= accepted) === accepted ? opening.current : null;
+    if (!open) opening.current = null;
+    setDraft(open ? { ...profile, geometry: open.geometry } : profile); setChanged(Boolean(open)); setError(null); setParameterDrafts({});
+  }, [profile, accepted]);
   useLayoutEffect(() => { onPendingChange(changed || bindingPending); }, [changed, bindingPending, onPendingChange]);
   const update = (next: CadSketchProfile) => { setDraft(next); setChanged(true); setError(null); };
   const parameterEdits = useMemo(() => Object.fromEntries(Object.entries(parameterDrafts).filter(([, text]) => text.trim() && Number.isFinite(Number(text)) && Math.abs(Number(text)) <= 1e9).map(([name, text]) => [name, Number(text)])), [parameterDrafts]);
