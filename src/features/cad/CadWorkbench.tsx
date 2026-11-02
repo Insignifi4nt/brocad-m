@@ -1271,7 +1271,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     setCanvasMenu({ kind: 'solid', document, version: props.documentVersion, buildId: build?.buildId ?? null, request });
   };
   const openSketchMenu = (request: CadSketchContextMenuRequest) => {
-    if (interactionState.current.locked || !sketch || !request.profileId || !sketch.profiles.some(profile => profile.id === request.profileId)) return;
+    // A generated shape's view opens the menu a saved profile does; the menu closes if the part, version or build changes.
+    if (interactionState.current.locked || !sketch || !request.profileId || !cadSketchProfileViews(sketch).some(profile => profile.id === request.profileId)) return;
     setCanvasMenu({ kind: 'sketch', document, version: props.documentVersion, buildId: build?.buildId ?? null, sketchId: sketch.id, request });
   };
   /**

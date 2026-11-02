@@ -1670,6 +1670,62 @@ describe('CAD sketch interaction', () => {
     expect(currentDocument).toEqual(initial);
   });
 
+  it('opens the canvas menu on a generated shape from a right-click on its interior and from the menu keys', async () => {
+    const plate = { id: 'plate', kind: 'generator', idPrefix: 'plate', name: 'Plate', construction: false,
+      geometry: { kind: 'rectangle', x: 20, y: 20, width: 50, height: 40, cornerRadius: 0 } } as const;
+    const hole = { id: 'hole', kind: 'generator', idPrefix: 'hole', name: 'Hole', construction: false, geometry: { kind: 'circle', x: 30, y: 30, radius: 2 } } as const;
+    const initial = parseCadDocument({ ...createCadDocument('Plate', 'generated-menu'), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [plate, hole] } }] });
+    const begin = vi.fn((id: string) => id);
+    await mount(initial, { build: null, buildState: 'idle', onBeginSketchEdit: begin });
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    const canvas = container.querySelector<SVGSVGElement>('[aria-label="Sketch drawing canvas"]'); if (!canvas) throw new Error('Sketch canvas missing.');
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, toJSON: () => ({}) });
+    let captured = false;
+    Object.assign(canvas, { setPointerCapture: () => { captured = true; }, hasPointerCapture: () => captured, releasePointerCapture: () => { captured = false; } });
+    const items = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map(item => item.textContent);
+    const title = () => document.querySelector('.cad-context-menu')?.getAttribute('aria-label')?.replace(/ actions$/, '');
+    const rightClick = async ([x, y]: readonly [number, number]) => {
+      const state = viewport().getState().view; if (!state || state.mode === 'solid') throw new Error('Sketch frame missing.');
+      const viewWidth = Number(canvas.getAttribute('viewBox')?.split(' ')[2]);
+      for (const type of ['pointerdown', 'pointerup']) {
+        const event = new MouseEvent(type, { button: 2, buttons: type === 'pointerup' ? 0 : 2, bubbles: true, cancelable: true,
+          clientX: 300 + (x - state.centerMm[0]) / viewWidth * 600, clientY: 200 - (y - state.centerMm[1]) / state.heightSpanMm * 400 });
+        Object.defineProperties(event, { pointerId: { value: 12 }, isPrimary: { value: true } });
+        await act(async () => canvas.dispatchEvent(event));
+      }
+    };
+    const generated = (id: string) => sketchGraph().relations.find(relation => relation.id === id);
+    const all = ['Copy outline to editable sketch', 'Configure profile', 'Toggle construction', 'Delete profile'];
+    // A right-click on the plate's interior, away from the hole and the edges, opens the plate's menu.
+    await rightClick([55, 50]);
+    expect(title()).toBe('Plate'); expect(items()).toEqual(all);
+    await click('Toggle construction');
+    expect(generated('plate')).toEqual({ ...plate, construction: true });
+    expect(sketchGraph().entities.filter(entity => entity.id.startsWith('plate_')).map(entity => entity.construction)).toEqual([true, true, true, true]);
+    expect(generated('hole')).toEqual(hole);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // The ContextMenu key opens the selected shape's menu where no edge or point lies at the view's centre, which Configure opens in the inspector.
+    await act(async () => viewport().apply({ kind: 'select-profile', profileId: 'hole' }));
+    await canvasKey('ContextMenu');
+    expect(title()).toBe('Hole'); expect(items()).toEqual(all);
+    await click('Configure profile');
+    expect(field('Radius').value).toBe('2'); expect(currentDocument).toEqual(initial);
+    // Shift+F10 does the same, and Delete takes the hole with its members while the plate stays.
+    await canvasKey('F10', true);
+    expect(title()).toBe('Hole');
+    await click('Delete profile');
+    expect(generated('hole')).toBeUndefined(); expect(generated('plate')).toEqual(plate);
+    expect(sketchGraph().points.some(point => point.id.startsWith('hole_'))).toBe(false);
+    await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+    // Copy outline opens its preview, and Apply makes an editable sketch of the plate's lines.
+    await rightClick([55, 50]);
+    await click('Copy outline to editable sketch'); await click('Apply');
+    const copy = currentDocument.features.at(-1); if (copy?.kind !== 'sketch' || !copy.graph || copy.id === 'sketch') throw new Error('Copied sketch missing.');
+    expect(copy.graph.relations.filter(relation => relation.kind === 'generator')).toEqual([]); expect(copy.graph.entities).toHaveLength(4);
+    expect(begin.mock.calls).toEqual([['sketch'], [copy.id]]);
+  });
+
   it('renders an existing feature candidate while preserving accepted geometry and restores the original model on Cancel', async () => {
     const preview = vi.fn<NonNullable<CadWorkbenchProps['onFeaturePreview']>>();
     await mount(solidDocument(), { build: topologyBuild, buildState: 'ready', onFeaturePreview: preview });
