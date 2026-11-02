@@ -161,6 +161,33 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(await read(h.session.getSnapshot().version)).toEqual(proposed);
   });
 
+  it("previews a generator in a sketch that uses a preceding sketch's line, with the cells and references the applied edit gives", async () => {
+    const h = await mount(), empty = h.session.getSnapshot(), sketch = (id: string, offset: number, graph: unknown) => ({ id, name: id, kind: 'sketch', suppressed: false, plane: 'XY', offset, profiles: [], graph });
+    const plate = (width: number) => ({ id: 'rect', kind: 'generator', idPrefix: 'rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width, height: 10, cornerRadius: 0 } });
+    await h.success('cad_edit_document', { expectedVersion: empty.version, edits: [
+      { kind: 'add-feature', feature: sketch('layout', 0, { points: [{ id: 'a', position: [50, 0] }, { id: 'b', position: [60, 0] }],
+        entities: [{ id: 'line', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }], relations: [] }) },
+      { kind: 'add-feature', feature: sketch('target', 5, { points: [], entities: [], relations: [plate(20)] }) },
+      { kind: 'use-sketch-entity', sketchId: 'target', sourceSketchId: 'layout', sourceEntityId: 'line', idPrefix: 'ref' },
+      // A triangle whose base ends are tied to the reference's ends.
+      { kind: 'append-sketch-entities', sketchId: 'target', geometry: { points: [{ id: 'm', position: [50, 0] }, { id: 'apex', position: [55, 10] }, { id: 'n', position: [60, 0] }],
+        entities: [['up', 'm', 'apex'], ['down', 'apex', 'n'], ['base', 'n', 'm']].map(([id, startPointId, endPointId]) => ({ id, kind: 'line', construction: false, startPointId, endPointId })),
+        relations: [{ id: 'at-m', kind: 'coincident', pointIds: ['m', 'ref_p0'] }, { id: 'at-n', kind: 'coincident', pointIds: ['n', 'ref_p1'] }] } }] });
+    const seeded = h.session.getSnapshot(), proposal = { generator: { generator: plate(30) } };
+    const cells = async (version: string, extra = {}) => {
+      const result = await h.success('cad_inspect_sketch_regions', { expectedVersion: version, sketchId: 'target', mode: 'graph-cells', ...extra });
+      const items = (result.items as { cellId: number; areaMm2: number }[]).sort((x, y) => x.areaMm2 - y.areaMm2), texts = [];
+      for (const item of items) texts.push((await h.success('cad_read_sketch_region_reference', { expectedVersion: version, sketchId: 'target', cellIds: [item.cellId], ...extra })).text);
+      return { areas: items.map(item => item.areaMm2), texts };
+    };
+    expect((await cells(seeded.version)).areas).toEqual([expect.closeTo(50, 9), expect.closeTo(200, 9)]);
+    const proposed = await cells(seeded.version, { proposal });
+    expect(proposed.areas).toEqual([expect.closeTo(50, 9), expect.closeTo(300, 9)]);
+    expect(h.session.getSnapshot()).toBe(seeded);
+    await h.success('cad_edit_document', { expectedVersion: seeded.version, edits: [{ kind: 'set-sketch-generator', sketchId: 'target', ...proposal.generator }] });
+    expect(await cells(h.session.getSnapshot().version)).toEqual(proposed);
+  });
+
   it('lists the generator edits and every shape a generator makes in the context inventory, each edit one the catalog describes', async () => {
     const h = await mount(), supported = object((await h.success('cad_get_context', {})).supported), entities = object(supported.sketchEntities);
     expect(entities.edits).toEqual(expect.arrayContaining(['set-sketch-generator', 'detach-sketch-generator']));

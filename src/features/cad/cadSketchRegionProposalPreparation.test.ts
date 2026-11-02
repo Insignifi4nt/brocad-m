@@ -101,6 +101,7 @@ describe('generator region proposals', () => {
     expect(inspectCadSketchRegions(applied, 'sketch', { mode: 'graph-cells' }).items)
       .toEqual((await read(document, confirmed)).items);
   });
+
   it("read a sketch that uses a preceding sketch's line with that sketch as the edit leaves it, solved for the parameter values", async () => {
     // The layout's line runs from (50, 0) to (span, 0). The target uses it as a reference, and a free triangle's base is tied to its ends.
     // The layout itself uses a line of an earlier sketch, so the target needs that sketch through the layout.
