@@ -114,6 +114,41 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(h.session.getSnapshot().document).toEqual(seeded.document);
   });
 
+  it('previews a linked offset and a circular pattern by proposal, then applies the same fields, confirming the removal the preview named', async () => {
+    const h = await mount(), empty = h.session.getSnapshot(), corners = [[0, 0], [10, 0], [10, 10], [0, 10]];
+    await h.success('cad_edit_document', { expectedVersion: empty.version, edits: [{ kind: 'set-parameter', name: 'gap', value: 2 },
+      { kind: 'add-feature', feature: { id: 'plate', name: 'Plate', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
+        points: [...corners.map((position, at) => ({ id: `p${at}`, position })), { id: 'a', position: [20, 0] }, { id: 'b', position: [25, 0] }, { id: 'u', position: [0, -25] }],
+        entities: [...corners.map((_, at) => ({ id: `l${at}`, kind: 'line', construction: false, startPointId: `p${at}`, endPointId: `p${(at + 1) % 4}` })),
+          { id: 's', kind: 'line', construction: true, startPointId: 'a', endPointId: 'b' }], relations: [] } } }] });
+    const seeded = h.session.getSnapshot(), query = { expectedVersion: seeded.version, sketchId: 'plate', mode: 'graph-cells' };
+    const offset = { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
+      geometry: { kind: 'offset', chain: [0, 1, 2, 3].map(at => ({ entityId: `l${at}`, reversed: false })), distance: 'gap' } };
+    const pattern = { id: 'spokes', kind: 'generator', idPrefix: 'spokes', construction: true, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 } };
+    // The offset's cells, read before anything is applied, at a trial gap.
+    const areas = (result: Record<string, unknown>) => (result.items as { areaMm2: number }[]).map(item => item.areaMm2).sort((x, y) => x - y);
+    const previewed = await h.success('cad_inspect_sketch_regions', { ...query, proposal: { generator: { generator: offset }, parameterValues: { gap: 3 } } });
+    expect(previewed).toMatchObject({ proposed: true, total: 2 }); expect(areas(previewed)).toEqual([100, 256 - 100]);
+    expect(h.session.getSnapshot()).toBe(seeded);
+    await h.success('cad_edit_document', { expectedVersion: seeded.version, edits: [{ kind: 'set-sketch-generator', sketchId: 'plate', generator: offset },
+      { kind: 'set-sketch-generator', sketchId: 'plate', generator: pattern }, { kind: 'set-sketch-relation', sketchId: 'plate', relation: { id: 'tie', kind: 'coincident', pointIds: ['u', 'spokes_i3_b'] } }] });
+    const applied = h.session.getSnapshot();
+    expect(areas(await h.success('cad_inspect_sketch_regions', { ...query, expectedVersion: applied.version }))).toEqual([96, 100]);
+    // Three spokes lose the fourth, which the free point is tied to: the preview names the relation before any edit is sent.
+    const fewer = { generator: { ...pattern, geometry: { ...pattern.geometry, count: 3 } } };
+    expect(await h.call('cad_inspect_sketch_regions', { ...query, expectedVersion: applied.version, proposal: { generator: fewer } })).toMatchObject({ ok: false, error: {
+      code: 'unconfirmed-sketch-generator-removals', message: expect.stringContaining('Circular pattern "spokes" no longer generates geometry'), details: { version: applied.version, relationIds: ['tie'], relationCount: 1 } } });
+    const confirmed = { ...fewer, removedRelationIds: ['tie'] };
+    expect(await h.success('cad_inspect_sketch_regions', { ...query, expectedVersion: applied.version, proposal: { generator: confirmed } })).toMatchObject({ proposed: true });
+    await h.success('cad_edit_document', { expectedVersion: applied.version, edits: [{ kind: 'set-sketch-generator', sketchId: 'plate', ...confirmed }] });
+    const sketch = h.session.getSnapshot().document.features[0];
+    if (sketch.kind !== 'sketch' || !sketch.graph) throw new Error('Missing plate.');
+    expect(sketch.graph.relations.map(relation => relation.id)).toEqual(['wall', 'spokes']);
+    expect(sketch.graph.relations.find(relation => relation.id === 'spokes')).toEqual({ ...pattern, geometry: { ...pattern.geometry, count: 3 } });
+    await h.success('cad_history', { expectedVersion: h.session.getSnapshot().version, direction: 'undo' });
+    expect(h.session.getSnapshot().document).toEqual(applied.document);
+  });
+
   it('lists the generator edits and every shape a generator makes in the context inventory, each edit one the catalog describes', async () => {
     const h = await mount(), supported = object((await h.success('cad_get_context', {})).supported), entities = object(supported.sketchEntities);
     expect(entities.edits).toEqual(expect.arrayContaining(['set-sketch-generator', 'detach-sketch-generator']));

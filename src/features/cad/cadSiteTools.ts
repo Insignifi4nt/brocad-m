@@ -21,7 +21,7 @@ import { CadSessionError } from './cadSession';
 import { CadPluginPackageSchema, fingerprintCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
 import type { CadController } from './useCadController';
 import type { CadSketchEditWarning } from './cadEditPreparation';
-import { CadToolDocumentEnvelope, CadToolEditDefinitions, CadToolEditEnvelope, CadToolPluginPackageEnvelope, CadToolSketchEnvelope, CadToolSketchConstraintsQuerySchema } from './cadToolSchemas';
+import { CadToolDocumentEnvelope, CadToolEditDefinitions, CadToolEditEnvelope, CadToolPluginPackageEnvelope, CadToolSketchEnvelope, CadToolSketchConstraintsQuerySchema, cadToolOpenObject } from './cadToolSchemas';
 import { pageCadSketchConstraints, summarizeCadSketchConstraintAnalysis } from './cadSketchConstraintInspection';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { CadSketchRegionProposalSchema, CadSketchTrimAtSchema, CadSketchExtendAtSchema, CadSketchRegionReadTargetSchema } from '@/domain/cad/cadSketchRegionInspection';
@@ -44,15 +44,16 @@ const id = Type.String({ minLength: 1, maxLength: 160 });
 const version = { expectedVersion: id };
 const pageFields = { ...workbenchPageFields, offset: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })) };
 /** Discovery names each proposal branch; execution validates the complete witnessed target. */
-const proposalTarget = (description: string) => Type.Object({}, { additionalProperties: true, description });
+const proposalTarget = cadToolOpenObject;
 const regionProposalEnvelope = Type.Object({ sketch: Type.Optional(CadToolSketchEnvelope),
   split: Type.Optional(proposalTarget('split-sketch-entity target fields.')),
   trim: Type.Optional(proposalTarget('trimPreview.target plus allocated trim-sketch-entity IDs.')),
   extend: Type.Optional(proposalTarget('extendPreview.target plus endPointId.')),
   offset: Type.Optional(proposalTarget('{source,distance,idPrefix}')),
   mirror: Type.Optional(proposalTarget('{entityIds,axisLineId,idPrefix}')),
+  generator: Type.Optional(proposalTarget('{generator,removedRelationIds}')),
   parameterValues: CadSketchRegionProposalSchema.anyOf[0].properties.parameterValues
-}, { additionalProperties: false, minProperties: 1, description: 'At most one of sketch, split, trim, extend, offset or mirror.' });
+}, { additionalProperties: false, minProperties: 1, description: 'At most one of sketch, split, trim, extend, offset, mirror or generator.' });
 const regionInspectionSchema = Type.Union([
   object({ ...version, sketchId: CadIdentifierSchema, ...pageFields, mode: Type.Optional(Type.Literal('graph-cells')), proposal: Type.Optional(CadSketchRegionProposalSchema) }),
   object({ ...version, sketchId: CadIdentifierSchema, ...pageFields, mode: Type.Optional(Type.Literal('graph-cells')), trimAt: CadSketchTrimAtSchema, axes: Type.Optional(CadSketchCutAxesSchema) }),
@@ -236,7 +237,7 @@ export function cadSiteTools(getController: () => CadController) {
     }, false, object({ ...version, package: CadToolPluginPackageEnvelope })),
     tool('cad_inspect_plane', 'Resolve the current active datum, sketch or curve world frame and signed offset in mm. Preserves authored placement; does not certify native solid precision. Finish pending workflows; stale/unavailable references and cancellation reject. Feature definitions: cad_describe_features.', object({ ...version, featureId: id }),
       (cad, input, signal) => cad.inspectPlane(input.featureId, input.expectedVersion, signal)),
-    tool('cad_inspect_sketch_regions', 'Inspect current or proposed closed sketch cells with local area/bounds. Default rows keep contour references; mode=graph-cells lists all graph-owned bounded cells, including intersections, as numeric cellId receipts to pack with cad_read_sketch_region_reference. Pin version, sketch, mode and identical proposal across pages. proposal previews one complete same-ID change, with optional numeric parameterValues; source preflight only. trimAt or extendAt return trimPreview/extendPreview; axes:[@h,@v] also cut. Complete targets per cad_describe_edits, reusing witnessed endpoint IDs, then inspect proposal.trim/extend with that exact target. offset and mirror reuse the exact edit request. Reads reserve no IDs; apply topology and consumer repairs atomically.', regionInspectionSchema, async (cad, input, signal) => {
+    tool('cad_inspect_sketch_regions', 'Inspect current or proposed closed sketch cells with local area/bounds. Default rows keep contour references; mode=graph-cells lists all graph-owned bounded cells, including intersections, as numeric cellId receipts to pack with cad_read_sketch_region_reference. Pin version, sketch, mode and identical proposal across pages. proposal previews one complete same-ID change, with optional numeric parameterValues; source preflight only. trimAt or extendAt return trimPreview/extendPreview; axes:[@h,@v] also cut. Complete targets per cad_describe_edits, reusing witnessed endpoint IDs, then inspect proposal.trim/extend with that exact target. offset, mirror and generator reuse the exact edit fields. Reads reserve no IDs; apply topology and consumer repairs atomically.', regionInspectionSchema, async (cad, input, signal) => {
       const { expectedVersion, mode, limit, offset = 0 } = input;
       const inspection = await cad.inspectSketchRegions(input.sketchId, input, expectedVersion, signal);
       const rows: ReadonlyArray<(typeof inspection.items)[number]> = inspection.items;

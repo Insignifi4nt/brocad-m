@@ -132,6 +132,23 @@ describe('CAD tool argument boundary and discovery', () => {
     }
     expect(controller).not.toHaveBeenCalled();
   });
+  it('takes a generator edit\'s own fields as a region proposal, refusing a malformed or mixed one before the draft', async () => {
+    const controller = vi.fn<() => CadController>(() => { throw new Error('Malformed generator reached controller.'); });
+    const tools = cadSiteTools(controller), reads = tools.filter(tool => tool.name === 'cad_inspect_sketch_regions' || tool.name === 'cad_read_sketch_region_reference');
+    const generator = { generator: { id: 'ring', kind: 'generator', idPrefix: 'ring', construction: false,
+      geometry: { kind: 'circular-pattern', seedIds: ['edge'], centerId: '@origin', count: 'n', angle: 360 } }, removedRelationIds: ['tie'] };
+    const definition = CadToolEditDefinitions.find(edit => edit.properties.kind.const === 'set-sketch-generator');
+    if (!definition) throw new Error('Generator edit definition missing.');
+    expect(Value.Check(definition, { kind: 'set-sketch-generator', sketchId: 'sketch', ...generator })).toBe(true);
+    for (const tool of reads) {
+      const query = { expectedVersion: 'current', sketchId: 'sketch', ...(tool.name === 'cad_read_sketch_region_reference' ? { cellIds: [0] } : { mode: 'graph-cells' }) };
+      expect(Value.Check(tool.inputSchema, { ...query, proposal: { generator, parameterValues: { n: 6 } } })).toBe(true);
+      for (const proposal of [{ generator, offset: {} }, { generator: generator.generator }, { generator: { ...generator, sketchId: 'sketch' } },
+        { generator: { ...generator, generator: { ...generator.generator, idPrefix: 'ring_1' } } }, { generator: { ...generator, removedRelationIds: ['tie', 'tie'] } }])
+        expect(await tool.execute({ ...query, proposal })).toMatchObject({ ok: false, error: { code: 'INVALID_ARGUMENT' } });
+    }
+    expect(controller).not.toHaveBeenCalled();
+  });
   it('exposes the same strict detached offset request in edit discovery and mutually exclusive region proposals', async () => {
     const controller = vi.fn<() => CadController>(() => { throw new Error('Malformed offset reached controller.'); });
     const tools = cadSiteTools(controller), reads = tools.filter(tool => tool.name === 'cad_inspect_sketch_regions' || tool.name === 'cad_read_sketch_region_reference');
