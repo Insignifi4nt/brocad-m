@@ -8,10 +8,12 @@ import ts from '@typescript/typescript6';
  * The `CadError` codes code can raise, found without running it. From each root it follows, through the source of `src`, every name a
  * walked function uses: the nearest declaration in scope, an import to the declaration it names, members of constant objects and
  * namespace imports, `this` members, and a method called on another receiver, through the declarations TypeScript gives that member of
- * the receiver's type, and the members that override it in classes extending its class. A member only an interface, a type or an
- * abstract class declares runs the members of that name of the source's object literals and classes whose type fits the receiver's. A
- * member declared outside the source, by the platform or a library, holds no code. A used class runs its constructor and field
- * initializers; its methods are walked only when called. An overload signature stands for its implementation.
+ * the receiver's type, and the members that override it in classes below its class, at any depth, whose instances can be values of the
+ * receiver's type. A member only an interface, a type or an abstract class declares runs the members of that name of the source's object
+ * literals and classes whose type fits the receiver's. A member declared outside the source, by the platform or a library, holds no code.
+ * A used class runs its constructor and field initializers; its methods are walked only when called. An overload signature stands for its
+ * implementation. A method read as a value and passed to a call or held by a constant is walked as if called there, since it may be called
+ * wherever it goes; testing whether one is there runs nothing, and any other use of one is reported.
  *
  * It collects the first argument of each `CadError` and the `code` of each object literal, written plainly, quoted or as a computed
  * literal key, which carries a refusal to the `CadError` an inspection raises. A code is read through:
@@ -364,20 +366,38 @@ export class CadSourceIndex {
         if (file === undefined) continue;
         const owner = ownerName(declaration), through = owner && `${file}:${owner}`;
         if (!isSignature(declaration)) members.set(declaration, { file, node: declaration, through });
-        // A class that extends the declaring one may override the member; any object or class whose type fits the receiver's may implement a signature.
+        // A class below the declaring one, at any depth, may override the member, and any object or class may implement a signature; either
+        // runs only when an instance of it can be a value of the receiver's type.
         for (const candidate of candidates) if (candidate.node !== declaration && !members.has(candidate.node)
-          && (this.inherits(candidate.node, name, declaration) || isSignature(declaration) && this.fits(candidate.node, receiver))) members.set(candidate.node, { ...candidate, through });
+          && (isSignature(declaration) || this.overrides(candidate.node, name, declaration)) && this.fits(candidate.node, receiver)) members.set(candidate.node, { ...candidate, through });
       }
       found = [...members.values()];
     }
     this.calls.set(access, found);
     return found;
   }
-  /** Whether `member`'s class implements or extends a type whose member `name` is `declaration`. */
-  private inherits(member: ts.Node, name: string, declaration: ts.Declaration): boolean {
+  /**
+   * Whether `member` overrides `declaration`: its class implements or extends a type whose member `name` is `declaration`, or is a member
+   * of a class above it that overrides `declaration` in turn.
+   */
+  private overrides(member: ts.Node, name: string, declaration: ts.Declaration, seen = new Set<ts.Node>()): boolean {
     const owner = member.parent;
-    return ts.isClassLike(owner) && !!owner.heritageClauses?.some(clause => clause.types.some(type =>
-      this.propertyDeclarations(this.checker.getTypeAtLocation(type), name).includes(declaration)));
+    if (!ts.isClassLike(owner) || seen.has(member)) return false;
+    seen.add(member);
+    return !!owner.heritageClauses?.some(clause => clause.types.some(type => this.propertyDeclarations(this.checker.getTypeAtLocation(type), name)
+      .some(inherited => inherited === declaration || this.overrides(inherited, name, declaration, seen))));
+  }
+  /**
+   * Whether reading `access` gives a function of the source: a member of the source whose type can be called or, for a receiver whose type
+   * declares no such member, a member of that name of the source's objects and classes that can be.
+   */
+  callableValue(access: ts.PropertyAccessExpression): boolean {
+    const declarations = this.checker.getSymbolAtLocation(access.name)?.declarations ?? [];
+    if (!declarations.length) return this.membersNamed(access.name.text).some(member => this.callable((member.node as { name?: ts.Node }).name ?? member.node));
+    return declarations.some(declaration => this.paths.has(declaration.getSourceFile())) && this.callable(access);
+  }
+  private callable(node: ts.Node): boolean {
+    return this.checker.getNonNullableType(this.checker.getTypeAtLocation(node)).getCallSignatures().length > 0;
   }
   /** Whether the object literal or class instance that has `member` can be a value of `receiver`'s type. */
   private fits(member: ts.Node, receiver: ts.Type): boolean {
@@ -567,7 +587,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       for (const element of owner?.members ?? []) if (propertyName(element.name) === name) push({ file, node: element });
       return;
     }
-    if (!(ts.isCallExpression(access.parent) && access.parent.expression === access)) return;
+    // A method passed to a call or held by a constant may be called wherever it goes, so it is walked as if called here; any other use of
+    // one is reported. Reading a member that holds no function, or writing one, runs nothing.
+    const use = methodUse(access);
+    if (use === 'write' || use === 'tested' || use !== 'called' && !index.callableValue(access)) return;
+    if (use === 'other') { unexpanded.add(`${file}: ${access.getText()}, a method used as a value the walk does not follow`); return; }
     // The receiver's type says which members a call runs; when it cannot, any of the source's of that name might.
     const called = index.calledMembers(access);
     if (called) for (const found of called) { if (!found.through || !stop.has(found.through)) push(found); }
@@ -618,6 +642,28 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     for (const variant of variants) codes.add(variant);
   }
   return { codes, unexpanded: [...unexpanded].sort(), taken: [...taken].sort(), declarations };
+}
+
+/**
+ * How a member read is used: `called` directly, through parentheses or a non-null assertion, or through `call` or `apply`; `passed` to a
+ * call or held by a constant, which may call it; `write` as an assignment's target; `tested` for presence, as a condition, the operand of
+ * `!` or `typeof`, a side of a comparison or the left side of `&&`, none of which gives the function on; or `other`.
+ */
+function methodUse(access: ts.PropertyAccessExpression): 'called' | 'passed' | 'write' | 'tested' | 'other' {
+  let outer: ts.Expression = access;
+  while (ts.isParenthesizedExpression(outer.parent) || ts.isNonNullExpression(outer.parent) || ts.isAsExpression(outer.parent) || ts.isSatisfiesExpression(outer.parent)) outer = outer.parent;
+  const parent = outer.parent;
+  if (ts.isCallExpression(parent) && parent.expression === outer) return 'called';
+  if (ts.isPropertyAccessExpression(parent) && parent.expression === outer && (parent.name.text === 'call' || parent.name.text === 'apply')
+    && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) return 'called';
+  if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.arguments?.includes(outer)) return 'passed';
+  if (ts.isVariableDeclaration(parent) && parent.initializer === outer && ts.isIdentifier(parent.name) && (ts.getCombinedNodeFlags(parent) & ts.NodeFlags.Const) !== 0) return 'passed';
+  if (ts.isBinaryExpression(parent) && parent.left === outer && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) return 'write';
+  if ((ts.isConditionalExpression(parent) || ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) && (ts.isConditionalExpression(parent) ? parent.condition : parent.expression) === outer
+    || ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken || ts.isTypeOfExpression(parent)
+    || ts.isBinaryExpression(parent) && ([ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(parent.operatorToken.kind)
+      || parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && parent.left === outer)) return 'tested';
+  return 'other';
 }
 
 /** The name a function is called by and the declaration it resolves to: a function declaration, or a variable holding the function. */

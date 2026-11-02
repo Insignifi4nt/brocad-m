@@ -94,6 +94,44 @@ describe('CAD diagnostic reach', () => {
       export function check(timer: Timer) { timer.start(); }`).codes).toEqual(['countdown-refusal', 'timer-refusal']);
   });
 
+  it('follows overrides through every level of subclass, and only those a receiver of that type can be', () => {
+    // A subclass of a subclass that overrides again runs its own method.
+    expect(reach(`class Base { run() { throw new CadError('base-code', ''); } }
+      class Middle extends Base { override run() { throw new CadError('middle-code', ''); } }
+      class Leaf extends Middle { override run() { throw new CadError('leaf-code', ''); } }
+      export function check(value: Base) { value.run(); }`)).toEqual({ codes: ['base-code', 'leaf-code', 'middle-code'], unexpanded: [] });
+    // So does one below a level that inherits the method unchanged.
+    expect(reach(`class Base { run() { throw new CadError('base-code', ''); } }
+      class Middle extends Base { readonly middle = true; }
+      class Leaf extends Middle { override run() { throw new CadError('leaf-code', ''); } }
+      export function check(value: Base) { value.run(); }`).codes).toEqual(['base-code', 'leaf-code']);
+    // A sibling's override is no method a receiver of the narrower type runs; a subclass of that type's still is.
+    expect(reach(`class Base { run() { throw new CadError('base-code', ''); } }
+      class Left extends Base { readonly left = true; }
+      class Right extends Base { override run() { throw new CadError('right-code', ''); } }
+      class LeftLeaf extends Left { override run() { throw new CadError('left-leaf-code', ''); } }
+      export function check(value: Left) { value.run(); }`)).toEqual({ codes: ['base-code', 'left-leaf-code'], unexpanded: [] });
+  });
+
+  it('follows a method passed on as a value, given to a call or held by a constant, and reports any other use of one', () => {
+    const method = `class Step { run() { throw new CadError('step-code', ''); } readonly name = 'step'; }`;
+    // A callback, a function a helper calls, and a constant holding the method.
+    expect(reach(`${method} export function check(value: Step) { [1].forEach(value.run); }`)).toEqual({ codes: ['step-code'], unexpanded: [] });
+    expect(reach(`${method} function invoke(run: () => void) { run(); } export function check(value: Step) { invoke(value.run); }`)).toEqual({ codes: ['step-code'], unexpanded: [] });
+    expect(reach(`${method} export function check(value: Step) { const run = value.run; run(); }`)).toEqual({ codes: ['step-code'], unexpanded: [] });
+    // A non-null assertion or parentheses around a direct call, and an explicit call through call or apply.
+    expect(reach(`${method} export function check(value: Step | undefined) { value!.run!(); (value!.run)(); value!.run.call(value); }`)).toEqual({ codes: ['step-code'], unexpanded: [] });
+    // Testing whether an optional method is there gives it nowhere.
+    expect(reach(`class Optional { run?(): void } export function check(value: Optional) { if (value.run) {} return !value.run || typeof value.run === 'function' || (value.run && 1) || (value.run ? 1 : 0); }`)).toEqual({ codes: [], unexpanded: [] });
+    // Reading a field that holds no function is no use of a method.
+    expect(reach(`${method} export function check(value: Step) { return value.name.length; }`)).toEqual({ codes: [], unexpanded: [] });
+    // Any other use is reported rather than read as holding no code.
+    expect(reach(`${method} export function check(value: Step) { return { later: value.run }; }`)).toEqual({ codes: [], unexpanded: [`${FILE}: value.run, a method used as a value the walk does not follow`] });
+    expect(reach(`${method} export function check(value: Step) { let run = value.run; run = () => {}; run(); }`).unexpanded).toEqual([`${FILE}: value.run, a method used as a value the walk does not follow`]);
+    // A receiver whose type declares nothing is reported as before.
+    expect(reach(`${method} export function check(value: any) { [1].forEach(value.run); }`).unexpanded).toEqual([`${FILE}: value.run, a method its receiver's type does not declare`]);
+  });
+
   it('runs the members of the objects and classes that fit an interface\'s, unless the interface is stopped', () => {
     const source = `interface Step { run(): void }
       const STEPS: Step[] = [{ run() { throw new CadError('step-refusal', ''); } }];
