@@ -241,18 +241,20 @@ export function isCadSketchOriginPair(graph: CadSketchGraph, relations: readonly
   return identity(first.pointId) === identity(second.pointId);
 }
 /**
- * What the canvas status line says about the selected dimensions and relations; selection never opens the editor. X and Y held at 0 on
- * one point, drawn as one Coincident glyph with the origin, read as that glyph.
+ * What the canvas status line says about the selected dimensions and relations, rows of the relations list without a mark among them;
+ * selection never opens the editor. X and Y held at 0 on one point, drawn as one Coincident glyph with the origin, read as that glyph. A
+ * linear pattern detaches through its editor, so it is never counted.
  */
 export function cadSketchDimensionSelectionStatus(graph: CadSketchGraph | undefined, ids: readonly string[]): string | null {
   if (!graph || !ids.length) return null;
-  const relations = ids.flatMap(id => graph.relations.filter(item => item.id === id && isCadSketchAnnotationRelation(item)));
+  // Each relation once, though a row and its mark may both name it.
+  const named = new Set(ids), relations = graph.relations.filter(item => named.has(item.id) && item.kind !== 'linear-pattern');
   if (!relations.length) return null;
   const dimensions = relations.filter(isCadSketchDimensionRelation);
   if (isCadSketchOriginPair(graph, relations)) return `${CAD_SKETCH_ORIGIN_PAIR_NAME} selected · Delete removes`;
   if (relations.length === 1) return dimensions.length ? `${cadSketchDimensionName(graph, dimensions[0])} selected · Double-click or Enter edits · Delete removes`
-    : `${cadSketchRelationName(graph, relations[0])} selected · Delete removes`;
-  return `${cadSketchAnnotationCount(graph, ids)} selected · Delete removes them`;
+    : `${cadSketchRelationName(graph, relations[0])} selected · Delete ${relations[0].kind === 'external-reference' ? 'detaches' : 'removes'}`;
+  return `${cadSketchAnnotationCount(graph, relations.map(relation => relation.id))} selected · Delete removes them`;
 }
 /**
  * "1 shape, 2 dimensions and 1 relation": the relations the IDs name, as the status line, a Delete command and its dialog count them. A

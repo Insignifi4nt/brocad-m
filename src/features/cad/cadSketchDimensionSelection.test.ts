@@ -271,6 +271,15 @@ describe('sketch dimension selection', () => {
     expect(cadSketchAnnotationCount(shaped, ['link', 'parallel-free'])).toBe('2 relations');
     expect(cadSketchAnnotationCount(shaped, ['size', 'rise'])).toBe('2 dimensions');
     expect(cadSketchDimensionSelectionStatus(shaped, ['ring', 'parallel-free'])).toBe('1 shape and 1 relation selected · Delete removes them');
+    // The status line counts rows without a mark too: a source reference, which Delete detaches, but never a linear pattern, which detaches through its editor.
+    expect(cadSketchDimensionSelectionStatus(shaped, ['ring', 'length', 'parallel-free', 'link'])).toBe('1 shape, 1 dimension and 2 relations selected · Delete removes them');
+    expect(cadSketchDimensionSelectionStatus(shaped, ['link'])).toBe('Linked reference selected · Delete detaches');
+    // A row and the mark it selected name one relation.
+    expect(cadSketchDimensionSelectionStatus(shaped, ['ring', 'ring'])).toBe('Circle selected · Delete removes');
+    const patterned: CadSketchGraph = { ...shaped, relations: [...shaped.relations, { id: 'row', kind: 'linear-pattern', seed: { entityId: 'base' }, count: 2,
+      direction: { kind: 'vector', x: 0, y: 1 }, spacing: 10, occurrences: [] } as unknown as CadSketchGraph['relations'][number]] };
+    expect(cadSketchDimensionSelectionStatus(patterned, ['row'])).toBeNull();
+    expect(cadSketchDimensionSelectionStatus(patterned, ['row', 'link', 'length'])).toBe('1 dimension and 1 relation selected · Delete removes them');
   });
 
   it('selects the relations of one glyph together: a click replaces the selection, Shift adds them or, when all are selected, removes them', () => {
