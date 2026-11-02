@@ -10,10 +10,11 @@ import { cadSketchGeneratorKind, cadSketchGeneratorOutlines, cadSketchGenerators
 // The shapes people configure as profiles: a sketch's saved legacy profiles, then each generator of a profile's geometry, seen as the
 // profile it replaces. The profile editor, the plugin panel, the parameter bindings and CAM notes read generators through these views,
 // so a generator is configured as a profile was, and a view's change is written back to its generator's record. A generator whose shape
-// no profile had, such as a regular polygon, has no view.
+// no profile had, such as a regular polygon, a circular pattern or a linked offset, has no view.
 
 export type CadSketchProfileGenerator = CadSketchGenerator & { readonly geometry: CadProfile };
-const isProfileGenerator = (generator: CadSketchGenerator): generator is CadSketchProfileGenerator => generator.geometry.kind !== 'regular-polygon';
+const NOT_PROFILES: ReadonlySet<CadSketchGenerator['geometry']['kind']> = new Set(['regular-polygon', 'circular-pattern', 'offset']);
+const isProfileGenerator = (generator: CadSketchGenerator): generator is CadSketchProfileGenerator => !NOT_PROFILES.has(generator.geometry.kind);
 
 const views = new WeakMap<CadSketchGenerator, CadSketchProfile>();
 /**

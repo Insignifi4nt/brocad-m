@@ -5,6 +5,9 @@ import { applyCadEdits, CadEditSchema, type CadEdit } from '@/domain/cad/cadOper
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { prepareCadSketchProfileCopy } from '@/domain/cad/cadSketchProfileCopy';
 import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
+import type { CadSketchFeature } from '@/domain/cad/cadDocument';
+import type { CadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import { cadAnalyticPathMetrics } from '@/domain/cad/cadSketchGeometry';
 import { resolveCadSketchPlacement } from '@/domain/cad/cadDatumPlanes';
 import { prepareCadDocumentFrames } from '@/domain/cad/cadDocumentFrames';
 import { prepareCadSketchCells } from '@/domain/cad/cadSketchRegionInspection';
@@ -39,15 +42,25 @@ describe('document-level independent profile copy preparation', () => {
     expect(JSON.stringify(document)).toBe(before);
   });
 
-  it('copies a generated outline as the same editable sketch as the legacy profile it replaces', async () => {
+  it('copies a generated outline as its members with the joints and equal radii they were made with, the outline the legacy profile copies', async () => {
     const legacy = profileCopySlotPart(), source = legacy.features[0]; if (source.kind !== 'sketch') throw new Error('Profile source missing.');
     const [profile] = source.profiles;
     const generated = parseCadDocument({ ...legacy, schemaVersion: 2, features: [{ ...source, profiles: [], graph: { points: [], entities: [],
       relations: [{ id: profile.id, kind: 'generator', idPrefix: profile.id, name: profile.name, construction: false, geometry: profile.geometry }] } }] });
     const edit = { kind: 'copy-sketch-profile', ...slotProfileCopyRequest } as const;
-    const copied = (await prepareCadEdits(generated, [edit], runtime)).document;
+    const prepared = await prepareCadEdits(generated, [edit], runtime), copied = prepared.document;
     expect(copied.features[0]).toEqual(generated.features[0]);
-    expect(copied.features[1]).toEqual((await prepareCadEdits(legacy, [edit], runtime)).document.features[1]);
+    const graph = (copied.features[1] as CadSketchFeature).graph!, bare = ((await prepareCadEdits(legacy, [edit], runtime)).document.features[1] as CadSketchFeature).graph!;
+    // The slot's sides, caps and centres under the copy's prefix, holding what a drawn slot holds; the legacy copy has bare edges.
+    expect(graph.entities.map(entity => entity.id)).toEqual(['copy_e0', 'copy_a0', 'copy_e1', 'copy_a1']);
+    expect(graph.relations.map(relation => [relation.id, relation.kind])).toEqual([['copy_j0', 'tangent-joint'], ['copy_j1', 'tangent-joint'], ['copy_j2', 'tangent-joint'],
+      ['copy_j3', 'tangent-joint'], ['copy_q0', 'equal-radius']]);
+    expect(graph.relations[0]).toEqual({ id: 'copy_j0', kind: 'tangent-joint', endpoints: [{ entityId: 'copy_e0', pointId: 'copy_t1' }, { entityId: 'copy_a0', pointId: 'copy_t1' }] });
+    expect(bare.relations).toEqual([]);
+    const metrics = (copy: CadSketchGraph) => cadAnalyticPathMetrics({ kind: 'path', segments: compileCadSketchGraph(copy, {}).cycles[0].path });
+    const [made, drawn] = [metrics(graph), metrics(bare)];
+    expect(made.signedArea).toBeCloseTo(drawn.signedArea, 9); expect(made.length).toBeCloseTo(drawn.length, 9);
+    expect(prepared.sketchDiagnostics.find(entry => entry.sketchId === 'copy')?.diagnostics).toMatchObject({ status: 'success', conflictingIds: [], redundantIds: [], partiallyRedundantIds: [] });
   });
 
   it('uses the preceding parameter intent and retains shared datum placement and existing source consumers', async () => {

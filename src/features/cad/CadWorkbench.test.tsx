@@ -417,6 +417,42 @@ describe('CAD sketch interaction', () => {
     const tip = sketchGraph().points.find(point => point.id === 'poly_v0')!.position;
     expect(tip[0]).toBeCloseTo(0, 9); expect(tip[1]).toBeCloseTo(8, 9);
   });
+  it('edits a circular pattern\'s count and centre and a linked offset\'s distance in place from one of their members', async () => {
+    const pattern = { id: 'pat', kind: 'generator', idPrefix: 'pat', construction: false, geometry: { kind: 'circular-pattern', seedIds: ['s'], centerId: '@origin', count: 4, angle: 360 } } as const;
+    const offset = { id: 'off', kind: 'generator', idPrefix: 'off', construction: false,
+      geometry: { kind: 'offset', chain: ['l0', 'l1', 'l2', 'l3'].map(entityId => ({ entityId, reversed: false })), distance: 1 } } as const;
+    const corners = [[40, 0], [50, 0], [50, 10], [40, 10]] as const;
+    await mount(parseCadDocument({ ...createCadDocument('Generated', 'generated-copies'), parameters: { gap: 3 }, schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Outline',
+      plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: {
+        points: [{ id: 'a', position: [5, 0] }, { id: 'b', position: [10, 0] }, { id: 'k', position: [0, -10] }, ...corners.map((position, index) => ({ id: `p${index}`, position: [...position] as [number, number] }))],
+        entities: [{ id: 's', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' },
+          ...corners.map((_, index) => ({ id: `l${index}`, kind: 'line' as const, construction: false, startPointId: `p${index}`, endPointId: `p${(index + 1) % 4}` }))],
+        relations: [pattern, offset] } }] }));
+    const generated = (id: string) => sketchGraph().relations.find(relation => relation.id === id);
+    const at = (id: string) => sketchGraph().points.find(point => point.id === id)!.position;
+    await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+    await act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: 'pat_i2_s' } }));
+    await click('Edit shape');
+    await input(field('Count'), '3');
+    const centre = container.querySelector<HTMLSelectElement>('select[aria-label="Center"]'); if (!centre) throw new Error('Center missing.');
+    // The seeds' own points may be the centre; the pattern's copies may not.
+    const centres = [...centre.options].map(option => option.value);
+    expect(centres).toEqual(expect.arrayContaining(['@origin', 'a', 'b', 'k', 'p0'])); expect(centres.some(id => id.startsWith('pat_'))).toBe(false);
+    await act(async () => { centre.value = 'k'; centre.dispatchEvent(new Event('change', { bubbles: true })); });
+    await click('Apply');
+    expect(generated('pat')).toEqual({ ...pattern, geometry: { ...pattern.geometry, count: 3, centerId: 'k' } });
+    expect(sketchGraph().entities.filter(entity => entity.id.startsWith('pat_')).map(entity => entity.id)).toEqual(['pat_i1_s', 'pat_i2_s']);
+    // The first copy turns the seed's end, (10, 10) from k, a third of a turn about k.
+    const close = (point: readonly unknown[], x: number, y: number) => { expect(point[0]).toBeCloseTo(x, 9); expect(point[1]).toBeCloseTo(y, 9); };
+    const turn = 2 * Math.PI / 3;
+    close(at('pat_i1_b'), 10 * Math.cos(turn) - 10 * Math.sin(turn), -10 + 10 * Math.sin(turn) + 10 * Math.cos(turn));
+    await act(async () => viewport().apply({ kind: 'select-sketch-geometry', selection: { kind: 'entity', id: 'off_e_l2' } }));
+    await click('Edit shape');
+    await input(field('Distance'), 'gap');
+    await click('Apply');
+    expect(generated('off')).toEqual({ ...offset, geometry: { ...offset.geometry, distance: 'gap' } });
+    close(at('off_j_l3'), 37, -3); close(at('off_j_l1'), 53, 13);
+  });
   it('keeps its mirror axis chooser alive through an owned keyboard menu without replacing the copied source selection', async () => {
     const source = pairedBoreMirrorPart(); await mount(source);
     await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));

@@ -8,13 +8,15 @@ import { CadError } from './cadError';
 import { isCadImportData } from './cadImportData';
 import { evaluateCadScalar } from './cadExpression';
 import { cadAnalyticPathMetrics, cadProfileToEntities, resolveCadSketchContours } from './cadSketchGeometry';
-import { parseCadSketchGraph, type CadSketchGraphEntity } from './cadSketchGraph';
+import { parseCadSketchGraph, type CadSketchGraphEntity, type CadSketchGraphPoint, type CadSketchGraphRelation } from './cadSketchGraph';
 import { compileCadSketchGraph } from './cadSketchGraphGeometry';
 import { createArcSegment, createCircleSegment, createLineSegment } from '@/domain/path-intel/segments';
 import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 import { deepFreezeCadData } from './cadDeepFreeze';
 import { CAD_PRECISION } from '@/domain/precision/cadPrecision';
-import { cadSketchProfileViews } from './sketch-generators/cadSketchProfileViews';
+import { cadSketchGeneratorMembers } from './sketch-generators/cadSketchGenerators';
+import { cadSketchProfileGenerator, cadSketchProfileViews } from './sketch-generators/cadSketchProfileViews';
+import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRemapPiece } from './sketch-relations/cadSketchRelationRemap';
 
 export const CadSketchProfileCopyRequestSchema = Type.Object({
   sourceSketchId: CadIdentifierSchema, profileId: CadIdentifierSchema, newSketchId: CadIdentifierSchema,
@@ -62,7 +64,45 @@ function checkSupport(source: PathSegment, result: PathSegment): void {
   }
 }
 
-/** One evaluated outline in a new graph sketch, retaining only its placement dependency. */
+/** A sketch id is at most this long. */
+const ID_LENGTH_MAX = 96;
+/**
+ * The members of the generator a profile view stands for, renamed into the copy: `<idPrefix>_<key>` for the generator's `<prefix>_<key>`.
+ * Every relation among them comes too, the generator's own as `<idPrefix>_<key>` and the user's as `<idPrefix>_u<n>`, so the copy keeps
+ * the directions, joints and equal sizes the shape was made with; a relation that reaches other geometry, or generates, stays behind.
+ * Undefined for a legacy profile, or a generator whose members the sketch does not hold.
+ */
+function generatedCopy(sketch: CadSketchFeature, profileId: string, idPrefix: string): { readonly points: readonly CadSketchGraphPoint[];
+  readonly entities: readonly CadSketchGraphEntity[]; readonly relations: readonly CadSketchGraphRelation[] } | undefined {
+  const generator = cadSketchProfileGenerator(sketch, profileId), graph = sketch.graph;
+  if (!generator || !graph) return undefined;
+  const members = cadSketchGeneratorMembers(graph, generator);
+  if (!members.entityIds.length) return undefined;
+  const from = generator.idPrefix.length + 1, pointIds = new Set(members.pointIds), entityIds = new Set(members.entityIds), relationIds = new Set(members.relationIds);
+  const renamed = (id: string) => {
+    const result = `${idPrefix}_${id.slice(from)}`;
+    return result.length > ID_LENGTH_MAX ? invalid(`The copy cannot name "${id}" within ${ID_LENGTH_MAX} characters. Use a shorter identifier prefix.`) : result;
+  };
+  const points = graph.points.filter(point => pointIds.has(point.id)).map(point => ({ id: renamed(point.id), position: point.position }));
+  const entities = graph.entities.filter(entity => entityIds.has(entity.id)).map((entity): CadSketchGraphEntity => {
+    switch (entity.kind) {
+      case 'line': return { ...entity, id: renamed(entity.id), startPointId: renamed(entity.startPointId), endPointId: renamed(entity.endPointId) };
+      case 'arc': return { ...entity, id: renamed(entity.id), centerPointId: renamed(entity.centerPointId), startPointId: renamed(entity.startPointId), endPointId: renamed(entity.endPointId) };
+      case 'circle': return { ...entity, id: renamed(entity.id), centerPointId: renamed(entity.centerPointId) };
+      default: { const unknown: never = entity; return invalid(`A generated ${(unknown as { kind: string }).kind} cannot be copied yet.`); }
+    }
+  });
+  const curves = new Map<string, CadSketchRemapPiece>([...entityIds].map(id => [id, { entityId: renamed(id), interval: [0, 1], orientation: 'same' }]));
+  const relations = copiedCadSketchRelations(copyCadSketchRelations(graph, { kind: 'exact', curves, points: new Map([...pointIds].map(id => [id, renamed(id)])),
+    relationId: (relation, index) => relationIds.has(relation.id) ? renamed(relation.id) : `${idPrefix}_u${index}` }));
+  return { points, entities, relations };
+}
+
+
+/**
+ * One evaluated outline in a new graph sketch, retaining only its placement dependency. A generated outline is copied as its members,
+ * with the relations among them; a legacy profile as the edges of its outline alone.
+ */
 export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: CadSketchProfileCopyRequest & {
   readonly sketch: CadSketchFeature; readonly parameters: Readonly<Record<string, number>>;
 }): CadSketchProfileCopyPreparation {
@@ -91,10 +131,12 @@ export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: 
     const sweep = resolved.kind === 'slot' ? Math.PI : entity.sweepRadians;
     return createArcSegment({ ...common, center: entity.center, radius: entity.radius, start: entity.start, end: entity.end, sweepRadians: sweep, clockwise: sweep < 0 });
   });
-  const points: { id: string; position: readonly [number, number] }[] = [], entities: CadSketchGraphEntity[] = [];
+  const { idPrefix } = request, generated = generatedCopy(sketch, request.profileId, idPrefix);
+  const points: CadSketchGraphPoint[] = [...generated?.points ?? []], entities: CadSketchGraphEntity[] = [...generated?.entities ?? []];
   const addPoint = (id: string, point: Point2) => { points.push({ id, position: position(point) }); return id; };
-  const { idPrefix } = request;
-  if (sourceEdges.length === 1 && sourceEdges[0].kind === 'circle') {
+  if (generated) {
+    // Its members, checked when they were generated, and checked below as one cycle of the outline's size.
+  } else if (sourceEdges.length === 1 && sourceEdges[0].kind === 'circle') {
     // The display resolver may omit a very short slot span. A detached copy
     // must not turn a genuinely noncircular authored slot into a circle.
     if (resolved.kind === 'slot' && resolved.length !== resolved.width) return precision();
@@ -114,11 +156,11 @@ export function prepareCadSketchProfileCopy({ sketch, parameters, ...request }: 
         : { ...common, kind: 'arc', centerPointId: addPoint(`${idPrefix}_c${index}`, edge.center), direction: edge.clockwise ? 'cw' : 'ccw' });
     });
   }
-  const graph = parseCadSketchGraph({ points, entities, relations: [] }), compiled = compileCadSketchGraph(graph, {});
+  const graph = parseCadSketchGraph({ points, entities, relations: generated?.relations ?? [] }), compiled = compileCadSketchGraph(graph, {});
   if (compiled.cycles.length !== 1 || compiled.cycles[0].sourceRefs.length !== entities.length
     || compiled.openEntityIds.length || compiled.branchedEntityIds.length || compiled.arrangementEntityIds.length) return invalid('Copy needs one simple closed analytic cycle.');
   const byId = new Map(compiled.segments.map(segment => [segment.id, segment]));
-  for (const edge of sourceEdges) { const copy = byId.get(edge.id); if (!copy) return precision(); checkSupport(edge, copy); }
+  if (!generated) for (const edge of sourceEdges) { const copy = byId.get(edge.id); if (!copy) return precision(); checkSupport(edge, copy); }
   const sourceSegments = sourceEdges.map(pathSegment), before = cadAnalyticPathMetrics({ kind: 'path', segments: sourceSegments });
   const after = cadAnalyticPathMetrics({ kind: 'path', segments: compiled.cycles[0].path });
   const tolerance = cadPathClosureTolerance(sourceEdges.flatMap(edge => [edge.start, edge.end]));

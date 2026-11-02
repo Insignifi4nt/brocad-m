@@ -7,6 +7,7 @@ import { profileCopyDxfPart, dxfProfileCopyRequest } from './cadSketchProfileCop
 import { CAD_STAR_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugins';
 import { Value } from '@sinclair/typebox/value';
 import { CadSketchProfileCopyRequestSchema } from '../cadSketchProfileCopy';
+import { expandCadSketchGenerators } from '../sketch-generators/cadSketchGenerators';
 
 function source(geometry: CadProfile): CadSketchFeature {
   return { id: 'source', kind: 'sketch', name: 'Original', suppressed: false, plane: 'XZ', offset: ' sourceOffset ',
@@ -22,6 +23,21 @@ function measure(sketch: CadSketchFeature) {
 }
 
 describe('independent editable profile copy', () => {
+  it('copies a generated rectangle as its members with the relations among them, leaving those that reach other geometry', () => {
+    const graph = expandCadSketchGenerators({ points: [{ id: 'u', position: [30, 0] }], entities: [], relations: [
+      { id: 'outline', kind: 'generator', idPrefix: 'g', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } },
+      { id: 'across', kind: 'reference-dimension', measurement: { kind: 'point-distance', pointIds: ['g_p0', 'g_p2'] } },
+      { id: 'reach', kind: 'reference-dimension', measurement: { kind: 'point-distance', pointIds: ['g_p1', 'u'] } }] }, {});
+    const sketch: CadSketchFeature = { ...source({ kind: 'circle', x: 0, y: 0, radius: 1 }), profiles: [], graph };
+    const copy = prepareCadSketchProfileCopy({ sketch, parameters: { sourceOffset: 0 }, ...request }).sketch.graph!;
+    expect(copy.points.map(point => [point.id, point.position])).toEqual([['copy_p0', [0, 0]], ['copy_p1', [20, 0]], ['copy_p2', [20, 10]], ['copy_p3', [0, 10]]]);
+    expect(copy.entities[0]).toEqual({ id: 'copy_e0', kind: 'line', construction: false, startPointId: 'copy_p0', endPointId: 'copy_p1' });
+    // In graph order: the user's reference first, then the rectangle's own directions; the measure that reaches "u" stays behind.
+    expect(copy.relations).toEqual([{ id: 'copy_u0', kind: 'reference-dimension', measurement: { kind: 'point-distance', pointIds: ['copy_p0', 'copy_p2'] } },
+      { id: 'copy_r0', kind: 'horizontal', pointIds: ['copy_p0', 'copy_p1'] }, { id: 'copy_r1', kind: 'vertical', pointIds: ['copy_p1', 'copy_p2'] },
+      { id: 'copy_r2', kind: 'horizontal', pointIds: ['copy_p2', 'copy_p3'] }, { id: 'copy_r3', kind: 'vertical', pointIds: ['copy_p3', 'copy_p0'] }]);
+  });
+
   it('copies a rotated parametric slot as a separate numeric graph with shared authored joints and inherited placement', () => {
     const sketch = source({ kind: 'slot', x: '11.00', y: '-7.00', length: ' slotLength ', width: '10.0000', angle: '30.00' });
     const before = JSON.stringify(sketch), parameters = { slotLength: 30, sourceOffset: 2.5 };

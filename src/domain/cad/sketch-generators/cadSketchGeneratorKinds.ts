@@ -1,14 +1,18 @@
 import type { CadProfile } from '../cadDocument';
 import { CadError } from '../cadError';
 import { evaluateCadScalar } from '../cadExpression';
-import { cadOrderedCurveEntities, type ResolvedCadPathSegment } from '../cadAnalyticSegments';
+import { cadOrderedCurveEntities, cadPathClosureTolerance, type ResolvedCadPathSegment } from '../cadAnalyticSegments';
 import type { CadSketchGeneratorGeometry, CadSketchGraphEntity, CadSketchGraphPoint, CadSketchGraphRelation } from '../cadSketchGraph';
-import { checkCadSketchGeneratorShape, resolveCadProfile, type ResolvedCadProfile } from '../cadSketchGeometry';
+import { cadAnalyticPathMetrics, checkCadSketchGeneratorShape, resolveCadProfile, type ResolvedCadProfile } from '../cadSketchGeometry';
+import { cadSketchOffsetPathSegment, offsetCadSketchLoop } from '../cadSketchLoopOffset';
 import { resolveCadPluginOutline, type CadPluginOutlineParts, type CadPluginProfile } from '../plugins/cadPlugins';
-import type { CadSketchOperandSignature, CadSketchRelationIntent } from '../sketch-relations/cadSketchRelationTypes';
+import { cadSketchCurveTraits } from '../sketch-relations/cadSketchCurveCapabilities';
+import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRelationCopy, type CadSketchRemapPiece } from '../sketch-relations/cadSketchRelationRemap';
+import type { CadSketchOperandSignature, CadSketchOperandSlot, CadSketchRelationIntent } from '../sketch-relations/cadSketchRelationTypes';
 import { CAD_PRECISION, cadSupportedLength } from '@/domain/precision/cadPrecision';
+import { createArcSegment, createCircleSegment, createLineSegment } from '@/domain/path-intel/segments';
 import { CAD_SKETCH_ENTRY_ID_MAX } from './cadSketchGeneratorSchema';
-import type { Point2 } from '@/domain/path-intel/types';
+import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 
 // Each kind of generator: what it reads and what it generates. Generation keys every point, edge and relation by its place in the
 // shape, never by coordinates or by its place among samples, so regenerating after an input change keeps each id `<idPrefix>_<key>`
@@ -23,11 +27,23 @@ export interface CadSketchGeneratedGeometry {
   readonly entities: readonly CadSketchGraphEntity[];
   readonly relations: readonly CadSketchGraphRelation[];
 }
-/** What generation reads beyond the record: the parameters, and the sketch's lines an operand names. */
+/**
+ * What generation reads beyond the record: the parameters, and the sketch geometry its operands name, stored or generated before it,
+ * with the relations among that geometry.
+ */
 export interface CadSketchGeneratorContext {
   readonly parameters: Readonly<Record<string, number>>;
   /** The evaluated ends of the line `id` names, an axis as a unit step from the origin; undefined when it names no line. */
   line(id: string): { readonly start: Point2; readonly end: Point2 } | undefined;
+  /** The evaluated position of the point `id` names, the origin's too; undefined when it names no point. */
+  point(id: string): Point2 | undefined;
+  /** The curve `id` names, as the sketch holds it; undefined when it names none. An axis is no curve here. */
+  curve(id: string): CadSketchGraphEntity | undefined;
+  /**
+   * The sketch's relations that name only geometry among `ids`, and the origin and axes besides, in id order, so a copy reads them alike however
+   * the graph holds them: what a copy of that geometry may carry. A relation that owns geometry, such as a generator, is not among them.
+   */
+  relationsAmong(ids: ReadonlySet<string>): readonly CadSketchGraphRelation[];
 }
 /** A generator's inputs, evaluated: `key` holds everything generation reads, so equal keys generate equal geometry. */
 export interface CadSketchGeneratorEvaluation {
@@ -35,15 +51,16 @@ export interface CadSketchGeneratorEvaluation {
   readonly build: (id: (key: string) => string, construction: boolean) => CadSketchGeneratedGeometry;
   /**
    * The closed outline its edges draw, as the legacy profile shape it was checked as: closed, of positive area and free of
-   * self-intersection. Its region reads as that shape does.
+   * self-intersection. Its region reads as that shape does. A generator that draws no one closed outline, such as a pattern, has none:
+   * its edges join the sketch's contours as drawn edges do.
    */
-  readonly shape: () => ResolvedCadProfile;
+  readonly shape?: () => ResolvedCadProfile;
 }
 export interface CadSketchGeneratorKind<G extends CadSketchGeneratorGeometry> {
   /** Sentence-case name of what it generates, as people and agents are told: a plugin's package name. */
   readonly label: (geometry: G) => string;
-  /** The sketch elements it reads, as operand slots in `operands` order: one signature for the kind. */
-  readonly signature: CadSketchOperandSignature;
+  /** The sketch elements it reads, as operand slots in `operands` order: one for each, so a list of curves has one slot for each curve. */
+  readonly signature: (geometry: G) => CadSketchOperandSignature;
   readonly operands: (geometry: G) => readonly string[];
   readonly withOperands: (geometry: G, ids: readonly string[]) => G;
   /** Its inputs evaluated now, refused with the reason when out of range; `name` names the generator in a refusal. */
@@ -336,10 +353,11 @@ function profileEvaluation(geometry: ResolvedCadProfile, name: string, ids?: rea
 }
 
 const NO_OPERANDS: CadSketchOperandSignature = Object.freeze({ slots: Object.freeze([]) });
+const noOperands = () => NO_OPERANDS;
 /** A parametric profile kind: its geometry evaluates exactly as a legacy profile's does. */
 function profileKind<K extends 'rectangle' | 'circle' | 'slot'>(label: string): CadSketchGeneratorKind<Of<K>> {
   return {
-    label: () => label, signature: NO_OPERANDS, operands: () => [], withOperands: geometry => geometry,
+    label: () => label, signature: noOperands, operands: () => [], withOperands: geometry => geometry,
     evaluate: (geometry, context, name) => profileEvaluation(resolveCadProfile(geometry as CadProfile, context.parameters), name)
   };
 }
@@ -350,7 +368,7 @@ function profileKind<K extends 'rectangle' | 'circle' | 'slot'>(label: string): 
  */
 function listedKind<K extends 'polygon' | 'path'>(label: string, entry: string, reshaped: CadSketchGeneratorKind<Of<K>>['reshaped']): CadSketchGeneratorKind<Of<K>> {
   return {
-    label: () => label, signature: NO_OPERANDS, operands: () => [], withOperands: geometry => geometry,
+    label: () => label, signature: noOperands, operands: () => [], withOperands: geometry => geometry,
     evaluate: (geometry, context, name) => {
       const { ids } = geometry as Listed;
       if (ids && ids.length !== entriesOf(geometry as Listed).length) throw invalid(`${name} needs one entry id for each ${entry}.`);
@@ -374,7 +392,7 @@ function packageText(plugin: object): string {
  * again; an input that does not evaluate is left to the plugin to refuse.
  */
 const plugin: CadSketchGeneratorKind<Of<'plugin'>> = {
-  label: geometry => geometry.package.name, signature: NO_OPERANDS, operands: () => [], withOperands: geometry => geometry,
+  label: geometry => geometry.package.name, signature: noOperands, operands: () => [], withOperands: geometry => geometry,
   evaluate: (geometry, context, name) => {
     let values: string;
     try { values = JSON.stringify(Object.entries(geometry.inputs).map(([input, value]) => [input, evaluateCadScalar(value, context.parameters)])); }
@@ -384,6 +402,8 @@ const plugin: CadSketchGeneratorKind<Of<'plugin'>> = {
   }
 };
 
+const REGULAR_POLYGON_SIGNATURE = Object.freeze<CadSketchOperandSignature>({ generates: true,
+  slots: [{ role: 'Direction', accepts: ['line'], refusal: { code: 'invalid-sketch-generator', message: 'A regular polygon needs a line or the H or V axis for its direction.' } }] });
 /** At most this many sides, as a recipe plugin may generate at most 2048 vertices. */
 export const CAD_SKETCH_REGULAR_POLYGON_MAX_SIDES = 1024;
 /**
@@ -392,7 +412,7 @@ export const CAD_SKETCH_REGULAR_POLYGON_MAX_SIDES = 1024;
  */
 const regularPolygon: CadSketchGeneratorKind<Of<'regular-polygon'>> = {
   label: () => 'Regular polygon',
-  signature: { generates: true, slots: [{ role: 'Direction', accepts: ['line'], refusal: { code: 'invalid-sketch-generator', message: 'A regular polygon needs a line or the H or V axis for its direction.' } }] },
+  signature: () => REGULAR_POLYGON_SIGNATURE,
   operands: geometry => [geometry.directionId],
   withOperands: (geometry, [directionId]) => ({ ...geometry, directionId }),
   evaluate: (geometry, context, name) => {
@@ -419,6 +439,217 @@ const regularPolygon: CadSketchGeneratorKind<Of<'regular-polygon'>> = {
   }
 };
 
+/** A sketch id is at most this long, as `CadIdentifierSchema` allows. */
+const SKETCH_ID_LENGTH_MAX = 96;
+/** `id`, refusing a member id longer than a sketch id may be, naming the generator. */
+function checkedIds(id: (key: string) => string, name: string): (key: string) => string {
+  return key => {
+    const result = id(key);
+    if (result.length > SKETCH_ID_LENGTH_MAX) throw invalid(`${name} cannot name its member "${key}" within ${SKETCH_ID_LENGTH_MAX} characters. Give it a shorter id prefix.`);
+    return result;
+  };
+}
+/** The points a curve is drawn through: its ends, then its centre, as its traits give them. */
+function curvePointIds(curve: CadSketchGraphEntity): readonly string[] {
+  const { ends, centre } = cadSketchCurveTraits(curve);
+  return centre === null ? ends ?? [] : [...ends ?? [], centre];
+}
+/**
+ * `curve` copied as `id` through `point`, which names the copy of each of its points, with the evaluated `radius` of a circle: a kind
+ * of curve added to the graph says here how it is copied.
+ */
+function copiedCurve(curve: CadSketchGraphEntity, id: string, point: (pointId: string) => string, construction: boolean, radius: number): CadSketchGraphEntity {
+  switch (curve.kind) {
+    case 'line': return { id, kind: 'line', construction, startPointId: point(curve.startPointId), endPointId: point(curve.endPointId) };
+    case 'arc': return { id, kind: 'arc', construction, centerPointId: point(curve.centerPointId), startPointId: point(curve.startPointId), endPointId: point(curve.endPointId), direction: curve.direction };
+    case 'circle': return { id, kind: 'circle', construction, centerPointId: point(curve.centerPointId), radius };
+    default: { const unknown: never = curve; throw invalid(`A ${(unknown as { kind: string }).kind} cannot be copied yet.`); }
+  }
+}
+/** Curves with the points they are drawn through, at their evaluated positions, and the relations among them: what a copy reads. */
+type Inputs = CadSketchGeneratedGeometry;
+function inputsOf(curves: readonly CadSketchGraphEntity[], context: CadSketchGeneratorContext, name: string): Inputs {
+  const points: CadSketchGraphPoint[] = [], seen = new Set<string>();
+  for (const curve of curves) for (const id of curvePointIds(curve)) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const at = context.point(id);
+    if (!at) throw invalid(`${name} cannot find the point "${id}" that "${curve.id}" is drawn through.`);
+    points.push({ id, position: [at.x, at.y] });
+  }
+  for (const curve of curves) seen.add(curve.id);
+  return { points, entities: curves, relations: context.relationsAmong(seen) };
+}
+/** The curves `ids` name, refused naming the generator and the curve's role when one is no curve of the sketch. */
+function curvesOf(ids: readonly string[], context: CadSketchGeneratorContext, name: string, role: string): readonly CadSketchGraphEntity[] {
+  return ids.map(id => {
+    const curve = context.curve(id);
+    if (!curve) throw invalid(`${name} needs a curve of the sketch for ${role} "${id}".`);
+    return curve;
+  });
+}
+/** Adds the relations among `inputs` that `copy` keeps, by each kind's copy rule. */
+function copyRelations(output: Output, inputs: Inputs, copy: CadSketchRelationCopy): void {
+  if (inputs.relations.length) output.relations.push(...copiedCadSketchRelations(copyCadSketchRelations(inputs, copy)));
+}
+
+/** One slot for each of `count` curves, which must differ, then the slots `after` them. */
+function curveListSignature(count: number, slot: CadSketchOperandSlot, repeated: string, after: readonly CadSketchOperandSlot[] = []): CadSketchOperandSignature {
+  return Object.freeze<CadSketchOperandSignature>({ generates: true, slots: Object.freeze([...Array.from({ length: count }, () => slot), ...after]),
+    distinct: { slots: Array.from({ length: count }, (_, index) => index), refusal: { code: 'invalid-sketch-generator', message: repeated } } });
+}
+const curveSlot = (role: string, message: string): CadSketchOperandSlot =>
+  Object.freeze<CadSketchOperandSlot>({ role, accepts: ['curve'], needs: ['movable'], refusal: { code: 'invalid-sketch-generator', message } });
+const SEED_SLOT = curveSlot('Seed', 'A circular pattern copies curves of the sketch.');
+const CENTRE_SLOT = Object.freeze<CadSketchOperandSlot>({ role: 'Centre', accepts: ['point'],
+  refusal: { code: 'invalid-sketch-generator', message: 'A circular pattern turns about a point of the sketch or the origin.' } });
+const LINK_SLOT = curveSlot('Chain curve', 'An offset follows a closed chain of curves of the sketch.');
+
+/** At most this many occurrences of a circular pattern, its seeds' own among them. */
+export const CAD_SKETCH_CIRCULAR_PATTERN_MAX_COUNT = 360;
+/** At most this many curves a circular pattern copies in all its occurrences. */
+export const CAD_SKETCH_CIRCULAR_PATTERN_MAX_COPIES = 4096;
+/**
+ * A circular pattern. Occurrence 0 is the seeds themselves; occurrence k copies each seed curve turned about the centre k steps, as the
+ * curve `i<k>_<seed id>` through points `i<k>_<point id>`, so seeds that share a point share its copy, and copies each relation among the
+ * seeds that a pattern keeps, a reference dimension, as `i<k>_<relation id>`. Keys hold the occurrence and what it copies, never a place
+ * among the seeds, so a count change keeps the occurrences that stay, and a seed list change the copies of the seeds that stay. A copy is
+ * construction when the pattern or its seed is.
+ */
+const circularPattern: CadSketchGeneratorKind<Of<'circular-pattern'>> = {
+  label: () => 'Circular pattern',
+  signature: geometry => curveListSignature(geometry.seedIds.length, SEED_SLOT, 'A circular pattern copies each seed once.', [CENTRE_SLOT]),
+  operands: geometry => [...geometry.seedIds, geometry.centerId],
+  withOperands: (geometry, ids) => ({ ...geometry, seedIds: ids.slice(0, geometry.seedIds.length), centerId: ids[geometry.seedIds.length] }),
+  evaluate: (geometry, context, name) => {
+    const count = evaluateCadScalar(geometry.count, context.parameters), angle = evaluateCadScalar(geometry.angle, context.parameters);
+    if (!Number.isInteger(count) || count < 1 || count > CAD_SKETCH_CIRCULAR_PATTERN_MAX_COUNT)
+      throw invalid(`${name} needs a whole number of occurrences from 1 to ${CAD_SKETCH_CIRCULAR_PATTERN_MAX_COUNT}, the seeds' own among them.`);
+    if (!Number.isFinite(angle) || angle === 0 || Math.abs(angle) > 360) throw invalid(`${name} needs a nonzero angle of at most 360 degrees either way.`);
+    const copies = (count - 1) * geometry.seedIds.length;
+    if (copies > CAD_SKETCH_CIRCULAR_PATTERN_MAX_COPIES)
+      throw invalid(`${name} would copy ${copies} curves; a circular pattern copies at most ${CAD_SKETCH_CIRCULAR_PATTERN_MAX_COPIES}.`);
+    const centre = context.point(geometry.centerId);
+    if (!centre) throw invalid(`${name} needs a point of the sketch or the origin to turn about.`);
+    const seeds = curvesOf(geometry.seedIds, context, name, 'its seed'), inputs = inputsOf(seeds, context, name);
+    const radii = seeds.map(seed => seed.kind === 'circle' ? evaluateCadScalar(seed.radius, context.parameters) : 0);
+    // A full turn spaces the occurrences a turn over the count apart; a shorter angle puts the last at its end.
+    const step = (Math.abs(angle) === 360 ? angle / count : count > 1 ? angle / (count - 1) : 0) * Math.PI / 180;
+    const key = `circular-pattern\u0000${JSON.stringify([centre.x, centre.y, count, step, radii, inputs])}`;
+    return { key, build: (id, construction) => {
+      const member = checkedIds(id, name), output = new Output(member, construction);
+      for (let k = 1; k < count; k++) {
+        const cos = Math.cos(step * k), sin = Math.sin(step * k), points = new Map<string, string>(), curves = new Map<string, CadSketchRemapPiece>();
+        for (const { id: pointId, position } of inputs.points) {
+          const dx = (position[0] as number) - centre.x, dy = (position[1] as number) - centre.y;
+          points.set(pointId, output.point(`i${k}_${pointId}`, [centre.x + dx * cos - dy * sin, centre.y + dx * sin + dy * cos]));
+        }
+        seeds.forEach((seed, at) => {
+          const copy = copiedCurve(seed, member(`i${k}_${seed.id}`), pointId => points.get(pointId)!, construction || seed.construction, radii[at]);
+          output.entities.push(copy);
+          curves.set(seed.id, { entityId: copy.id, interval: [0, 1], orientation: 'same' });
+        });
+        copyRelations(output, inputs, { kind: 'pattern', curves, points, relationId: relation => member(`i${k}_${relation.id}`) });
+      }
+      return output.result();
+    } };
+  }
+};
+
+/** A chain link as a path segment, the way the chain runs it. */
+function chainSegment(curve: CadSketchGraphEntity, reversed: boolean, index: number, at: (id: string) => Point2, radius: number): PathSegment {
+  const common = { id: curve.id, source: { sourceEntityIndex: index, sourceEntityType: curve.kind, layer: null, exact: true } };
+  switch (curve.kind) {
+    case 'line': {
+      const start = at(curve.startPointId), end = at(curve.endPointId);
+      return createLineSegment({ ...common, start: reversed ? end : start, end: reversed ? start : end });
+    }
+    case 'arc': {
+      const start = at(curve.startPointId), end = at(curve.endPointId);
+      return createArcSegment({ ...common, center: at(curve.centerPointId), start: reversed ? end : start, end: reversed ? start : end,
+        clockwise: (curve.direction === 'cw') !== reversed });
+    }
+    case 'circle': return createCircleSegment({ ...common, center: at(curve.centerPointId), radius });
+    default: { const unknown: never = curve; throw invalid(`An offset cannot follow a ${(unknown as { kind: string }).kind} yet.`); }
+  }
+}
+/** A closed loop as the profile shape it draws. */
+function resolvedLoop(edges: readonly PathSegment[]): ResolvedCadProfile {
+  const [first] = edges;
+  return first.kind === 'circle' ? { kind: 'circle', x: first.center.x, y: first.center.y, radius: first.radius } : { kind: 'path', segments: edges.map(cadSketchOffsetPathSegment) };
+}
+/** The signed area a closed chain encloses, positive when it runs counterclockwise. */
+function chainArea(edges: readonly PathSegment[]): number {
+  if (edges.length === 1 && edges[0].kind === 'circle') return Math.PI * edges[0].radius ** 2;
+  return cadAnalyticPathMetrics({ kind: 'path', segments: edges.map(cadSketchOffsetPathSegment) }).signedArea;
+}
+/**
+ * A linked offset: its closed chain offset by the distance, outward when it is positive, whichever way the chain runs, and generated
+ * again whenever the chain moves. Link `<id>` gives the edge `e_<id>`, its arc's centre `c_<id>` and the joint `j_<id>` where it ends
+ * and the next link's edge starts, so keys follow the chain's curves, not their places in it. Each relation among the chain that an
+ * offset keeps, a direction, an angle or a smooth joint, is copied as `r_<relation id>`. A chain left open or crossing itself, or one it
+ * cannot offset exactly, is refused with the reason.
+ */
+const offset: CadSketchGeneratorKind<Of<'offset'>> = {
+  label: () => 'Offset',
+  signature: geometry => curveListSignature(geometry.chain.length, LINK_SLOT, 'An offset\'s chain runs along each curve once.'),
+  operands: geometry => geometry.chain.map(link => link.entityId),
+  withOperands: (geometry, ids) => ({ ...geometry, chain: geometry.chain.map((link, at) => ({ ...link, entityId: ids[at] })) }),
+  evaluate: (geometry, context, name) => {
+    const distance = evaluateCadScalar(geometry.distance, context.parameters);
+    if (!Number.isFinite(distance) || distance === 0) throw invalid(`${name} needs a nonzero distance.`);
+    const links = geometry.chain.map(link => link.entityId), curves = curvesOf(links, context, name, 'its chain curve'), inputs = inputsOf(curves, context, name);
+    if (curves.length > 1 && curves.some(curve => !cadSketchCurveTraits(curve).ends)) throw invalid(`${name} needs a circle alone, or a chain of curves with ends.`);
+    const radii = curves.map(curve => curve.kind === 'circle' ? evaluateCadScalar(curve.radius, context.parameters) : 0);
+    const key = `offset\u0000${JSON.stringify([distance, geometry.chain, radii, inputs])}`;
+    const get = checkedOnce(key, () => {
+      const positions = new Map(inputs.points.map(point => [point.id, { x: point.position[0] as number, y: point.position[1] as number }]));
+      const edges = curves.map((curve, index) => chainSegment(curve, geometry.chain[index].reversed, index, id => positions.get(id)!, radii[index]));
+      if (edges[0].kind !== 'circle') edges.forEach((edge, index) => {
+        const next = edges[(index + 1) % edges.length];
+        if (Math.hypot(edge.end.x - next.start.x, edge.end.y - next.start.y) > cadPathClosureTolerance([edge.end, next.start]))
+          throw invalid(`${name} needs a closed chain, but "${links[index]}" does not end where "${links[(index + 1) % links.length]}" starts.`);
+      });
+      const area = chainArea(edges);
+      if (!Number.isFinite(area) || area === 0) throw invalid(`${name} needs a chain that encloses an area.`);
+      try { checkCadSketchGeneratorShape(resolvedLoop(edges), 'chain'); }
+      catch (error) { throw invalid(`${name} needs a simple closed chain: ${error instanceof Error ? error.message : 'it cannot be checked.'}`); }
+      // To the right of a counterclockwise chain is outward.
+      let result: readonly PathSegment[];
+      try { result = offsetCadSketchLoop(edges, area > 0 ? distance : -distance).edges; }
+      catch (error) {
+        // The reason a detached offset of the chain gives, with its code, named for the generator.
+        if (error instanceof CadError) throw new CadError(error.code, `${name}: ${error.message}`);
+        throw invalid(`${name}: the chain cannot be offset exactly.`);
+      }
+      const after = chainArea(result);
+      if (Math.sign(after) !== Math.sign(area) || (Math.abs(after) > Math.abs(area)) !== (distance > 0))
+        throw invalid(`${name} cannot keep its offset on the side it asks for: the chain is too small for it.`);
+      return { shape: resolvedLoop(result) };
+    }, name), shape = () => get().shape;
+    return { key, shape, build: (id, construction) => {
+      const outline = shape(), member = checkedIds(id, name), output = new Output(member, construction);
+      const points = new Map<string, string>(), copies = new Map<string, CadSketchRemapPiece>(), count = links.length;
+      if (outline.kind === 'circle') {
+        const centre = output.point(`c_${links[0]}`, [outline.x, outline.y]);
+        output.circle(`e_${links[0]}`, centre, outline.radius);
+        points.set(curvePointIds(curves[0])[0], centre);
+      } else if (outline.kind === 'path') {
+        // Link i runs from the joint after the link before it to its own, about its own centre when it is an arc.
+        pathOutput(output, outline.segments, index => ({ segment: `e_${links[index]}`, joint: `j_${links[index]}`, centre: `c_${links[index]}` }));
+        curves.forEach((curve, index) => {
+          const [from, to, centre] = curvePointIds(curve), start = member(`j_${links[(index + count - 1) % count]}`), end = member(`j_${links[index]}`);
+          points.set(geometry.chain[index].reversed ? to : from, start); points.set(geometry.chain[index].reversed ? from : to, end);
+          if (centre !== undefined) points.set(centre, member(`c_${links[index]}`));
+        });
+      }
+      geometry.chain.forEach(link => copies.set(link.entityId, { entityId: member(`e_${link.entityId}`), interval: [0, 1], orientation: link.reversed ? 'reversed' : 'same' }));
+      copyRelations(output, inputs, { kind: 'offset', curves: copies, points, relationId: relation => member(`r_${relation.id}`) });
+      return output.result();
+    } };
+  }
+};
+
 export const CAD_SKETCH_GENERATOR_KINDS: { readonly [K in CadSketchGeneratorGeometry['kind']]: CadSketchGeneratorKind<Of<K>> } = {
   plugin,
   rectangle: profileKind<'rectangle'>('Rectangle'),
@@ -426,5 +657,7 @@ export const CAD_SKETCH_GENERATOR_KINDS: { readonly [K in CadSketchGeneratorGeom
   polygon: listedKind<'polygon'>('Polygon', 'point', (previous, next) => rejoined(previous, next, 1, 'e')),
   path: listedKind<'path'>('Path', 'segment', (previous, next) => rejoined(previous, next, -1, 's')),
   slot: profileKind<'slot'>('Slot'),
-  'regular-polygon': regularPolygon
+  'regular-polygon': regularPolygon,
+  'circular-pattern': circularPattern,
+  offset
 };

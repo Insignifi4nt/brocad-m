@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { CloseIcon, ConfirmIcon } from '@wire-edm/icons-react';
@@ -6,7 +6,7 @@ import type { CadDocument, CadScalar, CadSketchFeature } from '@/domain/cad/cadD
 import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 import { cadSketchGeneratorName } from '@/domain/cad/sketch-generators/cadSketchGenerators';
-import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_V_AXIS_ID } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
+import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_ORIGIN_ID, CAD_SKETCH_V_AXIS_ID } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
 import { userFacingMessage } from '@/lib/userMessage';
 import { ScalarField, SelectField } from './CadFields';
 import { CadContextHelp } from './CadContextHelp';
@@ -17,22 +17,33 @@ import { cadPreviewMarks, useCadPreparedPreview, type CadPrepareEdits } from './
 import { useCadEditSubmission, type CadEditCompletion } from './useCadEditSubmission';
 import type { CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
 
-type RegularPolygon = Extract<CadSketchGenerator['geometry'], { kind: 'regular-polygon' }>;
+type Geometry = CadSketchGenerator['geometry'];
+/** The generators with no profile form, whose inputs this editor sets. */
+type InputGeometry = Extract<Geometry, { kind: 'regular-polygon' | 'circular-pattern' | 'offset' }>;
+const hasInputs = (geometry: Geometry): geometry is InputGeometry =>
+  geometry.kind === 'regular-polygon' || geometry.kind === 'circular-pattern' || geometry.kind === 'offset';
 
 /** A typed number as the number, and anything else, such as a parameter expression, as the expression. */
 const scalarOf = (value: CadScalar): CadScalar => typeof value === 'string' && value.trim() && Number.isFinite(Number(value)) ? Number(value) : value;
+function typed(geometry: Geometry): Geometry {
+  switch (geometry.kind) {
+    case 'regular-polygon': return { ...geometry, x: scalarOf(geometry.x), y: scalarOf(geometry.y), radius: scalarOf(geometry.radius), sides: scalarOf(geometry.sides) };
+    case 'circular-pattern': return { ...geometry, count: scalarOf(geometry.count), angle: scalarOf(geometry.angle) };
+    case 'offset': return { ...geometry, distance: scalarOf(geometry.distance) };
+    default: return geometry;
+  }
+}
 
 /** The edit that sets `generator`'s inputs, confirming the relations `removedRelationIds` its regeneration removes. */
 export function cadSketchGeneratorInputEdits(sketchId: string, generator: CadSketchGenerator, removedRelationIds?: readonly string[]): readonly CadEdit[] {
-  const geometry = generator.geometry.kind === 'regular-polygon' ? { ...generator.geometry, x: scalarOf(generator.geometry.x), y: scalarOf(generator.geometry.y),
-    radius: scalarOf(generator.geometry.radius), sides: scalarOf(generator.geometry.sides) } : generator.geometry;
-  return [{ kind: 'set-sketch-generator', sketchId, generator: { ...generator, geometry }, ...removedRelationIds?.length ? { removedRelationIds } : {} }];
+  return [{ kind: 'set-sketch-generator', sketchId, generator: { ...generator, geometry: typed(generator.geometry) }, ...removedRelationIds?.length ? { removedRelationIds } : {} }];
 }
 
 /**
- * The inputs of a generator that has no profile form, a regular polygon: its centre, radius and number of sides, each a number or a
- * parameter expression, and the line or axis its first vertex lies along. Its geometry regenerates in place, keeping its id; relations
- * on vertices and edges it stops making are shown first and removed only when Apply confirms them.
+ * The inputs of a generator that has no profile form, each a number or a parameter expression: a regular polygon's centre, radius and
+ * number of sides, and the line or axis its first vertex lies along; a circular pattern's count, angle and centre; a linked offset's
+ * distance. Its geometry regenerates in place, keeping its id; members it stops making, and the relations on them, are shown first and
+ * removed only when Apply confirms them.
  */
 export function CadSketchGeneratorInputsEditor({ generator, sketch, document, onApply, onCancel, onPendingChange, onPrepareEdits, onPreviewDocument }: {
   readonly generator: CadSketchGenerator;
@@ -68,16 +79,34 @@ export function CadSketchGeneratorInputsEditor({ generator, sketch, document, on
     return () => onPreviewDocument?.(null);
   }, [preview, onPreviewDocument]);
   const geometry = draft.geometry;
-  if (geometry.kind !== 'regular-polygon') return null;
+  if (!hasInputs(geometry)) return null;
   const graph = sketch.graph;
   const members = `${generator.idPrefix}_`;
-  const lines = graph?.entities.filter(entity => entity.kind === 'line' && !entity.id.startsWith(members)) ?? [];
-  const directions = [{ value: CAD_SKETCH_H_AXIS_ID, label: 'H axis' }, { value: CAD_SKETCH_V_AXIS_ID, label: 'V axis' },
-    ...lines.map(line => ({ value: line.id, label: graph ? describeCadSketchConstraintSource(graph, { kind: 'entity', id: line.id }).label : line.id }))];
-  if (!directions.some(option => option.value === geometry.directionId)) directions.push({ value: geometry.directionId, label: geometry.directionId });
-  const set = (next: Partial<RegularPolygon>) => update({ ...draft, geometry: { ...geometry, ...next } });
-  const scalar = (label: string, key: 'x' | 'y' | 'radius' | 'sides', unit?: string) =>
-    <ScalarField label={label} value={geometry[key]} parameters={document.parameters} unit={unit} onChange={value => set({ [key]: value })} />;
+  const label = (kind: 'point' | 'entity', id: string) => graph ? describeCadSketchConstraintSource(graph, { kind, id }).label : id;
+  const set = (next: Partial<InputGeometry>) => update({ ...draft, geometry: { ...geometry, ...next } as InputGeometry });
+  const scalar = (text: string, value: CadScalar, key: string, unit?: string) =>
+    <ScalarField label={text} value={value} parameters={document.parameters} unit={unit} onChange={next => set({ [key]: next })} />;
+  let fields: ReactNode, help: string;
+  if (geometry.kind === 'regular-polygon') {
+    const lines = graph?.entities.filter(entity => entity.kind === 'line' && !entity.id.startsWith(members)) ?? [];
+    const directions = [{ value: CAD_SKETCH_H_AXIS_ID, label: 'H axis' }, { value: CAD_SKETCH_V_AXIS_ID, label: 'V axis' }, ...lines.map(line => ({ value: line.id, label: label('entity', line.id) }))];
+    if (!directions.some(option => option.value === geometry.directionId)) directions.push({ value: geometry.directionId, label: geometry.directionId });
+    help = 'Its vertices and edges follow these inputs and the parameters they name. Detach it to edit its geometry on its own.';
+    fields = <>{scalar('Center X', geometry.x, 'x')}{scalar('Center Y', geometry.y, 'y')}{scalar('Radius', geometry.radius, 'radius')}{scalar('Sides', geometry.sides, 'sides', '')}
+      <SelectField label="Direction" description="The line or axis the first vertex lies along from the centre. The polygon turns with it." value={geometry.directionId}
+        options={directions} onChange={directionId => set({ directionId })} /></>;
+  } else if (geometry.kind === 'circular-pattern') {
+    const centres = [{ value: CAD_SKETCH_ORIGIN_ID, label: 'Origin' },
+      ...(graph?.points ?? []).filter(point => !point.id.startsWith(members)).map(point => ({ value: point.id, label: label('point', point.id) }))];
+    if (!centres.some(option => option.value === geometry.centerId)) centres.push({ value: geometry.centerId, label: geometry.centerId });
+    const seeds = geometry.seedIds.length === 1 ? 'its seed' : `its ${geometry.seedIds.length} seeds`;
+    help = `Its copies follow ${seeds}, the centre and these inputs. The count includes the seeds; a full turn spaces them evenly. Detach it to edit the copies on their own.`;
+    fields = <>{scalar('Count', geometry.count, 'count', '')}{scalar('Angle', geometry.angle, 'angle', 'deg')}
+      <SelectField label="Center" description="The point the copies turn about." value={geometry.centerId} options={centres} onChange={centerId => set({ centerId })} /></>;
+  } else {
+    help = 'Its edges follow the chain it offsets and the distance, outward when positive. Detach it to edit them on their own.';
+    fields = scalar('Distance', geometry.distance, 'distance');
+  }
   const title = cadSketchGeneratorName(generator);
   return <form className="cad-property-form" aria-label={title} aria-busy={submission.applying || undefined}
     onKeyDown={event => { if (event.key === 'Escape' && changed && !submission.applying && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); submission.cancel(); onCancel(); } }}
@@ -92,15 +121,13 @@ export function CadSketchGeneratorInputsEditor({ generator, sketch, document, on
         setError(userFacingMessage(cause, 'Unable to change this shape.'));
       });
     }}>
-    <CadInspectorTitle>{title}<CadContextHelp label="Generated shape">Its vertices and edges follow these inputs and the parameters they name. Detach it to edit its geometry on its own.</CadContextHelp></CadInspectorTitle>
+    <CadInspectorTitle>{title}<CadContextHelp label="Generated geometry">{help}</CadContextHelp></CadInspectorTitle>
     <fieldset className="cad-feature-fields" disabled={submission.applying}>
       <label className="cad-field"><span>Name</span><Input value={draft.name ?? ''} onChange={event => {
         const { name: _name, ...rest } = draft; update(event.target.value.trim() ? { ...rest, name: event.target.value } : rest);
       }} /></label>
       <label className="cad-check"><Input type="checkbox" checked={draft.construction} onChange={event => update({ ...draft, construction: event.target.checked })} /> Construction geometry</label>
-      {scalar('Center X', 'x')}{scalar('Center Y', 'y')}{scalar('Radius', 'radius')}{scalar('Sides', 'sides', '')}
-      <SelectField label="Direction" description="The line or axis the first vertex lies along from the centre. The polygon turns with it." value={geometry.directionId}
-        options={directions} onChange={directionId => set({ directionId })} />
+      {fields}
     </fieldset>
     {error && <p role="alert" className="cad-error">{error}</p>}
     {!error && removals && <div className="cad-form-hint" role="status">{cadGeneratorRemovalPrompt(document, removals)}</div>}

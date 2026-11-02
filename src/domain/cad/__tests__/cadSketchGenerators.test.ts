@@ -269,11 +269,11 @@ describe('sketch generators', () => {
   });
 
   it('keep the shape each evaluation checked for its outline and its members, after many other shapes were checked', () => {
-    const kind = CAD_SKETCH_GENERATOR_KINDS['regular-polygon'], context = { parameters: {}, line: () => ({ start: { x: 0, y: 0 }, end: { x: 1, y: 0 } }) };
+    const kind = CAD_SKETCH_GENERATOR_KINDS['regular-polygon'], context = { parameters: {}, line: () => ({ start: { x: 0, y: 0 }, end: { x: 1, y: 0 } }), point: () => undefined, curve: () => undefined, relationsAmong: () => [] };
     const hexagon = (x: number) => ({ kind: 'regular-polygon' as const, x, y: 0, radius: 10, sides: 6, directionId: '@h' });
-    const evaluation = kind.evaluate(hexagon(0), context, 'Hexagon'), shape = evaluation.shape();
-    for (let at = 1; at <= 300; at++) kind.evaluate(hexagon(at * 30), context, 'Other').shape();
-    expect(evaluation.shape()).toBe(shape);
+    const evaluation = kind.evaluate(hexagon(0), context, 'Hexagon'), shape = evaluation.shape!();
+    for (let at = 1; at <= 300; at++) kind.evaluate(hexagon(at * 30), context, 'Other').shape!();
+    expect(evaluation.shape!()).toBe(shape);
   });
 
   it('own their members: an edit of one is refused naming the generator, and other geometry is free', () => {

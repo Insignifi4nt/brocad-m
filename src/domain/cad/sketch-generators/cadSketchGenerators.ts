@@ -12,7 +12,7 @@ import type { CadSketchGraphSelection } from '../cadSketchGraphSelection';
 import { applyCadSketchRemapOutcomes, remapCadSketchRelations } from '../sketch-relations/cadSketchRelationRemap';
 import { cadSketchRelationDefinition } from '../sketch-relations/cadSketchRelationRegistry';
 import type { CadSketchRelationOwnership } from '../sketch-relations/cadSketchRelationTypes';
-import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_V_AXIS_ID, isCadSketchVirtualId } from '../sketch-relations/cadSketchVirtualElements';
+import { CAD_SKETCH_H_AXIS_ID, CAD_SKETCH_ORIGIN_ID, CAD_SKETCH_V_AXIS_ID, isCadSketchVirtualId } from '../sketch-relations/cadSketchVirtualElements';
 import {
   CAD_SKETCH_GENERATOR_KINDS, type CadSketchGeneratedGeometry, type CadSketchGeneratorContext, type CadSketchGeneratorEvaluation,
   type CadSketchGeneratorKind
@@ -156,40 +156,62 @@ function generated(generator: CadSketchGenerator, evaluation: CadSketchGenerator
   return members;
 }
 
+type Batch = Pick<CadSketchGraph, 'points' | 'entities' | 'relations'>;
 /**
- * The lines generation may read: the sketch's stored lines and those of members generated before, by id. Each batch is indexed only
- * when a generator first reads a line, as most never do, and a context reads only the batches added before it was made.
+ * What generation may read: the sketch's stored geometry and relations and those of members generated before, by id. Each batch is
+ * indexed only when a generator first reads it, as most never do, and a context reads only the batches added before it was made.
  */
-class Lines {
-  private readonly batches: { readonly points: readonly CadSketchGraphPoint[]; readonly entities: readonly CadSketchGraphEntity[] }[] = [];
+class Readable {
+  private readonly batches: Batch[] = [];
   private indexed = 0;
+  private related = 0;
   private readonly points = new Map<string, { readonly point: CadSketchGraphPoint; readonly batch: number }>();
-  private readonly entities = new Map<string, { readonly line: Extract<CadSketchGraphEntity, { kind: 'line' }>; readonly batch: number }>();
+  private readonly entities = new Map<string, { readonly entity: CadSketchGraphEntity; readonly batch: number }>();
+  // The relations that name each element, with their batch, for the relations among a set of elements.
+  private readonly naming = new Map<string, { readonly relation: CadSketchGraphRelation; readonly operands: readonly string[]; readonly batch: number }[]>();
   constructor(private readonly parameters: Readonly<Record<string, number>>) {}
-  add(points: readonly CadSketchGraphPoint[], entities: readonly CadSketchGraphEntity[]) {
-    this.batches.push({ points, entities });
-  }
+  add(batch: Batch) { this.batches.push(batch); }
   private index(limit: number) {
     for (; this.indexed < limit; this.indexed++) {
       const batch = this.indexed, { points, entities } = this.batches[batch];
       for (const point of points) this.points.set(point.id, { point, batch });
-      for (const entity of entities) if (entity.kind === 'line') this.entities.set(entity.id, { line: entity, batch });
+      for (const entity of entities) this.entities.set(entity.id, { entity, batch });
+    }
+  }
+  private indexRelations(limit: number) {
+    for (; this.related < limit; this.related++) for (const relation of this.batches[this.related].relations) {
+      const definition = cadSketchRelationDefinition(relation);
+      if (relation.kind === 'generator' || definition.owns) continue;
+      const operands = definition.operands(relation), item = { relation, operands, batch: this.related };
+      for (const id of new Set(operands)) { const list = this.naming.get(id); if (list) list.push(item); else this.naming.set(id, [item]); }
     }
   }
   context(): CadSketchGeneratorContext {
-    const limit = this.batches.length;
-    return { parameters: this.parameters, line: id => {
+    const limit = this.batches.length, parameters = this.parameters;
+    const point = (id: string) => {
+      if (id === CAD_SKETCH_ORIGIN_ID) return { x: 0, y: 0 };
+      this.index(limit);
+      const kept = this.points.get(id);
+      return kept && kept.batch < limit ? { x: evaluateCadScalar(kept.point.position[0], parameters), y: evaluateCadScalar(kept.point.position[1], parameters) } : undefined;
+    };
+    const curve = (id: string) => {
+      this.index(limit);
+      const kept = this.entities.get(id);
+      return kept && kept.batch < limit ? kept.entity : undefined;
+    };
+    return { parameters, point, curve, line: id => {
       if (id === CAD_SKETCH_H_AXIS_ID) return { start: { x: 0, y: 0 }, end: { x: 1, y: 0 } };
       if (id === CAD_SKETCH_V_AXIS_ID) return { start: { x: 0, y: 0 }, end: { x: 0, y: 1 } };
-      this.index(limit);
-      const found = this.entities.get(id);
-      if (!found || found.batch >= limit) return undefined;
-      const at = (pointId: string) => {
-        const kept = this.points.get(pointId);
-        return kept && kept.batch < limit ? { x: evaluateCadScalar(kept.point.position[0], this.parameters), y: evaluateCadScalar(kept.point.position[1], this.parameters) } : undefined;
-      };
-      const start = at(found.line.startPointId), end = at(found.line.endPointId);
+      const found = curve(id);
+      if (found?.kind !== 'line') return undefined;
+      const start = point(found.startPointId), end = point(found.endPointId);
       return start && end ? { start, end } : undefined;
+    }, relationsAmong: ids => {
+      this.indexRelations(limit);
+      const found = new Set<CadSketchGraphRelation>();
+      for (const id of ids) for (const { relation, operands, batch } of this.naming.get(id) ?? [])
+        if (batch < limit && operands.every(operand => ids.has(operand) || isCadSketchVirtualId(operand))) found.add(relation);
+      return [...found].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     } };
   }
 }
@@ -223,8 +245,8 @@ interface Generation { readonly generator: CadSketchGenerator; readonly members:
  * whose inputs do not evaluate or whose shape is refused: its refusal, naming it, ends them.
  */
 function generateEach(index: GeneratorIndex, stored: Split, parameters: Parameters): { readonly generations: readonly Generation[]; readonly refusal?: CadError } {
-  const lines = new Lines(parameters), generations: Generation[] = [];
-  lines.add(stored.points, stored.entities);
+  const lines = new Readable(parameters), generations: Generation[] = [];
+  lines.add(stored);
   for (const generator of index.generators) {
     const name = cadSketchGeneratorName(generator);
     let evaluation: CadSketchGeneratorEvaluation, members: CadSketchGeneratedGeometry;
@@ -235,7 +257,7 @@ function generateEach(index: GeneratorIndex, stored: Split, parameters: Paramete
       return { generations, refusal: error instanceof CadError && error.message.includes(`"${generator.id}"`) ? error
         : invalid(`${name}: ${error instanceof Error ? error.message : 'its geometry cannot be generated.'}`) };
     }
-    lines.add(members.points, members.entities);
+    lines.add(members);
     generations.push({ generator, members, key: `${generator.idPrefix}\u0000${generator.construction}\u0000${evaluation.key}`, evaluation });
   }
   return { generations };
@@ -276,8 +298,8 @@ function isSettled(graph: CadSketchGraph, index: GeneratorIndex, parameters: Par
 }
 /** The keys the graph's generators evaluate to now, read from its own members, or null when one does not evaluate. */
 function currentKeys(graph: CadSketchGraph, index: GeneratorIndex, parameters: Readonly<Record<string, number>>): string | null {
-  const lines = new Lines(parameters);
-  lines.add(graph.points, graph.entities);
+  const lines = new Readable(parameters);
+  lines.add(graph);
   try {
     return index.generators.map(generator => `${generator.idPrefix}\u0000${generator.construction}\u0000${
       cadSketchGeneratorKind(generator.geometry).evaluate(generator.geometry, lines.context(), cadSketchGeneratorName(generator)).key}`).join('\u0001');
@@ -605,8 +627,14 @@ export function validateCadSketchGeneratorRecord(graph: CadSketchGraph, generato
   if (sharing > 1) throw invalid(`${name} shares its id prefix "${generator.idPrefix}" with another generator.`);
   const namespace = cadSketchIdNamespace(generator.id);
   if (namespace !== undefined && index.byPrefix.has(namespace)) throw invalid(`${name} has an id among the generated geometry of the generator with prefix "${namespace}".`);
-  for (const id of cadSketchGeneratorKind(generator.geometry).operands(generator.geometry))
-    if (cadSketchIdNamespace(id) === generator.idPrefix) throw invalid(`${name} cannot generate from its own geometry "${id}".`);
+  const kind = cadSketchGeneratorKind(generator.geometry), operands = kind.operands(generator.geometry);
+  for (const id of operands) if (cadSketchIdNamespace(id) === generator.idPrefix) throw invalid(`${name} cannot generate from its own geometry "${id}".`);
+  // Before generation, as members keyed by a repeated operand would repeat.
+  const { distinct } = kind.signature(generator.geometry), seen = new Set<string>();
+  for (const index of distinct?.slots ?? []) {
+    if (seen.has(operands[index])) throw invalid(`${name} names "${operands[index]}" twice. ${distinct!.refusal.message}`);
+    seen.add(operands[index]);
+  }
 }
 
 /**
@@ -673,13 +701,16 @@ export function cadSketchGeneratorOutlines(graph: CadSketchGraph, parameters: Pa
   const evaluated = evaluatedGraphs.get(graph);
   evaluatedGraphs.delete(graph);
   const generations = new Map(evaluated && sameParameters(evaluated.parameters, parameters) ? evaluated.generations.map(item => [item.generator, item] as const) : []);
-  let lines: Lines | undefined, members: ReadonlyMap<string, CadSketchRelationOwnership> | undefined;
-  const context = () => { if (!lines) { lines = new Lines(parameters); lines.add(graph.points, graph.entities); } return lines.context(); };
+  let lines: Readable | undefined, members: ReadonlyMap<string, CadSketchRelationOwnership> | undefined;
+  const context = () => { if (!lines) { lines = new Readable(parameters); lines.add(graph); } return lines.context(); };
   for (const generator of index.generators) {
     const made = generations.get(generator);
     let shape: ResolvedCadProfile;
-    try { shape = (made?.evaluation ?? cadSketchGeneratorKind(generator.geometry).evaluate(generator.geometry, context(), cadSketchGeneratorName(generator))).shape(); }
-    catch { continue; }
+    try {
+      const outline = (made?.evaluation ?? cadSketchGeneratorKind(generator.geometry).evaluate(generator.geometry, context(), cadSketchGeneratorName(generator))).shape;
+      if (!outline) continue;
+      shape = outline();
+    } catch { continue; }
     const entityIds = made ? made.members.entities.map(entity => entity.id) : (members ??= cadSketchGeneratedComponents(graph).byPrefix).get(generator.idPrefix)?.entityIds ?? [];
     byPrefix.set(generator.idPrefix, { generator, shape, entityIds: new Set(entityIds) });
   }
