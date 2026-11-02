@@ -24,7 +24,7 @@ CAD and CAM are separate documents with separate draft versions. Begin with `cad
 
 | Tool | Purpose |
 | --- | --- |
-| `cad_get_context` | Draft version, exact parameter/group summaries with omission counts, saved version, pending workflow and build diagnostics |
+| `cad_get_context` | Draft version, exact parameter/group summaries with omission counts, saved version, pending workflow and build diagnostics, and the supported operations, including the generator edits and every generated shape |
 | `cad_describe_features` | Compact feature catalog or one exact accepted feature schema |
 | `cad_describe_edits` | Draft edit catalog or one operation's strict fields, without mutation |
 | `cad_describe_plugin_api` | Compact plugin API catalog or one complete strict package schema |

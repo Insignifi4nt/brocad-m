@@ -12,6 +12,7 @@ import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 import { storedCadDocument } from '@/domain/cad/cadStoredDocument';
 import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { CAD_SKETCH_GENERATOR_KINDS } from '@/domain/cad/sketch-generators/cadSketchGeneratorKinds';
 import { CadSession } from './cadSession';
 import { useCadController, type CadController } from './useCadController';
 import { cadSiteTools } from './cadSiteTools';
@@ -111,6 +112,15 @@ describe('CAD agent discovery and authoring journeys', () => {
     expect(sketch.kind === 'sketch' && sketch.graph?.relations.filter(relation => !relation.id.startsWith('poly_')).map(relation => relation.id)).toEqual(['poly']);
     await h.success('cad_history', { expectedVersion: reduced.version, direction: 'undo' });
     expect(h.session.getSnapshot().document).toEqual(seeded.document);
+  });
+
+  it('lists the generator edits and every shape a generator makes in the context inventory, each edit one the catalog describes', async () => {
+    const h = await mount(), supported = object((await h.success('cad_get_context', {})).supported), entities = object(supported.sketchEntities);
+    expect(entities.edits).toEqual(expect.arrayContaining(['set-sketch-generator', 'detach-sketch-generator']));
+    expect(entities.generators).toEqual(expect.stringContaining('inputs size and place it'));
+    expect([...supported.sketches as string[]].sort()).toEqual(Object.keys(CAD_SKETCH_GENERATOR_KINDS).sort());
+    const kinds = ((await h.success('cad_describe_edits', {})).items as { kind: string }[]).map(item => item.kind);
+    for (const kind of entities.edits as string[]) expect(kinds, kind).toContain(kind);
   });
 
   it('lists a removal too large for one refusal a page at a time at its version, and applies it once every ID is confirmed', async () => {
