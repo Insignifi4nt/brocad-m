@@ -5,7 +5,7 @@ import { CAD_INPUT_BLOCKED, cadBuildIssues, NO_CAD_BUILD_ISSUES } from '@/domain
 import { CadError } from '@/domain/cad/cadError';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { jsonByteLength } from '@/features/webmcp/diagnosticSummaries';
-import { CAD_AGENT_ISSUE_BYTES, CAD_AGENT_ISSUE_COUNT, cadAgentIssueDigest } from './cadAgentIssues';
+import { CAD_AGENT_ISSUE_BYTES, CAD_AGENT_ISSUE_COUNT, CAD_AGENT_KERNEL_BYTES, cadAgentIssueDigest } from './cadAgentIssues';
 import { cadSiteTools } from './cadSiteTools';
 import { CadSession } from './cadSession';
 import type { CadController } from './useCadController';
@@ -18,6 +18,11 @@ function chain(count: number): CadDocument {
   const moves: CadFeature[] = Array.from({ length: count }, (_, index) => ({ id: `move${index}`, name: `Move ${index}`, kind: 'transform', suppressed: false,
     sourceId: index ? `move${index - 1}` : 'pad', translation: [1, 0, 0], rotation: [0, 0, 0] }));
   return parseCadDocument({ ...createCadDocument('Part', 'cad_agent'), features: [sketch, pad, ...moves] });
+}
+/** The diagnostics and issues of a context or build reply. */
+interface AgentProblems {
+  diagnostics: { details?: { kernelMessage?: string | null } }[]; omittedDiagnostics: number;
+  issues: { items: { code: string; subject: { featureId?: string }; diagnostic?: number; details: { kernelMessage?: string } }[] };
 }
 const failed = (featureId: string, message = 'The extrusion failed.') => ({ code: 'kernel-operation-failed', featureId, message,
   details: { operation: 'extrude' as const, input: null, kernelMessage: 'BRep_API: command not done' } });
@@ -32,10 +37,14 @@ describe('CAD issues in agent replies', () => {
       ['kernel-operation-failed', 'failed', { kind: 'feature', featureId: 'pad' }, []],
       ['rebuild-stopped', 'blocked', { kind: 'feature', featureId: 'pad' }, ['kernel:0:kernel-operation-failed']],
       ['lost-body-parts', 'failed', { kind: 'body', key: 'pad', featureId: 'move3' }, []]]);
-    // The kernel's own words stay in the diagnostic; the issue keeps the step and input.
-    expect(digest.items[0].details).toEqual({ operation: 'extrude', input: null });
-    // A listed issue gains no kernel words of its own, whatever its place in the list.
-    expect(digest.items.map(item => 'kernelMessage' in item.details)).toEqual([false, false, false]);
+    // With no diagnostic listed beside it, the failure gives the kernel's own words with its step and input.
+    expect(digest.items[0].details).toEqual({ operation: 'extrude', input: null, kernelMessage: 'BRep_API: command not done' });
+    // Only an issue that has kernel words gives them, whatever its place in the list.
+    expect(digest.items.map(item => 'kernelMessage' in item.details)).toEqual([true, false, false]);
+    // A failure whose diagnostic the same reply lists names it instead of repeating its words.
+    const beside = cadAgentIssueDigest(issues.items, new Map([[issues.diagnosticKeys[0], 0]]));
+    expect([beside.items[0].details, beside.items[0].diagnostic, 'diagnostic' in beside.items[1]]).toEqual([{ operation: 'extrude', input: null }, 0, false]);
+    expect(issues.diagnosticKeys).toEqual(['kernel:0:kernel-operation-failed', 'kernel:1:rebuild-stopped']);
     expect(digest.items[0].repairs).toEqual([{ id: 'command:edit-feature:pad', kind: 'command', label: 'Edit feature' }]);
     expect(digest.blocked).toEqual([{ cause: 'kernel:0:kernel-operation-failed', count: 30, featureIds: ['move0', 'move1', 'move2', 'move3', 'move4', 'move5', 'move6', 'move7'] }]);
     expect([digest.omitted, digest.omittedBlocked, 'unresolved' in digest]).toEqual([0, 22, false]);
@@ -53,6 +62,47 @@ describe('CAD issues in agent replies', () => {
     // Blocking 400 features costs what blocking eight does, but for the digits of two counts: the summary names eight.
     expect(reply(400) - reply(8)).toBeLessThanOrEqual(6);
     expect(jsonByteLength(digest)).toBeLessThanOrEqual(CAD_AGENT_ISSUE_BYTES + 2048 + 256);
+  });
+
+  it.each([
+    { words: '孔'.repeat(2048), kind: 'CJK' },
+    { words: '\u0001"\\\n'.repeat(512), kind: 'escape-heavy ASCII' },
+  ])('keeps a bounded account of $kind kernel words for a listed failure in the context and the build reply', async ({ words }) => {
+    const session = new CadSession(parseCadDocument({ ...createCadDocument('Part', 'cad_agent'), features: [sketch, pad] }));
+    const version = session.getSnapshot().version, document = session.getSnapshot().document;
+    const build: CadBuildResult = { buildId: 'failed', meshes: [], durationMs: 1, diagnostics: [{ ...failed('pad'), details: { operation: 'extrude', input: null, kernelMessage: words } }] };
+    const issues = cadBuildIssues(document, build, version, true);
+    const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build, buildIssues: issues,
+      buildIssuesOf: () => issues, inspectBuild: vi.fn(async () => build) } as unknown as CadController;
+    const tools = cadSiteTools(() => controller), run = async (name: string, input: unknown) => (await tools.find(tool => tool.name === name)!.execute(input) as { data: AgentProblems }).data;
+    for (const reply of [await run('cad_get_context', {}), await run('cad_build', { expectedVersion: version })]) {
+      // The diagnostic stays listed, its kernel words cut to their byte budget with an ellipsis; the issue names it rather than repeat them.
+      expect([reply.diagnostics.length, reply.omittedDiagnostics, reply.issues.items.length]).toEqual([1, 0, 1]);
+      const kept = reply.diagnostics[0].details!.kernelMessage!;
+      expect(kept.endsWith('…')).toBe(true); expect(words.startsWith(kept.slice(0, -1))).toBe(true);
+      expect(jsonByteLength(kept)).toBeLessThanOrEqual(CAD_AGENT_KERNEL_BYTES); expect(jsonByteLength(kept)).toBeGreaterThan(CAD_AGENT_KERNEL_BYTES - 8);
+      expect(reply.issues.items[0]).toMatchObject({ code: 'kernel-operation-failed', diagnostic: 0, details: { operation: 'extrude', input: null } });
+      expect(reply.issues.items[0].details).not.toHaveProperty('kernelMessage');
+    }
+  });
+
+  it('gives the kernel words in the issue of a failure whose diagnostic the reply cannot list', async () => {
+    const document = chain(3), long = 'x'.repeat(1000);
+    const build: CadBuildResult = { buildId: 'failed', meshes: [], durationMs: 1, diagnostics: ['move0', 'move1', 'move2'].map(featureId =>
+      ({ ...failed(featureId, `${featureId} failed: ${long}`), details: { operation: 'transform' as const, input: null, kernelMessage: `${featureId}: ${'孔'.repeat(2048)}` } })) };
+    const session = new CadSession(document), version = session.getSnapshot().version, issues = cadBuildIssues(document, build, version, true);
+    const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'error', buildVersion: version, build, buildIssues: issues,
+      buildIssuesOf: () => issues, inspectBuild: vi.fn(async () => build) } as unknown as CadController;
+    const tool = cadSiteTools(() => controller).find(candidate => candidate.name === 'cad_build')!;
+    const reply = (await tool.execute({ expectedVersion: version }) as { data: AgentProblems }).data;
+    // One diagnostic fits its 4,096 bytes; the issues list two failures, the second giving its own words.
+    expect([reply.diagnostics.length, reply.omittedDiagnostics]).toEqual([1, 2]);
+    expect(reply.issues.items.map(item => [item.subject.featureId, item.diagnostic ?? null, item.details.kernelMessage?.slice(0, 7) ?? null])).toEqual([
+      ['move0', 0, null], ['move1', null, 'move1: ']]);
+    expect(jsonByteLength(reply.issues.items[1].details.kernelMessage)).toBeLessThanOrEqual(CAD_AGENT_KERNEL_BYTES);
+    expect(jsonByteLength(reply.diagnostics)).toBeLessThanOrEqual(4096); expect(jsonByteLength(reply.issues.items)).toBeLessThanOrEqual(CAD_AGENT_ISSUE_BYTES);
+    // Every listed failure has its kernel words somewhere in the reply.
+    for (const item of reply.issues.items) expect(item.diagnostic === undefined ? item.details.kernelMessage : reply.diagnostics[item.diagnostic].details!.kernelMessage).toMatch(/^move\d: 孔+…$/);
   });
 
   it('adds the issues to the context and the build reply, and the refused feature or input slot to a refused edit', async () => {
@@ -88,6 +138,13 @@ describe('CAD issues in agent replies', () => {
     expect((failed as { error: { message: string } }).error.message).not.toContain('Standard_ConstructionError');
     refusal = CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', { kernelMessage: 'WebAssembly.instantiate(): Out of memory' });
     expect(await build()).toMatchObject({ ok: false, error: { code: 'kernel-unavailable', details: { kernelMessage: 'WebAssembly.instantiate(): Out of memory' } } });
+    // However long the kernel's words, a refusal gives them within their byte budget, with an ellipsis where they were cut.
+    refusal = CadError.received('kernel-operation-failed', 'The part could not be rebuilt. Rebuild again; if this repeats, undo the last change.', { kernelMessage: '孔'.repeat(2048) });
+    const long = await build() as { error: { details: { issue: { details: { kernelMessage: string } } } } };
+    expect(long.error.details.issue.details.kernelMessage).toMatch(/^孔+…$/); expect(jsonByteLength(long.error.details.issue.details.kernelMessage)).toBeLessThanOrEqual(CAD_AGENT_KERNEL_BYTES);
+    refusal = CadError.received('kernel-unavailable', 'The CAD kernel could not be loaded. Reload the page; if this repeats, use a browser that runs WebAssembly.', { kernelMessage: '\u0001'.repeat(2048) });
+    const alone = await build() as { error: { details: { kernelMessage: string } } };
+    expect(alone.error.details.kernelMessage.endsWith('…')).toBe(true); expect(jsonByteLength(alone.error.details.kernelMessage)).toBeLessThanOrEqual(CAD_AGENT_KERNEL_BYTES);
     // A refusal without kernel words keeps the reply it had.
     refusal = new CadError('step-export', 'The bodies could not be written as a STEP file.');
     const plain = await build();

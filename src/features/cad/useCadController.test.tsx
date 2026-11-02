@@ -2211,3 +2211,20 @@ describe('CAD controller asynchronous guards', () => {
     expect(h.cad().isBusy()).toBe(false);
   });
 });
+
+describe('CAD issues agents receive through the controller', () => {
+  it('keeps a bounded account of long kernel words for the one failure of a build', async () => {
+    kernel.build.mockResolvedValue({ buildId: 'built', meshes: [], durationMs: 0, diagnostics: [{ code: 'kernel-operation-failed', featureId: 'sketch', message: 'The profile failed. Edit the sketch.',
+      details: { operation: 'profile', input: null, kernelMessage: '孔'.repeat(2048) } }] });
+    const h = await harness(true), version = h.session.getSnapshot().version;
+    const tools = cadSiteTools(h.cad);
+    let built: { ok: boolean; data: { diagnostics: { details: { kernelMessage: string } }[]; omittedDiagnostics: number; issues: { items: { diagnostic?: number }[] } } } | undefined;
+    await act(async () => { built = await tools.find(tool => tool.name === 'cad_build')!.execute({ expectedVersion: version }) as typeof built; });
+    const context = await tools.find(tool => tool.name === 'cad_get_context')!.execute({}) as typeof built;
+    for (const reply of [built!, context!]) {
+      expect(reply.ok).toBe(true);
+      expect([reply.data.diagnostics.length, reply.data.omittedDiagnostics, reply.data.issues.items[0].diagnostic]).toEqual([1, 0, 0]);
+      expect(reply.data.diagnostics[0].details.kernelMessage).toMatch(/^孔+…$/);
+    }
+  });
+});

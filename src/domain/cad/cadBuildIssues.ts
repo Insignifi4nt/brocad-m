@@ -10,8 +10,10 @@ export interface CadBuildIssues {
   readonly items: readonly CadIssue[];
   /** The issue each feature's own row shows: its failure, or the issue that keeps it from evaluating. */
   readonly byFeature: ReadonlyMap<string, CadIssue>;
+  /** The key of the issue each diagnostic of the build became, by its position among them: its failure, or its stop. */
+  readonly diagnosticKeys: readonly string[];
 }
-export const NO_CAD_BUILD_ISSUES: CadBuildIssues = Object.freeze({ items: Object.freeze([]), byFeature: new Map() });
+export const NO_CAD_BUILD_ISSUES: CadBuildIssues = Object.freeze({ items: Object.freeze([]), byFeature: new Map(), diagnosticKeys: Object.freeze([]) });
 
 /** What a feature reports when an input it reads did not rebuild, through a slot or the body it changes. */
 export const CAD_INPUT_BLOCKED = 'Not evaluated, because an input it reads did not rebuild.';
@@ -69,7 +71,7 @@ export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'paramet
     items.push(issue); show(featureId, issue);
   }
   (build.bodyIssues ?? []).forEach((issue, index) => items.push(cadBodyIssue(issue, index)));
-  return Object.freeze({ items: createCadIssueList(items, checked), byFeature });
+  return Object.freeze({ items: createCadIssueList(items, checked), byFeature, diagnosticKeys: Object.freeze(diagnostics.map(key)) });
 }
 
 function kernelFailure(diagnostic: CadDiagnostic, key: string, feature: CadFeature | undefined, causes: readonly string[], version: string): CadKernelIssueOf {

@@ -29,7 +29,8 @@ import { CadSketchSplitDependencyError } from '@/domain/cad/cadSketchSplit';
 import { CadSketchTrimDependencyError, CadSketchExtendDependencyError } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchTangentOwnershipError } from '@/domain/cad/cadSketchTangentRelations';
 import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
-import { cadAgentIssue, cadAgentIssueDigest } from './cadAgentIssues';
+import { cadAgentIssue, cadAgentIssueDigest, cadAgentKernelMessage } from './cadAgentIssues';
+import type { CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { CadSketchPlacementDependencyError } from '@/domain/cad/cadSketchPlacement';
 import { CAD_SKETCH_AGENT_RELATION_KINDS } from '@/domain/cad/sketch-relations/cadSketchRelationRegistry';
 import { CadConstructionPointSchema, CadPathConstructionStepSchema, createCadPathProfile, createCadOpenCurveSegments } from '@/domain/cad/cadPathConstruction';
@@ -90,11 +91,21 @@ function withSharedDefinitions(schema: TSchema, shared: Readonly<Record<string, 
   return { ...visit(schema) as TSchema, $defs: Object.fromEntries(Object.entries(shared).map(([name, definition]) => [name, { ...definition, $id: name }])) };
 }
 const documentText = new WeakMap<CadDocument, string>();
-function diagnosticSummary(diagnostics: readonly CadDiagnostic[]) {
-  const summaries = diagnostics.slice(0, 10).map(summarizeDiagnostic);
-  // Body pages may use 24 KiB. Keep diagnostics bounded even for escaped Unicode.
+/**
+ * The diagnostics of a build and its issues as a reply gives them: at most 10 diagnostics within 4,096 bytes, each message summarized and
+ * its kernel words bounded (`cadAgentKernelMessage`), so the first always fits; then the issue digest (`cadAgentIssueDigest`), whose
+ * failures give the kernel words a listed diagnostic does not, so every listed failure keeps a bounded account of them.
+ */
+function buildProblems(diagnostics: readonly CadDiagnostic[], issues: CadBuildIssues) {
+  const summaries = diagnostics.slice(0, 10).map(diagnostic => {
+    const summary = summarizeDiagnostic(diagnostic), kernelMessage = diagnostic.details?.kernelMessage;
+    return kernelMessage ? { ...summary, details: { ...diagnostic.details, kernelMessage: cadAgentKernelMessage(kernelMessage) } } : summary;
+  });
   while (summaries.length && jsonByteLength(summaries) > 4096) summaries.pop();
-  return { diagnostics: summaries, omittedDiagnostics: diagnostics.length - summaries.length };
+  // The issues name their diagnostics by position only when they are the issues of these diagnostics.
+  const keys = issues.diagnosticKeys.length === diagnostics.length ? issues.diagnosticKeys.slice(0, summaries.length) : [];
+  return { diagnostics: summaries, omittedDiagnostics: diagnostics.length - summaries.length,
+    issues: cadAgentIssueDigest(issues.items, new Map(keys.map((key, index) => [key, index]))) };
 }
 /** Tool summaries retain complete entries; the immutable document stays complete. */
 function parameterContext(document: CadDocument) {
@@ -146,7 +157,7 @@ export function cadSiteTools(getController: () => CadController) {
         // go with the issue, or alone when no issue covers the refusal.
         if (error instanceof CadError) {
           const issue = cadRefusalIssue(error), kernelMessage = error.kernelMessage;
-          throw new ToolError(error.code, error.message, issue ? { issue: cadAgentIssue(issue, kernelMessage) } : kernelMessage ? { kernelMessage } : undefined);
+          throw new ToolError(error.code, error.message, issue ? { issue: cadAgentIssue(issue, kernelMessage) } : kernelMessage ? { kernelMessage: cadAgentKernelMessage(kernelMessage) } : undefined);
         }
         if (error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
@@ -168,7 +179,7 @@ export function cadSiteTools(getController: () => CadController) {
       featureCount: state.document.features.length, ...parameterContext(state.document),
       canUndo: state.canUndo, canRedo: state.canRedo, workflowOpen: state.workflowOpen, busy: cad.isBusy(),
       buildState: cad.buildState, buildVersion: cad.buildVersion, buildId: cad.build?.buildId ?? null,
-      ...diagnosticSummary(cad.build?.diagnostics ?? []), issues: cadAgentIssueDigest(cad.buildIssues.items),
+      ...buildProblems(cad.build?.diagnostics ?? [], cad.buildIssues),
       supported: { sketchEntities: { schemaVersion: 2, definition: 'cad_describe_features(kind=sketch)', inspection: 'cad_inspect_sketch_constraints', edits: ['append-sketch-entities', 'delete-sketch-elements', 'set-sketch-construction', 'translate-sketch-geometry', 'place-sketch-geometry', 'move-sketch-point', 'set-sketch-relation', 'remove-sketch-relation', 'create-sketch-corner', 'split-sketch-entity', 'trim-sketch-entity', 'extend-sketch-entity', 'offset-sketch-loop', 'mirror-sketch-geometry', 'copy-sketch-profile', 'use-sketch-entity'], relations: CAD_SKETCH_AGENT_RELATION_KINDS, material: 'Whole sketch retains simple closed cycles connected by shared point IDs or explicit coincidence. Deliberate graph-cells selection can Pad/Pocket exact bounded intersection cells; inspect mode=graph-cells and pack numeric cellIds with cad_read_sketch_region_reference. Unsupported contacts reject; new cells never become automatic material.' }, sketches: ['rectangle', 'circle', 'polygon', 'slot', 'path', 'plugin'], sketchDimensions: { rectangle: ['width', 'height'], circle: ['diameter', 'radius'], slot: ['length', 'width', 'angle'], intent: 'Legacy profile dimensions bind their geometry scalars. Numeric geometry stays free; expressions stay driven. Radius/diameter share one freedom. Graph point/entity constraints are listed under sketchEntities.' }, sketchTranslation: ['rectangle', 'circle', 'slot', 'polygon', 'path'], sketchHandles: { inspection: 'cad_inspect_sketch_handles', edit: 'move-sketch-handle', scope: 'Accepted revision only; free components move without replacing dimensions or expressions.' }, plugins: { apiVersion: 2, acceptedApiVersions: [1, 2], instances: 'Exact package embedded in each profile; inputs accept named CAD parameter expressions.', relations: 'API 2 supports derived values, conditional editing, dynamic ranges, choices and constraints. Derived values cannot be stored as editable inputs.', generators: ['builtin-spur-gear', 'polygon-recipe'] }, references: ['curve', 'datum-plane'], planes: ['XY', 'XZ', 'YZ'],
         datumPlacement: { definition: 'world', supported: ['sketch', 'curve', 'extrude', 'revolve', 'loft', 'sweep'], unsupported: ['pocket'], inspection: 'cad_inspect_plane' },
         solids: ['imported', 'extrude', 'pocket', 'revolve', 'loft', 'sweep', 'fillet', 'chamfer', 'shell', 'boolean', 'transform', 'linear-pattern', 'circular-pattern', 'mirror'],
@@ -365,7 +376,7 @@ export function cadSiteTools(getController: () => CadController) {
       const result = await cad.inspectBuild(input.expectedVersion, signal);
       const bodies = page(result.meshes, input, mesh => ({ featureId: mesh.featureId, ...(mesh.bodyKey ? { bodyKey: mesh.bodyKey } : {}), name: mesh.name, volumeMm3: mesh.volume, solidCount: mesh.solidCount ?? null, boundsMm: mesh.bounds, triangles: mesh.indices.length / 3,
         previewFaces: new Set(mesh.faceGroups.map(group => group.key)).size, previewEdges: new Set(mesh.edgeGroups.map(group => group.key)).size }));
-      return { version: input.expectedVersion, buildId: result.buildId, durationMs: result.durationMs, ...diagnosticSummary(result.diagnostics), issues: cadAgentIssueDigest(cad.buildIssuesOf(result).items),
+      return { version: input.expectedVersion, buildId: result.buildId, durationMs: result.durationMs, ...buildProblems(result.diagnostics, cad.buildIssuesOf(result)),
         bodies: bodies.items, totalBodies: bodies.total, nextBodyOffset: bodies.nextOffset };
     }),
     tool('cad_build_feature_input', 'Build the strict history before an existing Fillet, Chamfer or Shell to replace its selected edges/opening. Choose a body visible at that point; optional finite numeric parameterValues propose correlated edits without accepting them. Returns an ephemeral inputToken/buildId for the existing topology tools. The accepted document/build is unchanged. Use the resulting geometric selector and same parameter batch in cad_edit_document. Finish visible editors before agent calls.', object({ ...version, ...CadFeatureInputRequestSchema.properties }), async (cad, input, signal) => {
