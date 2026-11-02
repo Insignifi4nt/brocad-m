@@ -28,10 +28,20 @@ import ts from '@typescript/typescript6';
  * spread, may have any method called, so it runs them all. An overload signature stands for its implementation. A destructuring read
  * runs the getters it reads.
  *
- * Every call is followed or reported. A call of a name or a member read runs the declarations it resolves to, as above. A call of any
- * other value, such as a parameter, a variable, a destructured name, what a call returns, or a member only signatures declare, runs the
- * functions that value is established to hold (`CadTrace`); a value it cannot establish is reported where it is called, never taken to run
- * nothing.
+ * Every call ends in exactly one outcome: followed, stopped, outside the source, proven not callable, or reported. A call of a name or a
+ * member read runs the declarations it resolves to, as above. A call of any other value, such as a parameter, a variable, a destructured
+ * name, what a call returns, or a member only signatures declare, runs the functions that value is established to hold (`CadTrace`), and
+ * each branch of what it may hold must end in an outcome of its own: a branch that reaches none, beside one that does, is reported where
+ * it ends. An empty result is never an outcome, so a value it cannot establish is reported where it is called, never taken to run
+ * nothing. What a holder holds is every value written to it: a variable's or a property's initializer is one, and each assignment of it
+ * or of its member, found by the declaration TypeScript gives the member written or through the holder's own names, is another, as is
+ * what an array's `push`, `unshift`, `splice` or `fill` adds; a write of another kind, such as `Object.assign`, is reported, and so
+ * is a holder whose members no declaration of the source gives when it is given on, since what it is given to may write them. A
+ * `const` binding does not make its object's members fixed. An absent member reads as `undefined`, or as what is written to it. A list
+ * iteration's callback is given each element, its index and the list only when what it iterates is a platform array or tuple; a map's,
+ * a set's or any other receiver's `forEach` gives what its implementation gives, read where the callback is given, or is reported. A
+ * call of a value of type `any` or the platform's `Function`, which may be any function, is reported unless TypeScript shows it to be
+ * the platform's or a library's.
  *
  * It collects the first argument of each `CadError` raised and the `code` of each object literal, written plainly, quoted or as a computed
  * literal key, which carries a refusal to the `CadError` an inspection raises. A raise is known by the declaration what it constructs or
@@ -53,7 +63,8 @@ import ts from '@typescript/typescript6';
  * A check apart from the walk (`cadSkippedMemberReads`) asks TypeScript what each name, member read, call and construction in the walked
  * code resolves to, each part of a union callee included: each declaration of the project it gives must be one the walk entered,
  * stopped at or reported, and each raise or code argument one it read or reported. A call that may run a function TypeScript gives no
- * implementation of must be one the walk traced from its value or reported. A part TypeScript's types reduced away, as a class of the
+ * implementation of, a callee of no call signature such as `any` or `Function` included, must be one the walk settled, tracing it from
+ * its value to an outcome, or reported. A part TypeScript's types reduced away, as a class of the
  * same shape as another, only the walk follows. A code is read through:
  * - each branch of a conditional and each side of `??`, `||` and `&&`;
  * - constants, properties of object literals (from the last: a spread or a computed key it cannot tell may hold one, and an absent one
@@ -70,6 +81,20 @@ import ts from '@typescript/typescript6';
  * outside the source, a member of a value it cannot read, and a parameter of a function passed on as a value, whose calls the walk
  * cannot see. So is a call of a method the source has a member of that name for, on a receiver whose type gives the method no
  * declaration, such as `any`.
+ *
+ * Known limitations. The walk does not see:
+ * - a member write through a value whose type declares the member apart from the holder's own type, such as a parameter typed
+ *   `{ run: F }` given a holder whose type declares `run` itself, or through `any`; a holder given on is reported only when no
+ *   declaration of the source gives the member, so `Object.defineProperty`, `Reflect.set` and prototype writes of a member a source
+ *   declaration gives go unseen too;
+ * - an array's elements added other than by its literal, an assignment, `push`, `unshift`, `splice` or `fill`, such as by
+ *   `Array.prototype.push.call` or `copyWithin`;
+ * - in reading a code rather than a call, a holder given on: the codes it reads are those the writes the declarations find give.
+ * And it reports, though nothing it may run is missed:
+ * - a holder given on wherever it is given, the walk having no order, even where its members are all set before it is given, as
+ *   `cadKernelShapes` gives on the list of shapes it disposes (read by hand in `cadUntracedCalls`);
+ * - a callback given to a source `forEach` that gives it on to a list's iteration, rather than following it;
+ * - a branch of what a call may run that is the result of a function returning nothing, as a dead end.
  */
 export interface CadDiagnosticReach {
   readonly codes: ReadonlySet<string>;
@@ -87,7 +112,10 @@ export interface CadDiagnosticReach {
   readonly entries: readonly CadDiagnosticEntry[];
   /** The raises it took: each `new`, `super(…)` and factory call whose code it read, or reported as one it cannot read. */
   readonly raises: ReadonlySet<ts.Node>;
-  /** The `new`s and `super(…)` calls it reported because it cannot tell the class they construct. */
+  /**
+   * The `new`s and `super(…)` calls it reported because it cannot tell the class they construct, and the calls it reported because it
+   * cannot establish the function they run: a trace that settled no outcome, a member write it cannot read, or a holder given on.
+   */
   readonly untold: ReadonlySet<ts.Node>;
   /** Each function or constructor whose parameter gives a code, with the calls and constructions at which it read that parameter. */
   readonly argumentsRead: ReadonlyMap<ts.Node, ReadonlySet<ts.Node>>;
@@ -105,7 +133,7 @@ export interface CadDiagnosticReach {
   readonly stopped: ReadonlySet<ts.Node>;
   /**
    * The calls and the functions given to code outside the source whose function it traced from the value they run (`CadTrace`), rather
-   * than entering a declaration they name.
+   * than entering a declaration they name, to an outcome: a trace that settled none is `untold`, not traced.
    */
   readonly traced: ReadonlySet<ts.Node>;
 }
@@ -116,19 +144,22 @@ export interface CadDiagnosticEntry extends CadDiagnosticRoot { readonly held?: 
  * What became of a member read: `followed` into the members it runs; `stopped` at members of a type `stop` names; `no-code` when it runs
  * nothing of the source (a write without a setter, a presence test, a value that holds no function, an absent property); `outside` when
  * every declaration it has is the platform's or a library's; `unexpanded` when it is reported; `traced` when a function it runs is the
- * value its receiver holds, which only signatures of the source declare and no object or class of the source fits (`CadTrace`).
+ * value its receiver holds, which only signatures of the source declare and no object or class of the source fits, or a member none of
+ * the objects its receiver holds has, read from those objects and from what is written to it (`CadTrace`).
  */
 export type CadMemberOutcome = 'followed' | 'stopped' | 'no-code' | 'outside' | 'unexpanded' | 'traced';
 /**
  * What the walk reads a value for: `code`, the codes it gives; `callee`, the functions a call of it runs. A function is established as
  * one the walk entered, written there or held by a constant, a destructured name, an element of a list, an object's property, what a
  * call returns, the function `bind` binds, or the argument each walked call gives a parameter, through each branch. So is what a
- * variable or a private property holds: its value and each value assigned to it; what a constant map's `get` gives: each value a `set`
- * call stores; and the argument a function returned by a named function gets: at each walked call of that function's result. What the
- * platform or a library holds runs no code of the source. Any other value is reported: a parameter of a function the walk sees no call
- * of, a variable declared without a value and never assigned, a value assigned to it where the walk does not enter, a map given on or
- * built with entries, and a signature no object or class of the source fits included. A source declaration with no body is no proof
- * that calling it runs no code of the source.
+ * variable, a private property or a member holds: its value and each value written to it, an array's additions included; what a
+ * constant map's `get` gives: each value a `set` call stores; and the argument a function returned by a named function gets: at each
+ * walked call of that function's result. What the platform or a library holds runs no code of the source, and `null`, `undefined`, an
+ * absent member and a value of no function's type run nothing. Any other value is reported: a parameter of a function the walk sees no
+ * call of, a variable declared without a value and never assigned, a value written to it where the walk does not enter or in a way it
+ * cannot read, a holder given on, a map given on or built with entries, a value of type `any` or `Function`, and a signature
+ * no object or class of the source fits included. A source declaration with no body is no proof that calling it runs no code of the
+ * source, and each branch of what a call may run ends in an outcome of its own.
  */
 export type CadTrace = 'code' | 'callee';
 /** A member read by name or by element. */
@@ -276,7 +307,7 @@ function isSignature(declaration: ts.Declaration): boolean {
 type Binding =
   | { readonly kind: 'parameter'; readonly owner: ts.FunctionLikeDeclaration; readonly position: number }
   | { readonly kind: 'caught' }
-  | { readonly kind: 'element'; readonly of: ts.Expression }
+  | { readonly kind: 'element'; readonly of: ts.Expression; readonly callback?: ts.FunctionLikeDeclaration }
   | { readonly kind: 'variable'; readonly element?: ts.BindingElement };
 const destructuring = (pattern: ts.BindingName, name: string): Binding => ({ kind: 'variable', element: elementNamed(pattern, name) });
 /**
@@ -322,6 +353,20 @@ function isAssigned(site: ts.Node): boolean {
   return ts.isBinaryExpression(holder) && holder.left === target && holder.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && holder.operatorToken.kind <= ts.SyntaxKind.LastAssignment
     || (ts.isForOfStatement(holder) || ts.isForInStatement(holder)) && holder.initializer === target;
 }
+/** Where `read` gives what it names: past parentheses, assertions and non-null assertions. */
+function outerOf(read: ts.Expression): ts.Expression {
+  let outer: ts.Expression = read;
+  while (ts.isParenthesizedExpression(outer.parent) || ts.isNonNullExpression(outer.parent) || ts.isAsExpression(outer.parent) || ts.isSatisfiesExpression(outer.parent)) outer = outer.parent;
+  return outer;
+}
+/** The key the member writes index (`CadSourceIndex.writes`) holds `Object.assign` calls under, which no member name can be. */
+const ASSIGN = 'Object.assign()';
+/** The operators that compare or test a value, and the platform's functions that only read one, none of which writes its members. */
+const COMPARISONS: ReadonlySet<ts.SyntaxKind> = new Set([ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken, ts.SyntaxKind.InKeyword, ts.SyntaxKind.InstanceOfKeyword]);
+/** The array methods that add elements, by the position of the first argument they add; `fill` adds its first only. */
+const ADDS: ReadonlyMap<string, number> = new Map([['push', 0], ['unshift', 0], ['splice', 2], ['fill', 0]]);
+const READERS: ReadonlySet<string> = new Set(['Object.keys', 'Object.values', 'Object.entries', 'Object.hasOwn', 'Object.freeze', 'Object.isFrozen', 'JSON.stringify']);
 /** The platform's maps, whose `get` gives what `set` stored. */
 const MAPS: ReadonlySet<string> = new Set(['Map', 'WeakMap']);
 /** The assignments that give their target the value on their right: `=`, and `??=`, `||=` and `&&=`, which may keep the one it holds. */
@@ -374,7 +419,7 @@ function scopeBinding(identifier: ts.Identifier): ts.Node | Binding | undefined 
         if (!ts.isIdentifier(scope.parameters[position].name)) return destructuring(scope.parameters[position].name, name);
         const call = scope.parent;
         if (position === 0 && ts.isCallExpression(call) && call.arguments[0] === scope && ts.isPropertyAccessExpression(call.expression) && ITERATIONS.has(call.expression.name.text))
-          return { kind: 'element', of: call.expression.expression };
+          return { kind: 'element', of: call.expression.expression, callback: scope };
         return { kind: 'parameter', owner: scope, position };
       }
       if (ts.isFunctionExpression(scope) && scope.name?.text === name) return scope;
@@ -817,16 +862,29 @@ export class CadSourceIndex {
     return found;
   }
   /**
-   * Whether call `call`, or the function `call` or `apply` calls, may run a function TypeScript gives no implementation of: a signature
-   * of the project only a type declares, as a function type, an interface's method or a callable parameter's type, each part of a union
-   * callee apart. A check of the walk uses it.
+   * Whether call `call`, or the function `call` or `apply` calls, may run a function TypeScript gives no implementation of, each part of a
+   * union callee apart: a signature of the project only a type declares, as a function type, an interface's method or a callable
+   * parameter's type, or no signature at all, as for a callee of type `any`, `unknown` or the platform's `Function`, unless the callee is
+   * a name or a member TypeScript shows to be only the platform's or a library's. A check of the walk uses it.
    */
   unimplemented(call: ts.CallExpression): boolean {
     const callee = calleeOf(call);
     if (!callee) return false;
     const type = this.checker.getNonNullableType(this.checker.getTypeAtLocation(callee));
-    return (type.isUnion() ? type.types : [type]).some(part => this.checker.getApparentType(part).getCallSignatures().some(({ declaration }) =>
-      declaration !== undefined && !ts.isJSDocSignature(declaration) && this.place(declaration) !== 'outside' && !this.implementation(declaration).length));
+    return (type.isUnion() ? type.types : [type]).some(part => {
+      const signatures = this.checker.getApparentType(part).getCallSignatures();
+      if (!signatures.length) return !this.outsideCallee(callee);
+      return signatures.some(({ declaration }) =>
+        declaration !== undefined && !ts.isJSDocSignature(declaration) && this.place(declaration) !== 'outside' && !this.implementation(declaration).length);
+    });
+  }
+  /** Whether callee `callee` is a name, or a member read by name, every declaration of which TypeScript shows to be outside the source. */
+  private outsideCallee(callee: ts.Expression): boolean {
+    const value = bareExpression(callee);
+    if (ts.isIdentifier(value)) return this.outsideName(value);
+    if (!ts.isPropertyAccessExpression(value)) return false;
+    const { members, outside, unindexed } = this.memberDeclarations(value, value.name.text);
+    return outside && !members.length && !unindexed;
   }
   /**
    * Whether the member `path` ends at, read off what `node` gives through members, elements and calls by the types TypeScript gives each
@@ -871,6 +929,90 @@ export class CadSourceIndex {
     return this.checker.getNonNullableType(this.checker.getTypeAtLocation(node)).getCallSignatures().length > 0;
   }
   /**
+   * Whether calling what `node` gives is proven to run nothing: no part of its type, a union's taken apart, has a call signature or stands
+   * for any function, as `any`, `unknown` and the platform's `Function` do.
+   */
+  uncallable(node: ts.Node): boolean {
+    const type = this.checker.getNonNullableType(this.checker.getTypeAtLocation(node));
+    return (type.isUnion() ? type.types : [type]).every(part => !(part.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))
+      && !this.checker.getApparentType(part).getCallSignatures().length && !this.functionLike(part));
+  }
+  /** Whether `type` is the platform's `Function`, or extends it: its `apply` is the one `Function` declares. */
+  private functionLike(type: ts.Type): boolean {
+    return (this.checker.getApparentType(type).getProperty('apply')?.declarations ?? []).some(declaration => ts.isInterfaceDeclaration(declaration.parent)
+      && ['Function', 'CallableFunction', 'NewableFunction'].includes(declaration.parent.name.text) && this.place(declaration) === 'outside');
+  }
+  /**
+   * Whether what `node` gives is a list, each part of a union apart: the platform's array, read-only or not, or a tuple, whose iteration
+   * methods give a callback each element, its index and the list.
+   */
+  isList(node: ts.Node): boolean {
+    const type = this.checker.getNonNullableType(this.checker.getTypeAtLocation(node)), parts = type.isUnion() ? type.types : [type];
+    return parts.length > 0 && parts.every(part => {
+      if (!(part.flags & ts.TypeFlags.Object)) return false;
+      const target = (part as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference ? (part as ts.TypeReference).target : part as ts.ObjectType;
+      if (target.objectFlags & ts.ObjectFlags.Tuple) return true;
+      const symbol = target.getSymbol();
+      return symbol !== undefined && (symbol.name === 'Array' || symbol.name === 'ReadonlyArray') && (symbol.declarations ?? []).every(declaration => this.place(declaration) === 'outside');
+    });
+  }
+  private writeSites: ReadonlyMap<string, readonly CadReference[]> | undefined;
+  /**
+   * Every member write in the files the index holds, by the name it writes: a member read by name or by a literal key, or by a key whose
+   * type allows only literals, that an assignment, an update or a destructuring assignment writes, under each name, and each
+   * `Object.assign` call, which writes its first argument's members, under `ASSIGN`.
+   */
+  private writes(): ReadonlyMap<string, readonly CadReference[]> {
+    if (this.writeSites) return this.writeSites;
+    const found = new Map<string, CadReference[]>(), add = (name: string, file: string, site: ts.Node) => (found.get(name) ?? found.set(name, []).get(name)!).push({ file, site: site as CadMemberRead });
+    for (const [file, source] of this.files) {
+      const visit = (node: ts.Node) => {
+        if (ts.isPropertyAccessExpression(node) && isAssigned(node)) add(node.name.text, file, node);
+        else if (ts.isElementAccessExpression(node) && isAssigned(node)) {
+          const key = bareExpression(node.argumentExpression);
+          for (const name of ts.isStringLiteralLike(key) || ts.isNumericLiteral(key) ? [key.text] : this.literalKeys(key) ?? []) add(name, file, node);
+        } else if (ts.isCallExpression(node) && node.arguments.length > 1 && bareExpression(node.expression).getText() === 'Object.assign') add(ASSIGN, file, node);
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+    }
+    return this.writeSites = found;
+  }
+  private writeDeclarations = new Map<ts.Node, readonly ts.Declaration[]>();
+  /**
+   * The writes of member `name` (`ELEMENT` for any element) of what `node` gives: each member write (`writes`) whose member TypeScript
+   * gives one of the declarations of `name` on `node`'s type or of `extra`, each `Object.assign` call whose first argument's type gives
+   * one, and, for variable `holder`, each write of a member of that name or by a key the walk cannot tell, or of any member for `ELEMENT`,
+   * or `Object.assign` call, on one of its names. `declared` when a declaration of the source on `node`'s type gives the member, whose
+   * writes through any value of a type declaring it the declarations find.
+   */
+  propertyWrites(node: ts.Node, name: string, holder?: CadDiagnosticRoot, extra: readonly ts.Node[] = []): { readonly writes: readonly CadReference[]; readonly declared: boolean } {
+    const own = name === ELEMENT ? [] : this.propertyDeclarations(this.checker.getTypeAtLocation(node), name), wanted = new Set<ts.Node>([...own, ...extra]);
+    const declared = own.some(declaration => this.place(declaration) === 'source');
+    const gives = (site: ts.Node) => {
+      let found = this.writeDeclarations.get(site);
+      if (!found) this.writeDeclarations.set(site, found = this.readDeclarations(site as CadMemberRead));
+      return found.some(declaration => wanted.has(declaration));
+    };
+    const all = this.writes(), writes = new Set<CadReference>();
+    if (wanted.size) {
+      for (const write of all.get(name) ?? []) if (gives(write.site)) writes.add(write);
+      for (const write of all.get(ASSIGN) ?? []) {
+        const target = (write.site as unknown as ts.CallExpression).arguments[0];
+        if (this.propertyDeclarations(this.checker.getTypeAtLocation(target), name).some(declaration => wanted.has(declaration))) writes.add(write);
+      }
+    }
+    if (holder) for (const { file, site } of this.references(holder)) {
+      const outer = outerOf(site as ts.Expression), member = outer.parent;
+      if ((ts.isPropertyAccessExpression(member) || ts.isElementAccessExpression(member)) && member.expression === outer && isAssigned(member)) {
+        const key = ts.isPropertyAccessExpression(member) ? member.name.text : bareExpression(member.argumentExpression);
+        const keys = typeof key === 'string' ? [key] : ts.isStringLiteralLike(key) || ts.isNumericLiteral(key) ? [key.text] : this.literalKeys(key);
+        if (name === ELEMENT || !keys || keys.includes(name)) writes.add({ file, site: member });
+      } else if (ts.isCallExpression(member) && member.arguments[0] === outer && bareExpression(member.expression).getText() === 'Object.assign') writes.add({ file, site: member as unknown as CadMemberRead });
+    }
+    return { writes: [...writes], declared };
+  }
+  /**
    * Whether object literal member `member` implements signature `declaration`: the type the literal is written as, which its declaration
    * or the place it is given gives it, declares its member `name` there. A definition written for one kind of a registry is one, although
    * its type, taking only that kind's values, is no value of the registry's type over every kind.
@@ -889,6 +1031,11 @@ export class CadSourceIndex {
     if (!ts.isObjectLiteralExpression(owner) && !ts.isClassLike(owner)) return false;
     const type = this.checker.getTypeAtLocation(owner);
     return this.checker.isTypeAssignableTo(type, receiver) || ts.isObjectLiteralExpression(owner) && this.checker.isTypeAssignableTo(this.checker.getWidenedType(type), receiver);
+  }
+  /** The declarations of member `name` of the type object literal `literal` is written as, which the place it is given gives it. */
+  writtenAs(literal: ts.ObjectLiteralExpression, name: string): readonly ts.Declaration[] {
+    const written = this.checker.getContextualType(literal);
+    return written ? this.propertyDeclarations(written, name) : [];
   }
   /** The declarations of property `name` of `type`, through each member of a union or intersection. */
   private propertyDeclarations(type: ts.Type, name: string): readonly ts.Declaration[] {
@@ -959,6 +1106,21 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   const templated: { readonly file: string; readonly value: ts.TemplateExpression }[] = [];
   const raises = new Set<ts.Node>(), untold = new Set<ts.Node>(), argumentsRead = new Map<ts.Node, Set<ts.Node>>(), escaped = new Set<ts.Node>();
   const unresolved = new Set<ts.Node>(), stopped = new Set<ts.Node>();
+  /**
+   * The outcomes of the calls the walk traces from their value (`CadTrace`). Each reading of a value (`codesOf`) is a node below the
+   * readings that asked for it; an outcome of one, a function the walk entered, a stop, code outside the source, a value proven to run
+   * nothing or a report, settles it and every reading above it. A reading of a call's function that reaches neither an outcome nor a
+   * further reading (`readings`, where each is) is reported there, as is a trace that settles none where the call is: each branch of what
+   * a call may run ends in an outcome.
+   */
+  const above = new Map<string, Set<string>>(), settled = new Set<string>(), asking = new Set<string>(), readings = new Map<string, string>();
+  let current: string | undefined;
+  const settle = (key: string) => { if (settled.has(key)) return; settled.add(key); for (const parent of above.get(key) ?? []) settle(parent); };
+  const link = (key: string, parent: string) => { (above.get(key) ?? above.set(key, new Set()).get(key)!).add(parent); asking.add(parent); if (settled.has(key)) settle(parent); };
+  /** An outcome of the reading under way. */
+  const establish = () => { if (current !== undefined) settle(current); };
+  /** Reports `text`, which is an outcome of the reading under way. */
+  const report = (text: string) => { unexpanded.add(text); establish(); };
   /** The names, member reads, calls and constructions the walk visited, where it reads a parameter's arguments. */
   const visited = new Set<ts.Node>();
   /** The functions the walk entered: declarations it took and functions written in the code it walked. */
@@ -980,7 +1142,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     if (name && ts.isIdentifier(name) && stop.has(`${file}:${name.text}`)) { stopped.add(node); return; }
     // A factory's caller gives the code it raises, which is read at each call (`factoryRead`); its body only passes that code on. One
     // reached another way may raise a code the walk never reads.
-    if (isCadErrorFactory(node)) { unexpanded.add(`${file}: ${(name as ts.Identifier).text}, a CadError factory reached where the walk cannot read its code`); return; }
+    if (isCadErrorFactory(node)) { report(`${file}: ${(name as ts.Identifier).text}, a CadError factory reached where the walk cannot read its code`); return; }
     const named = name && propertyName(name as ts.PropertyName);
     if (named) declarations.add(`${file}:${named}`);
     // A variable's initializer, the expression a module exports as default, and a class's constructor, field initializers and static
@@ -998,7 +1160,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     } else queue.push({ file, node });
   };
   /** Parameters that carry a code, or a function a call runs (`CadTrace`), read at the function's walked calls once the walk is complete. */
-  const passed: { readonly file: string; readonly owner: ts.FunctionLikeDeclaration; readonly position: number; readonly path: readonly string[]; readonly at: string; readonly trace: CadTrace }[] = [];
+  const passed: { readonly file: string; readonly owner: ts.FunctionLikeDeclaration; readonly position: number; readonly path: readonly string[]; readonly at: string; readonly trace: CadTrace; readonly key: string | undefined }[] = [];
   const read = new Set<string>();
   const isConstant = (declaration: ts.VariableDeclaration) => (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0;
   /** The string a key names: a literal, or a constant of the source initialized to one. */
@@ -1015,12 +1177,23 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
    */
   const codesOf = (file: string, expression: ts.Expression, path: readonly string[] = [], at = `${file}: ${expression.getText()}`, trace: CadTrace = 'code'): void => {
     const value = bareExpression(expression), key = `${trace}:${file}:${value.pos}:${value.end}:${path.join('.')}`;
+    if (current !== undefined) link(key, current);
     if (read.has(key)) return;
     read.add(key);
+    if (trace === 'callee') {
+      const reached = `${file}: ${brief(expression)}${path.map(name => name === ELEMENT ? ELEMENT : name === CALL ? '(…)' : `.${name}`).join('')}`;
+      readings.set(key, reached === at ? at : `${at}, from ${reached}`);
+    }
+    const asking = current;
+    current = key;
+    try { readValue(file, expression, value, path, at, trace); } finally { current = asking; }
+  };
+  /** The reading `codesOf` makes of `value`, which is `expression` past parentheses and assertions. */
+  const readValue = (file: string, expression: ts.Expression, value: ts.Expression, path: readonly string[], at: string, trace: CadTrace): void => {
     const callee = trace === 'callee';
     // Where the reading is, shown after the site when it went elsewhere; a call's arguments are left out.
     const here = (text = callee ? brief(expression) : expression.getText()) => `${file}: ${text}${path.map(name => name === ELEMENT ? ELEMENT : name === CALL ? '(…)' : `.${name}`).join('')}`;
-    const unread = () => { const reached = here(); unexpanded.add(reached === at ? at : `${at}, from ${reached}`); };
+    const unread = () => { const reached = here(); report(reached === at ? at : `${at}, from ${reached}`); };
     /**
      * What `rest` reads off a function of `owned`: each result of a call, read on. A function holds no code of its own; called, it runs,
      * which the walk entered.
@@ -1028,9 +1201,10 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     const called = (owned: string, owner: ts.FunctionLikeDeclaration, rest: readonly string[]) => {
       if (rest[0] === CALL) for (const result of returnsOf(owner)) codesOf(owned, result, rest.slice(1), at, trace);
       else if (callee && rest.length) unread();
-      else if (callee && stopped.has(owner)) return;
-      else if (callee && !owner.body) unexpanded.add(`${at}, from ${owned}: ${brief(owner)}, a function with no body`);
-      else if (callee && !entered.has(owner)) unexpanded.add(`${at}, from ${owned}: ${brief(owner)}, a function the walk did not enter`);
+      else if (callee && stopped.has(owner)) establish();
+      else if (callee && !owner.body) report(`${at}, from ${owned}: ${brief(owner)}, a function with no body`);
+      else if (callee && !entered.has(owner)) report(`${at}, from ${owned}: ${brief(owner)}, a function the walk did not enter`);
+      else if (callee) establish();
     };
     /**
      * What a declaration of the source gives: a constant's value, or a function's results. Called, a class or an enum runs nothing, a
@@ -1039,28 +1213,58 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
      */
     const declared = ({ file: owned, node }: CadDiagnosticRoot, rest: readonly string[]) => {
       const name = declarationName(node);
-      if (callee && name !== undefined && stop.has(`${owned}:${name}`)) { stopped.add(node); return; }
+      if (callee && name !== undefined && stop.has(`${owned}:${name}`)) { stopped.add(node); establish(); return; }
       const variable = callee && ts.isVariableDeclaration(node) && isConstant(node) ? node : undefined, made = variable?.initializer && bareExpression(variable.initializer);
       if (variable && made && ts.isNewExpression(made) && ts.isIdentifier(made.expression) && MAPS.has(made.expression.text) && index.outsideName(made.expression)
         && rest[0] === 'get' && rest[1] === CALL) { stored(owned, variable, made, rest.slice(2)); return; }
       const constant = constantValue(node);
       if (constant) codesOf(owned, constant, rest, at, trace);
       else if (isFunctionLike(node)) called(owned, node, rest);
-      else if (callee && !rest.length && (ts.isClassLike(node) || ts.isEnumDeclaration(node))) return;
+      else if (callee && !rest.length && (ts.isClassLike(node) || ts.isEnumDeclaration(node))) { establish(); return; }
       else if (callee && ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) assigned(node, owned, index.references({ file: owned, node }), rest);
-      else unread();
+      else { unread(); return; }
+      // A constant's value, as a variable's, may be given its members after it is made.
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && rest.length && rest[0] !== CALL) written(owned, node, rest);
+    };
+    /**
+     * What is written into variable `holder`'s value as member `rest[0]`, read for the rest of `rest`: what each write the index finds
+     * (`propertyWrites`) assigns, and for any element what an array's `push`, `unshift`, `splice` or `fill` adds, any other write being
+     * reported. Read for a call's function, when no declaration of the source gives the member, each name of the variable that gives its
+     * value on is reported too, as what it is given to may write it where no declaration shows.
+     */
+    const written = (owned: string, holder: ts.VariableDeclaration, rest: readonly string[]) => {
+      const [name, ...below] = rest, own = { file: owned, node: holder }, { writes, declared } = index.propertyWrites(holder.name, name, own);
+      for (const write of writes) writtenBy(write, below);
+      if (name === ELEMENT) for (const { file: user, site } of index.references(own)) added(user, site as ts.Expression, below);
+      if (callee && !declared) for (const { file: user, site } of index.references(own)) if (givenOn(site as ts.Expression))
+        report(`${at}, from ${user}: ${brief(outermost(site as ts.Expression).parent)}, ${brief(holder.name)} given on, whose members the walk cannot see written`);
+    };
+    /** What a call of an array method through name `site` adds as its elements, read for `rest`; a spread argument adds its elements. */
+    const added = (user: string, site: ts.Expression, rest: readonly string[]) => {
+      const outer = outermost(site), method = outer.parent, call = method.parent;
+      if (!ts.isPropertyAccessExpression(method) || method.expression !== outer || !ts.isCallExpression(call) || call.expression !== method) return;
+      const from = ADDS.get(method.name.text);
+      if (from === undefined || !index.isList(outer)) return;
+      for (const argument of call.arguments.slice(from, method.name.text === 'fill' ? 1 : undefined))
+        codesOf(user, ts.isSpreadElement(argument) ? argument.expression : argument, ts.isSpreadElement(argument) ? [ELEMENT, ...rest] : rest, at, trace);
+    };
+    /** What write `write` (`propertyWrites`) gives the member it writes, read for `rest`: an assignment's value; any other write is reported. */
+    const writtenBy = ({ file: writer, site }: CadReference, rest: readonly string[]) => {
+      const outer = outermost(site as ts.Expression), write = outer.parent;
+      if (!ts.isCallExpression(site) && ts.isBinaryExpression(write) && write.left === outer && ASSIGNMENTS.has(write.operatorToken.kind)) codesOf(writer, write.right, rest, at, trace);
+      else report(`${at}, from ${writer}: ${brief(ts.isCallExpression(site) ? site : write)}, a write the walk cannot read`);
     };
     /**
      * What `get` gives of constant map `node`, made empty by `made`: each value a `set` call on it stores. Read, tested or cleared, it
      * stores nothing; built with entries, or used any other way, as given on, it may hold what the walk does not see.
      */
     const stored = (owned: string, node: ts.VariableDeclaration, made: ts.NewExpression, rest: readonly string[]) => {
-      if (made.arguments?.length) unexpanded.add(`${at}, from ${owned}: ${brief(made)}, a map built with entries the walk cannot read`);
+      if (made.arguments?.length) report(`${at}, from ${owned}: ${brief(made)}, a map built with entries the walk cannot read`);
       for (const { file: user, site } of index.references({ file: owned, node })) {
         const outer = outermost(site as ts.Expression), member = outer.parent, call = member.parent;
         const method = ts.isPropertyAccessExpression(member) && member.expression === outer ? member.name.text : undefined;
         if (method === 'set' && ts.isCallExpression(call) && call.expression === member && call.arguments.length === 2 && !isReceiver(outermost(call))) codesOf(user, call.arguments[1], rest, at, trace);
-        else if (method !== 'get' && method !== 'has' && method !== 'delete' && method !== 'clear') unexpanded.add(`${at}, from ${user}: ${brief(member)}, a use of a map the walk cannot read`);
+        else if (method !== 'get' && method !== 'has' && method !== 'delete' && method !== 'clear') report(`${at}, from ${user}: ${brief(member)}, a use of a map the walk cannot read`);
       }
     };
     /**
@@ -1076,13 +1280,13 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         const outer = outermost(site as ts.Expression), write = outer.parent;
         given = true;
         if (ts.isBinaryExpression(write) && write.left === outer && ASSIGNMENTS.has(write.operatorToken.kind)) codesOf(writer, write.right, rest, at, trace);
-        else unexpanded.add(`${at}, from ${writer}: ${brief(write)}, a write the walk cannot read`);
+        else report(`${at}, from ${writer}: ${brief(write)}, a write the walk cannot read`);
       }
-      if (!given) unexpanded.add(`${at}, from ${owned}: ${brief(holder.name)}, declared with no value the walk can find`);
+      if (!given) report(`${at}, from ${owned}: ${brief(holder.name)}, declared with no value the walk can find`);
     };
     if (path.length > DEPTH) { unread(); return; }
     // Called, a member the platform or a library declares on the type of what reaches it runs none of the source, as a member read does.
-    if (callee && path.length && path[path.length - 1] !== CALL && path[path.length - 1] !== ELEMENT && index.outsideMember(value, path)) return;
+    if (callee && path.length && path[path.length - 1] !== CALL && path[path.length - 1] !== ELEMENT && index.outsideMember(value, path)) { establish(); return; }
     if (ts.isConditionalExpression(value)) { codesOf(file, value.whenTrue, path, at, trace); codesOf(file, value.whenFalse, path, at, trace); return; }
     if (ts.isBinaryExpression(value) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(value.operatorToken.kind)) {
       codesOf(file, value.left, path, at, trace); codesOf(file, value.right, path, at, trace);
@@ -1093,11 +1297,12 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       codesOf(file, value.left, path, at, trace); codesOf(file, value.right, path, at, trace);
       return;
     }
-    if (value.kind === ts.SyntaxKind.NullKeyword || ts.isIdentifier(value) && value.text === 'undefined') return;
-    // Called, a value of no function's type, such as a string, an object or a class, runs nothing; one of type `any` may be any function.
-    if (callee && !path.length && !ts.isIdentifier(value) && !index.untyped(value) && !index.callable(value)) return;
+    if (value.kind === ts.SyntaxKind.NullKeyword || ts.isIdentifier(value) && value.text === 'undefined') { establish(); return; }
+    // Called, a value of no function's type, such as a string, an object or a class, runs nothing; one of type `any`, `unknown` or the
+    // platform's `Function` may be any function.
+    if (callee && !path.length && !ts.isIdentifier(value) && index.uncallable(value)) { establish(); return; }
     if (ts.isStringLiteralLike(value) || ts.isTemplateExpression(value)) {
-      if (callee) return;
+      if (callee) { establish(); return; }
       if (!path.length && ts.isStringLiteralLike(value)) codes.add(value.text);
       // Expanded once the walk is complete, when every declaration a substitution's values may depend on is known.
       else if (!path.length && ts.isTemplateExpression(value)) templated.push({ file, value });
@@ -1105,12 +1310,23 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       else if (path.includes(CALL)) unread();
       return;
     }
-    // Called, a private property read through `this` holds what its class assigns it.
+    // Called, a private property read through `this` holds what its class assigns it, and as an array what its methods add. Its value given
+    // on may be given members where the walk cannot see.
     const owned = callee && ts.isPropertyAccessExpression(value) && value.expression.kind === ts.SyntaxKind.ThisKeyword ? index.privateProperty(value) : undefined;
-    if (owned) { assigned(owned, file, index.propertyReads(owned), path); return; }
+    if (owned) {
+      const reads = index.propertyReads(owned);
+      assigned(owned, file, reads, path);
+      if (path[0] === ELEMENT) for (const { file: user, site } of reads) added(user, site as ts.Expression, path.slice(1));
+      if (path.length) for (const { file: user, site } of reads) if (givenOn(site as ts.Expression))
+        report(`${at}, from ${user}: ${brief(outermost(site as ts.Expression).parent)}, ${brief(site)} given on, whose members the walk cannot see written`);
+      return;
+    }
     // Called, any other member read the walk took runs what its outcome (`CadMemberOutcome`) says: the members it followed, which it
-    // entered or traced, or none past a stop, a library's member or a report.
-    if (callee && !path.length && (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) && accesses.has(value)) return;
+    // entered or traced, or none past a stop, a library's member or a report. Running nothing is no outcome of a call.
+    if (callee && !path.length && (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) && accesses.has(value)) {
+      if (accesses.get(value) !== 'no-code') establish();
+      return;
+    }
     if (ts.isPropertyAccessExpression(value)) { codesOf(file, value.expression, [value.name.text, ...path], at, trace); return; }
     if (ts.isElementAccessExpression(value)) {
       // A numeric index reads any element; a key the walk cannot tell reads any element or property.
@@ -1128,13 +1344,16 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     if (ts.isCallExpression(value)) { codesOf(file, value.expression, [CALL, ...path], at, trace); return; }
     if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) { called(file, value, path); return; }
     if (ts.isArrayLiteralExpression(value) && path[0] === ELEMENT) {
+      // Past the elements it lists, or at a hole, an array reads as `undefined`, which runs nothing; what is added to it is its holder's.
       for (const element of value.elements) if (!ts.isOmittedExpression(element))
         codesOf(file, ts.isSpreadElement(element) ? element.expression : element, ts.isSpreadElement(element) ? path : path.slice(1), at, trace);
+      establish();
       return;
     }
     if (ts.isObjectLiteralExpression(value) && path.length) {
-      // From the last property: one of that name replaces those before it, and a spread or a computed key may hold it. An absent property
-      // holds no code.
+      // From the last property: one of that name replaces those before it, and a spread or a computed key may hold it. Each value written
+      // to the property found, by its declaration, is read too. Absent, the member reads as `undefined`, which runs nothing, or as what is
+      // written to it through the type the object is written as.
       const [name, ...rest] = path;
       for (const property of [...value.properties].reverse()) {
         if (ts.isSpreadAssignment(property)) { codesOf(file, property.expression, path, at, trace); continue; }
@@ -1146,14 +1365,18 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         else if (ts.isShorthandPropertyAssignment(property)) codesOf(file, property.name, rest, at, trace);
         else if (ts.isMethodDeclaration(property)) called(file, property, rest);
         else unread();
-        if (named && name !== ELEMENT) return;
+        if (named && name !== ELEMENT) { for (const write of index.propertyWrites(value, name, undefined, [property, ...index.writtenAs(value, name)]).writes) writtenBy(write, rest); return; }
       }
+      if (name !== ELEMENT) for (const write of index.propertyWrites(value, name, undefined, index.writtenAs(value, name)).writes) writtenBy(write, rest);
+      establish();
       return;
     }
     if (ts.isIdentifier(value)) {
       const bound = binding(value);
       if (bound && isBinding(bound)) {
-        if (bound.kind === 'parameter') passed.push({ file, owner: bound.owner, position: bound.position, path, at, trace });
+        if (bound.kind === 'parameter') passed.push({ file, owner: bound.owner, position: bound.position, path, at, trace, key: current });
+        // A callback's first parameter is an element of a list it iterates; what any other receiver's method gives it is read where it is given.
+        else if (bound.kind === 'element' && bound.callback && !index.isList(bound.of)) passed.push({ file, owner: bound.callback, position: 0, path, at, trace, key: current });
         else if (bound.kind === 'element') codesOf(file, bound.of, [ELEMENT, ...path], at, trace);
         // A caught error's code was collected at the `CadError` that raised it, in the walked `try` block.
         else if (bound.kind === 'caught' && !callee && path.length === 1 && path[0] === 'code') taken.add(here());
@@ -1171,9 +1394,24 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       if (found.length) found.forEach(declaration => declared(declaration, path));
       // Called, a function of the platform or a library runs no code of the source; what one returns or holds may be the source's.
       else if (!callee || path.length || !index.outsideName(value)) unread();
+      else establish();
       return;
     }
     unread();
+  };
+  /**
+   * Whether name `site` gives its value on, to what may write its members: any use but reading or writing a member of it, destructuring,
+   * iterating, spreading or copying it, comparing or testing it, reading its type, and assigning the variable itself.
+   */
+  const givenOn = (site: ts.Expression) => {
+    const outer = outermost(site), parent = outer.parent;
+    if (ts.findAncestor(site, ts.isTypeNode) || isReceiver(outer) || isAssigned(site) || ts.isTypeOfExpression(parent) || ts.isSpreadAssignment(parent) || ts.isSpreadElement(parent) && ts.isArrayLiteralExpression(parent.parent)) return false;
+    if (ts.isVariableDeclaration(parent) && parent.initializer === outer && !ts.isIdentifier(parent.name)) return false;
+    if ((ts.isForOfStatement(parent) || ts.isForInStatement(parent)) && parent.expression === outer) return false;
+    if (ts.isBinaryExpression(parent) && COMPARISONS.has(parent.operatorToken.kind)) return false;
+    // `Object.assign` writes its target's members, which the writes found read (`propertyWrites`).
+    if (ts.isCallExpression(parent) && parent.arguments[0] === outer && bareExpression(parent.expression).getText() === 'Object.assign') return false;
+    return !(ts.isCallExpression(parent) && parent.arguments.includes(outer) && READERS.has(bareExpression(parent.expression).getText()));
   };
   /**
    * What a destructured name gives: the path its pattern reads off the value destructured, a `const` declaration's initializer, each
@@ -1192,7 +1430,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       }
       node = pattern.parent;
     }
-    if (ts.isParameter(node) && isFunctionLike(node.parent)) passed.push({ file, owner: node.parent, position: node.parent.parameters.indexOf(node), path: below, at, trace });
+    if (ts.isParameter(node) && isFunctionLike(node.parent)) passed.push({ file, owner: node.parent, position: node.parent.parameters.indexOf(node), path: below, at, trace, key: current });
     else if (ts.isVariableDeclaration(node) && ts.isForOfStatement(node.parent.parent) && isConstant(node)) codesOf(file, node.parent.parent.expression, [ELEMENT, ...below], at, trace);
     else if (ts.isVariableDeclaration(node) && node.initializer && isConstant(node)) codesOf(file, node.initializer, below, at, trace);
     else unread();
@@ -1233,7 +1471,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     raises.add(call);
     const first = call.arguments?.[0];
     if (first && !ts.isSpreadElement(first)) codesOf(file, first);
-    else unexpanded.add(`${file}: ${call.getText()}, a CadError raised with a code the walk cannot read`);
+    else report(`${file}: ${call.getText()}, a CadError raised with a code the walk cannot read`);
   };
   /**
    * The classes `expression` names, by declaration: a class or class expression, a constant that holds one, a namespace's export by name or
@@ -1330,7 +1568,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     else if (!heldByConstant(outer)) {
       const use = methodUse(read);
       if (use === 'tested' || use === 'write' || use === 'update') return 'no-code';
-      unexpanded.add(`${file}: ${read.getText()}, a CadError factory ${use === 'called' ? 'called through call or apply' : 'given on'}, whose code the walk cannot read`);
+      report(`${file}: ${read.getText()}, a CadError factory ${use === 'called' ? 'called through call or apply' : 'given on'}, whose code the walk cannot read`);
       index.cadErrorFactories().forEach(factory => escaped.add(factory));
       if (!ts.isIdentifier(read)) factoryReads.add(read as CadMemberRead);
       return 'unexpanded';
@@ -1348,7 +1586,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     if ((ts.isNewExpression(parent) || ts.isCallExpression(parent)) && parent.expression === outer) { raisedAt(file, parent); return; }
     if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && parent.right === outer || isReceiver(outer)
       || ts.isExpressionWithTypeArguments(parent) && ts.isHeritageClause(parent.parent) || heldByConstant(branchOf(outer))) return;
-    unexpanded.add(`${file}: ${read.getText()}, ${ts.isIdentifier(read) && read.text === 'CadError' ? 'the CadError class' : 'a class raising CadError'} used as a value, which the walk cannot follow`);
+    report(`${file}: ${read.getText()}, ${ts.isIdentifier(read) && read.text === 'CadError' ? 'the CadError class' : 'a class raising CadError'} used as a value, which the walk cannot follow`);
     // What calls its factories through that value is unseen; what constructs it is a `new` the walk cannot tell, reported where it is.
     index.cadErrorFactories().forEach(factory => escaped.add(factory));
   };
@@ -1379,10 +1617,12 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       outcome = 'followed';
       if (!calls) return;
       // Called or given on, what a property holds or a getter returns runs, traced from that value.
-      if (ts.isGetAccessorDeclaration(node)) for (const result of returnsOf(node)) callees.push({ file: found.file, site: at, value: result, path: [], what: 'a function a getter returns' });
-      else if (ts.isPropertyAssignment(node) || ts.isPropertyDeclaration(node) && node.initializer) callees.push({ file: found.file, site: at, value: node.initializer!, path: [], what: 'a function a property holds' });
+      if (ts.isGetAccessorDeclaration(node)) { for (const result of returnsOf(node)) callees.push({ file: found.file, site: at, value: result, path: [], what: 'a function a getter returns' }); return; }
+      if (ts.isPropertyAssignment(node) || ts.isPropertyDeclaration(node) && node.initializer) callees.push({ file: found.file, site: at, value: node.initializer!, path: [], what: 'a function a property holds' });
       else if (ts.isShorthandPropertyAssignment(node) || ts.isParameter(node) && ts.isIdentifier(node.name)) callees.push({ file: found.file, site: at, value: node.name as ts.Identifier, path: [], what: 'a function a property holds' });
-      else if (ts.isPropertyDeclaration(node)) unexpanded.add(`${file}: ${brief(at)}, from ${found.file}: ${brief(node)}, a property declared without a value`);
+      else if (ts.isPropertyDeclaration(node)) report(`${file}: ${brief(at)}, from ${found.file}: ${brief(node)}, a property declared without a value`);
+      const name = propertyName((node as { name?: ts.PropertyName }).name);
+      if (name !== undefined) memberWrites(file, access, name, [node]);
     };
     for (const each of found) {
       const node = each.node;
@@ -1395,7 +1635,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         continue;
       }
       if (use === 'other') {
-        unexpanded.add(`${file}: ${access.getText()}, a method used as a value the walk does not follow`);
+        report(`${file}: ${access.getText()}, a method used as a value the walk does not follow`);
         // What calls the methods it may give is unseen.
         found.forEach(member => escaped.add(member.node));
         return 'unexpanded';
@@ -1403,6 +1643,26 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       follow(each);
     }
     return outcome;
+  };
+  /**
+   * What a member holds may be replaced: each value a write of member `name` read by `access` gives (`propertyWrites`), its declaration
+   * `extra` included, runs where `access` is called or given on; any other write is reported, and so is the receiver's variable given on
+   * when no declaration of the source gives the member, as what it is given to may write it where no declaration shows.
+   */
+  const memberWrites = (file: string, access: CadMemberRead, name: string, extra: readonly ts.Node[] = []) => {
+    const at = siteOf(access), receiver = bareExpression(access.expression);
+    const holder = ts.isIdentifier(receiver) ? index.resolve(file, receiver).find(declared => ts.isVariableDeclaration(declared.node) && ts.isIdentifier(declared.node.name)) : undefined;
+    const { writes, declared } = index.propertyWrites(access.expression, name, holder, extra);
+    for (const { file: writer, site } of writes) {
+      const outer = outermost(site as ts.Expression), write = outer.parent;
+      if (!ts.isCallExpression(site) && ts.isBinaryExpression(write) && write.left === outer && ASSIGNMENTS.has(write.operatorToken.kind))
+        callees.push({ file: writer, site: at, value: write.right, path: [], what: 'a function written to the member it calls' });
+      else { report(`${file}: ${brief(at)}, from ${writer}: ${brief(ts.isCallExpression(site) ? site : write)}, a write the walk cannot read`); untold.add(at); }
+    }
+    if (holder && !declared) for (const { file: user, site } of index.references(holder)) if (givenOn(site as ts.Expression)) {
+      report(`${file}: ${brief(at)}, from ${user}: ${brief(outermost(site as ts.Expression).parent)}, ${brief(receiver)} given on, whose members the walk cannot see written`);
+      untold.add(at);
+    }
   };
   /** What member read `access` runs, which it enters; every way out names what became of it. */
   const memberOutcome = (file: string, access: CadMemberRead): CadMemberOutcome => {
@@ -1414,7 +1674,14 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       // or the receiver has a getter it may read.
       const calls = use === 'called' || (use === 'passed' || use === 'other') && index.callable(access);
       if (!calls && (use === 'write' || !index.hasGetters(access.expression))) return 'no-code';
-      unexpanded.add(`${file}: ${access.getText()}, an element read by a key the walk cannot tell`);
+      report(`${file}: ${access.getText()}, an element read by a key the walk cannot tell`);
+      return 'unexpanded';
+    }
+    // Called, a member whose type gives no call signature, as one of type `any` or the platform's `Function`, may be any function: one
+    // only the platform or a library declares runs none of the source, and any other is reported.
+    if (use === 'called' && !index.callable(access)) {
+      if (names.every(name => { const { members, outside, unindexed } = index.memberDeclarations(access, name); return outside && !members.length && !unindexed; })) return 'outside';
+      report(`${file}: ${access.getText()}, a member called whose type gives no call signature`);
       return 'unexpanded';
     }
     if (ts.isIdentifier(receiver)) {
@@ -1422,7 +1689,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       if (namespace) {
         // A namespace's member is the export it names, used as any other name is.
         const found = names.flatMap(name => index.exported(namespace, name, new Set()));
-        if (!found.length) { unexpanded.add(`${file}: ${access.getText()}, a namespace member the walk cannot find`); return 'unexpanded'; }
+        if (!found.length) { report(`${file}: ${access.getText()}, a namespace member the walk cannot find`); return 'unexpanded'; }
         let outcome: CadMemberOutcome = 'followed';
         for (const declaration of found) {
           const raises = raiser(declaration);
@@ -1435,33 +1702,41 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       const objects = objectsOf(file, receiver);
       if (objects.length) {
         const found = objects.flatMap(({ file: owner, value }) => names.map(name => lastProperties(value, name)?.map(node => ({ file: owner, node, through: undefined }))));
-        // A spread or a computed key that may give the member leaves it to the receiver's type.
-        if (found.every(properties => properties !== undefined)) return classify(file, access, found.flatMap(properties => properties ?? []));
+        // A spread or a computed key that may give the member leaves it to the receiver's type. Called or given on, a member none of the
+        // objects has reads as `undefined` or as what is written to it, traced from each object.
+        if (found.every(properties => properties !== undefined)) {
+          const properties = found.flatMap(each => each ?? []), outcome = classify(file, access, properties);
+          if (outcome !== 'no-code' || properties.length || use !== 'called' && use !== 'passed' || !index.callable(access)) return outcome;
+          for (const { file: owner, value } of objects) for (const name of names) callees.push({ file: owner, site: siteOf(access), value, path: [name], what: 'a member none of its objects holds' });
+          for (const name of names) memberWrites(file, access, name);
+          return 'traced';
+        }
       }
     }
     // The receiver's type says which members the read runs.
     const found: CalledMember[] = [], undeclared: string[] = [], bare: string[] = [];
-    let source = false;
+    let source = false, stops = false;
     for (const name of names) {
       const declared = index.accessedMembers(access, name, member => runs(member, use));
       if (!declared) undeclared.push(name);
-      else if (declared.unindexed) { unexpanded.add(`${file}: ${access.getText()}, a member declared in code of the project the walk does not hold`); return 'unexpanded'; }
+      else if (declared.unindexed) { report(`${file}: ${access.getText()}, a member declared in code of the project the walk does not hold`); return 'unexpanded'; }
       else {
         found.push(...declared.members); source ||= declared.source;
         if (declared.bare.some(through => !through || !stop.has(through))) bare.push(name);
+        else if (declared.bare.length) stops = true;
       }
     }
     if (undeclared.length && index.untyped(access.expression)) {
       // A receiver whose type says nothing, such as `any`, may be any of the source's members of that name.
       if (undeclared.some(name => index.membersNamed(name).some(candidate => runs(candidate.node, use)))) {
-        unexpanded.add(`${file}: ${access.getText()}, a method its receiver's type does not declare`);
+        report(`${file}: ${access.getText()}, a method its receiver's type does not declare`);
         return 'unexpanded';
       }
     } else if (undeclared.length && (use === 'called' || use === 'passed' || use === 'other') && index.callable(access)) {
       // A type that gives the member without declaring it, such as a record mapped over kinds, has no getter; a function it holds is a
       // property or method of that name of the source's object literals and classes, any of which it may hold.
       const holders = undeclared.flatMap(name => index.membersNamed(name)).filter(candidate => runs(candidate.node, use) && !ts.isGetAccessorDeclaration(candidate.node));
-      if (!holders.length) { unexpanded.add(`${file}: ${access.getText()}, a function its receiver's type holds that the walk cannot find`); return 'unexpanded'; }
+      if (!holders.length) { report(`${file}: ${access.getText()}, a function its receiver's type holds that the walk cannot find`); return 'unexpanded'; }
       found.push(...holders.map(holder => ({ ...holder, through: undefined })));
     }
     // Called or given on, a function only signatures of the source declare, which no object or class of the source fits, is what the
@@ -1472,9 +1747,15 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       callees.push({ file, site: siteOf(access), value: own ? access : access.expression, path: own ? [] : [name], what: 'a member only a signature declares' });
     if (found.length) { const outcome = classify(file, access, found); return outcome === 'no-code' && traces ? 'traced' : outcome; }
     if (traces) return 'traced';
+    if (stops && (use === 'called' || use === 'passed')) return 'stopped';
     return undeclared.length || source ? 'no-code' : 'outside';
   };
-  const member = (file: string, access: CadMemberRead) => { accesses.set(access, memberOutcome(file, access)); };
+  const member = (file: string, access: CadMemberRead) => {
+    let outcome = memberOutcome(file, access);
+    // A call establishes what it runs or is reported: running nothing is no outcome of a call.
+    if (outcome === 'no-code' && methodUse(access) === 'called') { report(`${file}: ${access.getText()}, a member call the walk establishes no function of`); outcome = 'unexpanded'; }
+    accesses.set(access, outcome);
+  };
   /** A destructuring read runs the getters of the names it binds, and every own getter a rest element takes. */
   const destructuredGetters = (file: string, pattern: ts.ObjectBindingPattern) => {
     const names: string[] = [];
@@ -1483,7 +1764,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       if (element.dotDotDotToken) { rest = true; continue; }
       const name = propertyName(element.propertyName ?? (ts.isIdentifier(element.name) ? element.name : undefined));
       if (name !== undefined) names.push(name);
-      else if (index.hasGetters(pattern)) unexpanded.add(`${file}: ${element.getText()}, a destructured key the walk cannot tell`);
+      else if (index.hasGetters(pattern)) report(`${file}: ${element.getText()}, a destructured key the walk cannot tell`);
     }
     for (const found of index.getters(pattern, names)) push(found);
     if (rest) for (const found of index.getters(pattern, undefined, true)) push(found);
@@ -1503,13 +1784,13 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     if (namespace) {
       if (isReceiver(name) || ts.isTypeOfExpression(outermost(name).parent)) return;
       unresolved.add(name);
-      unexpanded.add(`${file}: ${name.text}, a namespace used as a value, which the walk cannot follow`);
+      report(`${file}: ${name.text}, a namespace used as a value, which the walk cannot follow`);
       for (const found of index.moduleExports(namespace)) push(found);
       return;
     }
     if (index.outsideName(name)) return;
     unresolved.add(name);
-    unexpanded.add(`${file}: ${name.text}, a name the walk cannot resolve to a declaration of the source`);
+    report(`${file}: ${name.text}, a name the walk cannot resolve to a declaration of the source`);
   };
   /**
    * Whether calling `callee` runs a function the walk does not enter by its name, which it traces from the value that gives it instead
@@ -1571,7 +1852,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
         : ts.isCallExpression(child) && child.expression.kind === ts.SyntaxKind.SuperKeyword ? extendsOf(ts.findAncestor(child, ts.isClassLike)) : undefined;
       if (constructs) {
         const classes = classesNamed(file, constructs);
-        if (!classes) { untold.add(child); unexpanded.add(`${file}: ${constructs.getText()}, a class the walk cannot tell, constructed`); }
+        if (!classes) { untold.add(child); report(`${file}: ${constructs.getText()}, a class the walk cannot tell, constructed`); }
         else if (classes.some(found => raiser(found) === 'class')) raisedAt(file, child as ts.NewExpression | ts.CallExpression);
       }
       if (ts.isIdentifier(child) && isReference(child)) {
@@ -1642,7 +1923,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
    */
   const constructed = (file: string, owner: ts.ClassLikeDeclaration, built: ts.ConstructorDeclaration, position: number, path: readonly string[], at: string, trace: CadTrace) => {
     const named = className(owner);
-    if (!named) { unexpanded.add(`${at}, from ${file}: an unnamed class`); escaped.add(built); return; }
+    if (!named) { report(`${at}, from ${file}: an unnamed class`); escaped.add(built); return; }
     for (const { file: caller, site, outer } of uses(file, named)) {
       const parent = outer.parent;
       if (ts.isNewExpression(parent) && parent.expression === outer) { argument(caller, parent, built, position, path, at, file, trace); continue; }
@@ -1662,7 +1943,7 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       }
       // Testing an instance's class or reading a static member constructs nothing.
       if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && parent.right === outer || isReceiver(outer)) continue;
-      unexpanded.add(`${caller}: ${site.getText()} passed on`);
+      report(`${caller}: ${site.getText()} passed on`);
       escaped.add(built);
     }
   };
@@ -1673,10 +1954,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   const argument = (caller: string, call: ts.NewExpression | ts.CallExpression, owner: ts.FunctionLikeDeclaration, position: number, path: readonly string[], at: string, file: string, trace: CadTrace) => {
     const given = call.arguments ?? [], fallback = owner.parameters[position].initializer;
     (argumentsRead.get(owner) ?? argumentsRead.set(owner, new Set()).get(owner)!).add(call);
-    if (given.slice(0, position + 1).some(ts.isSpreadElement)) unexpanded.add(`${caller}: ${call.getText()}`);
+    if (given.slice(0, position + 1).some(ts.isSpreadElement)) report(`${caller}: ${call.getText()}`);
     else if (given[position]) codesOf(caller, given[position], path, at, trace);
     else if (fallback) codesOf(file, fallback, path, at, trace);
-    else if (trace === 'code') unexpanded.add(`${caller}: ${call.getText()}`);
+    else if (trace === 'code') report(`${caller}: ${call.getText()}`);
+    else establish();
   };
   /**
    * What gives parameter `position` of function `owner`, written as an argument of a call, when a function is traced from it: each
@@ -1698,29 +1980,38 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       const parameter = takes[place]!, name = (parameter.name as ts.Identifier).text, where = index.where(runner);
       if (seen.has(parameter)) return;
       seen.add(parameter);
-      if (!entered.has(runner)) { unexpanded.add(`${at}, from ${where}: ${brief(runner)}, a function the walk did not enter`); return; }
+      if (!entered.has(runner)) { report(`${at}, from ${where}: ${brief(runner)}, a function the walk did not enter`); return; }
+      let used = false;
       const visit = (node: ts.Node) => {
         if (ts.isIdentifier(node) && node.text === name && isReference(node) && index.nameDeclarations(node).declarations.includes(parameter)) {
+          used = true;
           const site = outermost(node), use = site.parent;
           if (ts.isCallExpression(use) && use.expression === site) { if (visited.has(use)) argument(where, use, owner, position, path, at, file, 'callee'); }
           else if (!(ts.isCallExpression(use) || ts.isNewExpression(use)) || !use.arguments?.includes(site) || visited.has(use) && !given(file, owner, position, path, at, site, seen))
-            unexpanded.add(`${at}, from ${where}: ${brief(use)}, ${name} given on`);
+            report(`${at}, from ${where}: ${brief(use)}, ${name} given on`);
         }
         ts.forEachChild(node, visit);
       };
       visit(runner);
+      // A function that never uses the parameter never calls what it is given.
+      if (!used) establish();
     });
     return true;
   };
-  /** The list whose iteration method (`ITERATIONS`) is given `outer` as its callback, which takes each element, its index and the list. */
+  /**
+   * The list whose iteration method (`ITERATIONS`) is given `outer` as its callback, which takes each element, its index and the list.
+   * A method of that name of a map, a set or any other object (`isList`) gives its callback what that object's method gives it instead.
+   */
   const iteratedBy = (outer: ts.Expression) => {
     const call = outer.parent;
-    return ts.isCallExpression(call) && call.arguments[0] === outer && ts.isPropertyAccessExpression(call.expression) && ITERATIONS.has(call.expression.name.text) ? call.expression.expression : undefined;
+    return ts.isCallExpression(call) && call.arguments[0] === outer && ts.isPropertyAccessExpression(call.expression) && ITERATIONS.has(call.expression.name.text)
+      && index.isList(call.expression.expression) ? call.expression.expression : undefined;
   };
   /** What a list's iteration gives a callback's parameter `position`: each element, its index, which holds nothing, or the list. */
   const iterated = (file: string, list: ts.Expression, position: number, path: readonly string[], at: string, trace: CadTrace) => {
     if (position === 0) codesOf(file, list, [ELEMENT, ...path], at, trace);
     else if (position === 2) codesOf(file, list, path, at, trace);
+    else establish();
   };
   /** The named function whose result function `owner` is: an arrow's body, or what a `return` gives. */
   const returnedBy = (owner: ts.FunctionLikeDeclaration) => {
@@ -1735,11 +2026,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
    */
   const made = (file: string, maker: ts.Node, owner: ts.FunctionLikeDeclaration, position: number, path: readonly string[], at: string, parameter: string) => {
     const calls = uses(file, maker);
-    if (!calls.length) unexpanded.add(`${at}, from ${file}: ${parameter}, a parameter of a function the walk sees no call of`);
+    if (!calls.length) report(`${at}, from ${file}: ${parameter}, a parameter of a function the walk sees no call of`);
     for (const { file: caller, site, outer } of calls) {
       const call = outer.parent, result = ts.isCallExpression(call) && call.expression === outer ? outermost(call) : undefined, use = result?.parent;
       if (result && use && ts.isCallExpression(use) && use.expression === result) argument(caller, use, owner, position, path, at, file, 'callee');
-      else if (!result || !given(file, owner, position, path, at, result)) { unexpanded.add(`${caller}: ${brief(call)}, the function ${brief(site)} returns, passed on`); escaped.add(owner); }
+      else if (!result || !given(file, owner, position, path, at, result)) { report(`${caller}: ${brief(call)}, the function ${brief(site)} returns, passed on`); escaped.add(owner); }
     }
   };
   /** The member that holds function `owner`, read by name: a method, or a property whose value it is. */
@@ -1757,16 +2048,23 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
   const memberArguments = (holder: ts.Node, owner: ts.FunctionLikeDeclaration, position: number, path: readonly string[], at: string, file: string, trace: CadTrace, parameter: string) => {
     const calls = memberCalls.get(holder) ?? [];
     if (!calls.length) {
-      if (trace === 'callee') unexpanded.add(`${at}, from ${file}: ${parameter}, a parameter of a function the walk sees no call of`);
-      else { unexpanded.add(`${at}, from ${file}: ${parameter}`); escaped.add(owner); }
+      if (trace === 'callee') report(`${at}, from ${file}: ${parameter}, a parameter of a function the walk sees no call of`);
+      else { report(`${at}, from ${file}: ${parameter}`); escaped.add(owner); }
     }
     for (const { file: caller, call } of calls) argument(caller, call, owner, position, path, at, file, trace);
     membered.push({ holder, owner, at, file, parameter });
   };
   // Each call of a function a value gives, and each such function given to code outside the source, runs what the value holds.
-  for (const { file, site, value, path, what } of callees) { traced.add(site); codesOf(file, value, path, `${file}: ${brief(site)}, ${what}`, 'callee'); }
+  const traces = callees.map(({ file, site, value, path, what }, place) => {
+    const key = `site:${place}`, at = `${file}: ${brief(site)}, ${what}`;
+    current = key;
+    codesOf(file, value, path, at, 'callee');
+    current = undefined;
+    return { site, key, at };
+  });
   for (let next = passed.pop(); next; next = passed.pop()) {
-    const { file, owner, position, path, at, trace } = next;
+    const { file, owner, position, path, at, trace, key } = next;
+    current = key;
     // Sought, its calls are checked even where the walk found none.
     if (!argumentsRead.has(owner)) argumentsRead.set(owner, new Set());
     if (ts.isConstructorDeclaration(owner)) { constructed(file, owner.parent, owner, position, path, at, trace); continue; }
@@ -1778,11 +2076,11 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
     if (maker) { made(file, maker, owner, position, path, at, parameter); continue; }
     if (!named) {
       if (trace === 'callee' && given(file, owner, position, path, at)) continue;
-      unexpanded.add(`${at}, from ${file}: ${parameter}`); escaped.add(owner); continue;
+      report(`${at}, from ${file}: ${parameter}`); escaped.add(owner); continue;
     }
     const calls = uses(file, named);
     // A function called nowhere the walk reaches, a root's own included, is given its functions by code the walk does not see.
-    if (trace === 'callee' && !calls.length) unexpanded.add(`${at}, from ${file}: ${parameter}, a parameter of a function the walk sees no call of`);
+    if (trace === 'callee' && !calls.length) report(`${at}, from ${file}: ${parameter}, a parameter of a function the walk sees no call of`);
     for (const { file: caller, site, outer } of calls) {
       const call = outer.parent;
       const list = iteratedBy(outer);
@@ -1791,19 +2089,26 @@ export function cadDiagnosticReach(index: CadSourceIndex, roots: readonly CadDia
       // Held by a property, a function takes its parameters from the property's walked calls.
       else if ((ts.isPropertyAssignment(call) || ts.isPropertyDeclaration(call)) && call.initializer === outer || ts.isShorthandPropertyAssignment(call) && call.name === outer)
         memberArguments(call, owner, position, path, at, file, trace, parameter);
-      else { unexpanded.add(`${caller}: ${site.getText()} passed on`); escaped.add(owner); }
+      else { report(`${caller}: ${site.getText()} passed on`); escaped.add(owner); }
     }
+  }
+  for (const [key, place] of readings) if (!settled.has(key) && !asking.has(key)) { current = key; report(`${place}, which the walk establishes no function of`); }
+  current = undefined;
+  // A trace that reached no outcome is reported where the call is: running nothing is no outcome of a call.
+  for (const { site, key, at } of traces) {
+    if (settled.has(key)) traced.add(site);
+    else { report(`${at}, which the walk establishes no function of`); untold.add(site); }
   }
   // A member whose function went where the walk cannot see its arguments gives its parameters values the walk did not read.
   for (const { holder, owner, at, file, parameter } of membered) if (memberGiven.has(holder)) {
-    unexpanded.add(`${at}, from ${file}: ${parameter}, a parameter of a function its member gives on`);
+    report(`${at}, from ${file}: ${parameter}, a parameter of a function its member gives on`);
     escaped.add(owner);
   }
   expansion: for (const { file, value } of templated) {
     let variants = [value.head.text];
     for (const span of value.templateSpans) {
       const key = `${file}: ${span.expression.getText()}`, given = templates[key];
-      if (!given) { unexpanded.add(key); continue expansion; }
+      if (!given) { report(key); continue expansion; }
       const options = typeof given === 'function' ? given(declarations) : given;
       variants = variants.flatMap(prefix => options.map(option => prefix + option + span.literal.text));
     }

@@ -159,7 +159,7 @@ describe('CAD diagnostic reach', () => {
       export function check(step: Step) { step.run(); }`;
     expect(reach(source)).toEqual({ codes: ['frozen-refusal', 'step-refusal'], unexpanded: [] });
     expect(reach(source, { stop: new Set([`${FILE}:Step`]) })).toEqual({ codes: [], unexpanded: [] });
-    expect(reach(source.replace('check(step: Step)', 'check(step: any)')).unexpanded).toEqual([`${FILE}: step.run, a method its receiver's type does not declare`]);
+    expect(reach(source.replace('check(step: Step)', 'check(step: any)')).unexpanded).toEqual([`${FILE}: step.run, a member called whose type gives no call signature`]);
   });
 
   it('reports what a call returns when it cannot read it', () => {
@@ -168,7 +168,7 @@ describe('CAD diagnostic reach', () => {
       if (!inspection.eligible) throw new CadError(inspection.code, inspection.message);
     }`;
     expect(reach(`function inspect(sketch: { name: string }) { return cache.get(sketch.name); }\n${check}`).unexpanded)
-      .toEqual([UNFOUND('cache'), `${FILE}: inspection.code, from ${FILE}: cache.get(…).code`]);
+      .toEqual([UNFOUND('cache'), `${FILE}: cache.get, a member called whose type gives no call signature`, `${FILE}: inspection.code, from ${FILE}: cache.get(…).code`]);
     expect(reach(`function inspect(sketch: { name: string }) { let result = { eligible: true }; if (!sketch.name) result = { eligible: false, code: 'empty' }; return result; }\n${check}`).unexpanded)
       .toEqual([`${FILE}: inspection.code, from ${FILE}: result.code`]);
     expect(reach(`function inspect(sketch: { name: string }) { return new Inspection(sketch); }\n${check}`).unexpanded)
@@ -213,6 +213,88 @@ describe('CAD diagnostic reach', () => {
     expect(reach(cache)).toEqual({ codes: ['cached'], unexpanded: [`${FILE}: cache.get('a')!(), a call of a function a value gives, from ${FILE}: each(cache), a use of a map the walk cannot read`] });
     expect(reach(`const cache = new Map<string, () => never>([['a', () => { throw new CadError('cached', ''); }]]); export function check() { cache.get('a')!(); }`).unexpanded)
       .toEqual([`${FILE}: cache.get('a')!(), a call of a function a value gives, from ${FILE}: new Map<string, () => never>([['a', () => { throw new CadError('cached', ''); }…, a map built with entries the walk cannot read`]);
+  });
+
+  it('reports a call whose function a write it does not enter may replace, an initialized holder\'s included, and follows one it enters', () => {
+    const REGISTER = `() => { throw new CadError('registered-refusal', ''); }`, unentered = `from ${FILE}: ${REGISTER}, a function the walk did not enter`;
+    const written = (site: string) => `${FILE}: ${site}, a function written to the member it calls, ${unentered}`;
+    const CHECKER = (field: string) => `class Checker { ${field}; configure() { this.refuse = ${REGISTER}; } run() { this.refuse(); } }`;
+    const HOLDER = (holder: string) => `const holder${holder}; export function configure() { holder.refuse = ${REGISTER}; }`;
+    // Each registers in `configure`, which the first check does not call and the second calls first.
+    const cases: readonly (readonly [string, string, string, string])[] = [
+      [CHECKER('private refuse = () => {}'), 'value.run();', 'value.configure(); value.run();', written('this.refuse()')],
+      [CHECKER('private refuse: () => void = () => {}'), 'value.run();', 'value.configure(); value.run();', written('this.refuse()')],
+      [CHECKER('refuse = () => {}'), 'value.run();', 'value.configure(); value.run();', written('this.refuse()')],
+      [HOLDER(' = { refuse: () => {} }'), 'holder.refuse();', 'configure(); holder.refuse();', written('holder.refuse()')],
+      [HOLDER(': { refuse(): void } = { refuse: () => {} }'), 'holder.refuse();', 'configure(); holder.refuse();', written('holder.refuse()')],
+      [HOLDER(': Record<string, () => void> = {}'), 'holder.refuse();', 'configure(); holder.refuse();', written('holder.refuse()')],
+      [HOLDER(': Record<string, () => void> = {}'), 'const { refuse } = holder; refuse();', 'configure(); const { refuse } = holder; refuse();',
+        `${FILE}: refuse(), a call of a function a value gives, ${unentered}`]
+    ];
+    for (const [declarations, call, entered, site] of cases) {
+      const check = (body: string) => `${declarations} export function check(${declarations.startsWith('class') ? 'value: Checker' : ''}) { ${body} }`;
+      expect(reach(check(call)), call).toEqual({ codes: [], unexpanded: [site] });
+      expect(reach(check(entered)), entered).toEqual({ codes: ['registered-refusal'], unexpanded: [] });
+    }
+    // A holder given on may be written where the walk cannot see, and a write other than an assignment is one it cannot read.
+    expect(reach(`const holder: Record<string, () => void> = {}; function register(target: Record<string, () => void>) { target.refuse = ${REGISTER}; }
+      export function check() { register(holder); holder.refuse(); }`))
+      .toEqual({ codes: ['registered-refusal'], unexpanded: [`${FILE}: holder.refuse(), from ${FILE}: register(holder), holder given on, whose members the walk cannot see written`] });
+    expect(reach(`const holder: Record<string, () => void> = {}; export function check() { Object.assign(holder, { refuse: ${REGISTER} }); holder.refuse(); }`).unexpanded)
+      .toEqual([`${FILE}: holder.refuse(), from ${FILE}: Object.assign(holder, { refuse: () => { throw new CadError('registered-refusal'…, a write the walk cannot read`]);
+    // Absent, a member reads as `undefined`, which runs nothing, or as what is written to it; so does one of a private property's object,
+    // written through the type the object is written as.
+    expect(reach(`const holder: { run?: () => void } = {}; export function check() { holder.run?.(); }`)).toEqual({ codes: [], unexpanded: [] });
+    expect(reach(`const holder: { run?: () => void } = {}; export function configure() { holder.run = ${REGISTER}; } export function check() { holder.run?.(); }`).unexpanded)
+      .toEqual([`${FILE}: holder.run?.(), a member none of its objects holds, ${unentered}`]);
+    expect(reach(`class Checker { private holder: { refuse: () => void } = { refuse: () => {} }; configure() { this.holder.refuse = ${REGISTER}; } run() { this.holder.refuse(); } }
+      export function check(value: Checker) { value.run(); }`).unexpanded).toEqual([written('this.holder.refuse()')]);
+  });
+
+  it('reads what an array\'s methods add to it as its elements, a private property\'s included, and reports one given on', () => {
+    const PUSHED = `() => { throw new CadError('pushed', ''); }`, unentered = `from ${FILE}: ${PUSHED}, a function the walk did not enter`;
+    const given = (site: string) => `${FILE}: ${site}, a call of a function a value gives, ${unentered}`;
+    const STEPS = 'const steps: (() => void)[] = [];';
+    expect(reach(`${STEPS} export function add() { steps.push(${PUSHED}); } export function check() { for (const step of steps) step(); }`).unexpanded).toEqual([given('step()')]);
+    expect(reach(`${STEPS} export function add() { steps.splice(0, 0, ...[${PUSHED}]); } export function check() { steps.forEach(step => step()); }`).unexpanded).toEqual([given('step()')]);
+    expect(reach(`${STEPS} export function check() { steps.unshift(${PUSHED}); for (const step of steps) step(); }`)).toEqual({ codes: ['pushed'], unexpanded: [] });
+    expect(reach(`class Steps { private steps: (() => void)[] = []; add() { this.steps.push(${PUSHED}); } run() { for (const step of this.steps) step(); } }
+      export function check() { new Steps().run(); }`).unexpanded).toEqual([given('step()')]);
+    const fill = (steps: string) => [UNFOUND('fill'), `${FILE}: step(), a call of a function a value gives, from ${FILE}: fill(${steps}), ${steps} given on, whose members the walk cannot see written`];
+    expect(reach(`declare function fill(steps: (() => void)[]): void; export function check() { ${STEPS} fill(steps); for (const step of steps) step(); }`).unexpanded).toEqual(fill('steps'));
+    expect(reach(`declare function fill(steps: (() => void)[]): void; class Steps { private steps: (() => void)[] = []; run() { fill(this.steps); for (const step of this.steps) step(); } }
+      export function check() { new Steps().run(); }`).unexpanded).toEqual(fill('this.steps'));
+  });
+
+  it('gives a callback a list\'s elements only when what it iterates is a list, and reports what a map, a set or another receiver gives it', () => {
+    expect(reach(`export function check() { [() => { throw new CadError('array-element', ''); }].forEach((refuse, index) => refuse()); }`)).toEqual({ codes: ['array-element'], unexpanded: [] });
+    const given = `${FILE}: refuse(), a call of a function a value gives, from ${FILE}: refuse`;
+    expect(reach(`export function check(value: Map<() => void, number>) { value.forEach((unused, refuse) => refuse()); }`).unexpanded).toEqual([given]);
+    expect(reach(`export function check(value: Set<() => void>) { value.forEach((unused, refuse) => refuse()); }`).unexpanded).toEqual([given]);
+    // An object's own forEach gives its callback what its implementation does, not the object's members.
+    expect(reach(`const registry = { forEach(each: (item: () => void) => void) { each(registered); } }; declare const registered: () => void;
+      export function check() { registry.forEach(item => item()); }`).unexpanded)
+      .toEqual([`${FILE}: item(), a call of a function a value gives, from ${FILE}: registered, declared with no value the walk can find`]);
+  });
+
+  it('reports a call through a value of no function type, `any` or the platform\'s `Function`, by name, member or element', () => {
+    const given = (site: string, from: string) => `${FILE}: ${site}, a call of a function a value gives, from ${FILE}: ${from}`;
+    const cases: readonly (readonly [string, readonly string[]])[] = [
+      ['export function check(value: any) { value.refuse(); }', [`${FILE}: value.refuse, a member called whose type gives no call signature`]],
+      ['export function check(value: { run: Function }) { value.run(); }', [`${FILE}: value.run, a member called whose type gives no call signature`]],
+      ['export function check(value: any, name: string) { value[name](); }', [`${FILE}: value[name], an element read by a key the walk cannot tell`]],
+      ['export function check(refuse: any) { refuse(); }', [given('refuse()', 'refuse, a parameter of a function the walk sees no call of')]],
+      ['export function check(refuse: any) { refuse.call(null); }',
+        [given('refuse.call(null)', 'refuse, a parameter of a function the walk sees no call of'), `${FILE}: refuse.call, a member called whose type gives no call signature`]],
+      ['declare const refuse: Function; export function check() { refuse(); }', [given('refuse()', 'refuse, declared with no value the walk can find')]]
+    ];
+    for (const [source, unexpanded] of cases) expect(reach(source), source).toEqual({ codes: [], unexpanded });
+    expect(reach('export function check(values: number[]) { return Math.max(...values); }'), 'a function of the platform').toEqual({ codes: [], unexpanded: [] });
+  });
+
+  it('reports each branch of what a call may run that reaches no outcome, beside one that does', () => {
+    expect(reach(`const table = new Map<string, () => void>(); export function check(kind: string) { const run = kind ? table.get(kind)! : () => {}; run(); }`))
+      .toEqual({ codes: [], unexpanded: [`${FILE}: run(), a call of a function a value gives, from ${FILE}: table.get(…), which the walk establishes no function of`] });
   });
 });
 
@@ -604,6 +686,16 @@ describe('CAD diagnostic reach coverage, checked apart from the walk', () => {
       const { index, found } = across({ [FILE]: source });
       expect(found.traced.size, source).toBeGreaterThan(0);
       expect(cadSkippedMemberReads(index, { ...found, traced: new Set() }), source)
+        .toEqual([`${FILE}: ${site}, a call of a function TypeScript gives no implementation of, which the walk neither traced nor reported`]);
+    }
+    // A callee of no function type, `any` or the platform's `Function`, has no implementation TypeScript can give either: a walk that left
+    // it as running nothing, without a report, is flagged.
+    for (const [source, site] of [[`export function check(value: any) { value.refuse(); }`, 'value.refuse()'],
+      [`export function check(value: { run: Function }) { value.run(); }`, 'value.run()'], [`export function check(refuse: any) { refuse(); }`, 'refuse()']]) {
+      const { index, found } = across({ [FILE]: source });
+      const unreported = { ...found, traced: new Set<ts.Node>(), untold: new Set<ts.Node>(),
+        accesses: new Map([...found.accesses].map(([read, outcome]) => [read, outcome === 'unexpanded' ? 'no-code' as const : outcome])) };
+      expect(cadSkippedMemberReads(index, unreported), source)
         .toEqual([`${FILE}: ${site}, a call of a function TypeScript gives no implementation of, which the walk neither traced nor reported`]);
     }
   });
