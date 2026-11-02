@@ -263,6 +263,14 @@ describe('sketch generators', () => {
     } finally { evaluate.mockRestore(); }
   });
 
+  it('refuse to generate from an evaluation that disagrees with whether its kind draws a checked outline', () => {
+    // The crossing check skips comparing an outline kind's members with one another, so a kind that stopped checking its outline is caught.
+    const real = CAD_SKETCH_GENERATOR_KINDS.rectangle.evaluate;
+    const evaluate = vi.spyOn(CAD_SKETCH_GENERATOR_KINDS.rectangle, 'evaluate').mockImplementation((...args) => ({ ...real(...args), shape: undefined }));
+    try { expect(() => expandCadSketchGenerators(graphOf([rectangle(0, 37.25)]), {})).toThrow("A rectangle generator's outline check disagrees with its kind."); }
+    finally { evaluate.mockRestore(); }
+  });
+
   it('prepare each outline once, when its kind checks the shape, and the sketch contours read that preparation', () => {
     const gears = Array.from({ length: 3 }, (_, at): CadSketchGenerator => {
       const gear = createCadPluginProfile(CAD_GEAR_PLUGIN);
