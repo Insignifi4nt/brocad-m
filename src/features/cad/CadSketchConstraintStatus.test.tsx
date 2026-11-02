@@ -91,3 +91,51 @@ it('keeps the analysis for the next version that only moves a dimension, and ask
   // A parameter change with the move is analysed too.
   await render(document(12, placed, { spare: 1 }), '6'); expect(versions).toEqual(['1', '4', '5', '6']);
 });
+
+it('analyses a sketch with nothing free to move in its first render, without asking the solver', async () => {
+  const source = parseCadDocument({ ...createCadDocument('Plate', 'status-generated'), schemaVersion: 2, parameters: { width: 40 }, features: [{
+    id: 'sketch', kind: 'sketch', name: 'Plate', plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points: [], entities: [], relations: [
+      { id: 'plate', kind: 'generator', idPrefix: 'plate', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 'width', height: 20, cornerRadius: 2 } },
+      { id: 'bore', kind: 'generator', idPrefix: 'bore', construction: false, geometry: { kind: 'circle', x: 'width / 2', y: 10, radius: 4 } }] } }] });
+  const [sketch] = source.features; if (sketch.kind !== 'sketch') throw new Error('Expected sketch.');
+  const shownSketch = sketch;
+  const inspect = vi.fn(() => new Promise<CadSketchConstraintInspection>(() => undefined));
+  // What each commit shows: a view captured after the first one must not change when an answer arrives.
+  const shown: (string | null)[] = [], defined: (readonly string[] | undefined)[] = [];
+  function Probe({ version }: { version: string }) {
+    return <CadSketchConstraintStatus document={source} sketch={shownSketch} version={version} inspect={inspect} enabled onReport={report => {
+      shown.push(report && `${report.version} ${report.live ? 'live' : 'paused'} ${report.analysis.diagnostics.degreesOfFreedom}`);
+      defined.push(report?.analysis.kind === 'solved' ? report.analysis.diagnostics.definition?.definedPointIds : undefined);
+    }} />;
+  }
+  await act(async () => root.render(<Probe version="1" />));
+  expect(status()).toBe('Fully defined');
+  expect(shown).toEqual(['1 live 0']);
+  expect(defined[0]).toEqual(sketch.graph!.points.map(point => point.id));
+  expect(inspect).not.toHaveBeenCalled();
+  await act(async () => root.render(<Probe version="2" />));
+  expect(shown).toEqual(['1 live 0', '2 live 0']); expect(inspect).not.toHaveBeenCalled();
+});
+
+it('keeps the shown analysis live while paused, as during a capture, and starts none until it resumes', async () => {
+  const answers: ((degreesOfFreedom: number | null) => void)[] = [], reports: (string | null)[] = [];
+  const source = parseCadDocument({ ...createCadDocument('Plate', 'status-plate'), schemaVersion: 2, features: [{
+    id: 'sketch', kind: 'sketch', name: 'Plate', plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: {
+      points: [{ id: 'center', position: [0, 0] }], entities: [{ id: 'bore', kind: 'circle', centerPointId: 'center', radius: 5, construction: false }], relations: [] } }] });
+  const [sketch] = source.features; if (sketch.kind !== 'sketch') throw new Error('Expected sketch.');
+  const shownSketch = sketch;
+  const inspect = vi.fn((sketchId: string) => new Promise<CadSketchConstraintInspection>(resolve => answers.push(degreesOfFreedom => resolve({
+    sketchId, pointCount: 1, entityCount: 1, relationCount: 0, legacyProfileCount: 0, legacyDimensionCount: 0, degreesOfFreedomScope: 'graph', graph: null, parameters: {},
+    analysis: { kind: 'solved', diagnostics: { status: 'success', degreesOfFreedom, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } } }))));
+  const onReport = (report: CadSketchConstraintReport | null) => { reports.push(report && `${report.version} ${report.live ? 'live' : 'paused'} ${report.analysis.diagnostics.degreesOfFreedom}`); };
+  const render = (paused: boolean, version = '1') => act(async () => root.render(<CadSketchConstraintStatus document={source} sketch={shownSketch} version={version} inspect={inspect} enabled paused={paused} onReport={onReport} />));
+  await render(false); await act(async () => answers[0](3));
+  expect(reports).toEqual([null, '1 live 3']);
+  await render(true);
+  expect(reports).toEqual([null, '1 live 3']); expect(status()).toBe('Under defined · 3 DOF');
+  // A version shown while paused waits for the pause to end.
+  await render(true, '2');
+  expect(inspect).toHaveBeenCalledTimes(1); expect(status()).toBe('Checking freedom…');
+  await render(false, '2'); await act(async () => answers[1](2));
+  expect(inspect).toHaveBeenCalledTimes(2); expect(reports.at(-1)).toBe('2 live 2');
+});

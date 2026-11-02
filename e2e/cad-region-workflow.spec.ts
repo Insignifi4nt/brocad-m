@@ -37,7 +37,9 @@ async function reference(page: Page, version: string, sketchId: string, expected
   if (!value || typeof value !== 'object' || !('boundaryProfileId' in value) || typeof value.boundaryProfileId !== 'string'
     || !('voidProfileIds' in value) || !Array.isArray(value.voidProfileIds) || !value.voidProfileIds.every((id: unknown): id is string => typeof id === 'string')
     || !('ancestorProfileIds' in value) || !Array.isArray(value.ancestorProfileIds) || !value.ancestorProfileIds.every((id: unknown): id is string => typeof id === 'string')) throw new Error('Invalid exact region reference');
-  return { boundaryProfileId: value.boundaryProfileId, voidProfileIds: value.voidProfileIds, ancestorProfileIds: value.ancestorProfileIds };
+  // A region bounded or holed by graph geometry, as a generator's, also names those contours, which the selection must carry.
+  return { boundaryProfileId: value.boundaryProfileId, voidProfileIds: value.voidProfileIds, ancestorProfileIds: value.ancestorProfileIds,
+    ...('graphContours' in value ? { graphContours: value.graphContours as CadSketchCellReference['graphContours'] } : {}) };
 }
 
 test('agent repairs two correlated selected sources atomically through discovered region reads and exact native history', async ({ page }) => {
@@ -67,13 +69,15 @@ test('agent repairs two correlated selected sources atomically through discovere
     .toMatchObject({ ok: false, error: { code: 'stale-sketch-region' } });
   expect(await context(page)).toMatchObject({ version: before.version, canUndo: false, canRedo: false });
   expect(await readChunks(page, 'cad_read_document', { expectedVersion: before.version }, 4096)).toBe(beforeText);
-  // The new hole is a circle generator, since an edit can no longer add a saved profile; its region is named by its member's stable id.
+  // The new hole is a circle generator, since an edit can no longer add a saved profile. Its region is named by its circle edge,
+  // "fresh_c0", and the region it leaves in "outer" names that edge's contour as a graph contour does.
   const proposedSecond: CadSketchFeature = { ...second, profiles: second.profiles.filter(profile => profile.id !== 'island'),
     graph: { points: [], entities: [], relations: [shapeGenerator(circle('fresh', 1))] } };
   const firstProposal: CadSketchRegionProposal = { parameterValues: { location: 50 } };
   const secondProposal: CadSketchRegionProposal = { sketch: proposedSecond, parameterValues: { location: 50 } };
   const expectedFirst: CadSketchCellReference = { boundaryProfileId: 'outer', voidProfileIds: ['island'], ancestorProfileIds: [] };
-  const expectedSecond: CadSketchCellReference = { boundaryProfileId: 'outer', voidProfileIds: ['fresh_k0'], ancestorProfileIds: [] };
+  const expectedSecond: CadSketchCellReference = { boundaryProfileId: 'outer', voidProfileIds: ['fresh_c0'], ancestorProfileIds: [],
+    graphContours: [{ profileId: 'fresh_c0', sourceRefs: [{ entityId: 'fresh_c0', reversed: false }] }] };
   for (const [sketchId, proposal, expected, area] of [[first.id, firstProposal, expectedFirst, 96 * Math.PI], [second.id, secondProposal, expectedSecond, 99 * Math.PI]] as const) {
     expect(await call(page, 'cad_inspect_sketch_regions', { expectedVersion: before.version, sketchId, proposal, limit: 50 }))
       .toMatchObject({ version: before.version, proposed: true, total: 4, nextOffset: null, items: expect.arrayContaining([{ boundaryProfileId: 'outer', name: 'outer', kind: 'circle', depth: 0, defaultMaterial: true,
@@ -89,7 +93,8 @@ test('agent repairs two correlated selected sources atomically through discovere
   const after = await context(page); expect(after).toMatchObject({ parameters: { location: 50 }, canUndo: true, canRedo: false, workflowOpen: false });
   expect(after.version).not.toBe(before.version);
   const afterText = await readChunks(page, 'cad_read_document', { expectedVersion: after.version }, 4096);
-  expect(JSON.parse(afterText)).toEqual({ ...document, id: before.documentId, parameters: { location: 50 }, features: [first, pad('first_pad', first.id, firstReference), proposedSecond, pad('second_pad', second.id, secondReference)] });
+  // A sketch graph, as the generator's, needs the second schema version.
+  expect(JSON.parse(afterText)).toEqual({ ...document, schemaVersion: 2, id: before.documentId, parameters: { location: 50 }, features: [first, pad('first_pad', first.id, firstReference), proposedSecond, pad('second_pad', second.id, secondReference)] });
   expect(await call(page, 'cad_build', { expectedVersion: after.version })).toMatchObject({ version: after.version, diagnostics: [], omittedDiagnostics: 0, totalBodies: 2, nextBodyOffset: null,
     bodies: [{ featureId: 'first_pad', volumeMm3: expect.closeTo(480 * Math.PI, 7), solidCount: 1, boundsMm: { min: [-10, -10, 0], max: [10, 10, 5] } },
       { featureId: 'second_pad', volumeMm3: expect.closeTo(495 * Math.PI, 7), solidCount: 1, boundsMm: { min: [-10, -10, 10], max: [10, 10, 15] } }] });

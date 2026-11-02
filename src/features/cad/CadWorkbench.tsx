@@ -186,6 +186,8 @@ export interface CadWorkbenchProps extends CadPluginCommands {
   storageBusy?: boolean;
   externalWorkflowOpen?: boolean;
   sketchAnalysisReady?: boolean;
+  /** No new sketch analysis starts, as while the workspace is locked, but the one shown stays live. */
+  sketchAnalysisPaused?: boolean;
   onBeginSketchEdit?(sketchId: string): void;
   sketchEdit?: { readonly sketchId: string; inspectAreaRepairs(): CadSketchAreaRepairInspection | null; finish(signal?: AbortSignal, repairs?: CadSketchAreaRepairs): CadEditCompletion; cancel(): void };
   onEdit(edit: CadEdit, signal?: AbortSignal): CadEditCompletion;
@@ -2081,7 +2083,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     if (issue?.relationId && sketch?.graph?.relations.some(item => item.id === issue.relationId) && !drawnRelationPick(issue.relationId)) revealRelationRow(issue.relationId);
   };
   const sketchHeader = sketch && sketchIssues ? <CadSketchContextHeader name={sketch.name}
-    status={!currentAreaRepair ? <CadSketchConstraintStatus document={document} sketch={sketch} version={props.documentVersion} inspect={props.onInspectSketchConstraints} onReport={publishSketchReport} enabled={props.sketchAnalysisReady !== false && !pending && !storageBusy && !externalWorkflowOpen} /> : null}
+    status={!currentAreaRepair ? <CadSketchConstraintStatus document={document} sketch={sketch} version={props.documentVersion} inspect={props.onInspectSketchConstraints} onReport={publishSketchReport} enabled={props.sketchAnalysisReady !== false && !pending && !externalWorkflowOpen} paused={storageBusy || props.sketchAnalysisPaused === true} /> : null}
     issues={sketchIssues} inspectedIssue={inspectedIssue?.key ?? null} issuesLocked={commandSubmission.applying || storageBusy || externalWorkflowOpen} onInspectIssue={inspectHeaderIssue}
     highlight={sketchHighlight} highlightOf={issueHighlight} dimensionsShown={preferences.showOnPartDimensions} relationsShown={relationsShown}
     onShowDimensions={shown => { setCadPreferences({ ...getCadPreferences(), showOnPartDimensions: shown }); }} onShowRelations={shown => { setCadPreferences({ ...getCadPreferences(), showRelations: shown }); }}

@@ -16,6 +16,7 @@ import { extendPart, lineExtend } from '@/domain/cad/__tests__/cadSketchExtendFi
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
 import { circleRow, circleRowPart, rowSketch } from '@/domain/cad/__tests__/cadSketchLinearPatternFixtures';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import { createCadSketchSolverClient } from './sketch-solver/cadSketchSolverClient';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { length: 20 }, features: [{
@@ -468,5 +469,24 @@ describe('sketch generators in edit preparation', () => {
     // The real solver reaches the same document.
     expect((await prepareCadEdits(document, [{ kind: 'set-parameter', name: 'cx', value: 4 },
       { kind: 'update-feature', feature: { ...sketch, graph: { points: [], entities: [], relations: [circle] } } }], solver)).document).toEqual(prepared.document);
+  });
+
+  it('prepare sketches of generated geometry alone without starting the solver worker, and keep them as they are through other edits', async () => {
+    const client = createCadSketchSolverClient(() => { throw new Error('The solver worker started.'); });
+    const blank = parseCadDocument({ ...createCadDocument('Plate', 'plate'), schemaVersion: 2 });
+    const section = (id: string, offset: number | string, radius: number | string) => ({ id, kind: 'sketch' as const, name: id, suppressed: false, offset, profiles: [],
+      plane: { kind: 'datum-plane' as const, featureId: 'mount' }, graph: { points: [], entities: [], relations: [{ ...circle, id: `${id}-bore`, idPrefix: id, geometry: { kind: 'circle' as const, x: 0, y: 0, radius } },
+        { id: `${id}-plate`, kind: 'generator' as const, idPrefix: `${id}-plate`, construction: false, geometry: { kind: 'rectangle' as const, x: -20, y: -10, width: 'width', height: 20, cornerRadius: 3 } }] } });
+    const built = (await prepareCadEdits(blank, [{ kind: 'set-parameter', name: 'width', value: 40 }, { kind: 'set-parameter', name: 'hole', value: 4 },
+      { kind: 'add-feature', feature: { kind: 'datum-plane', id: 'mount', name: 'Mount', suppressed: false, definition: { kind: 'world', basePlane: 'XY', origin: [0, 0, 5], rotation: [30, 0, 0] } } },
+      { kind: 'add-feature', feature: section('lower', 2, 'hole') }, { kind: 'add-feature', feature: section('upper', 'width / 2', 3) }], client)).document;
+    // Inputs that change regenerate the members, still without a solve.
+    const resized = (await prepareCadEdits(built, [{ kind: 'set-parameter', name: 'width', value: 50 }, { kind: 'set-parameter', name: 'hole', value: 5 }], client)).document;
+    const lower = resized.features.find(feature => feature.id === 'lower');
+    expect(lower?.kind === 'sketch' && lower.graph?.entities.find(entity => entity.id === 'lower_c0')).toMatchObject({ radius: 5 });
+    // An edit elsewhere keeps each accepted graph, the same objects, so nothing shown from it changes.
+    const renamed = (await prepareCadEdits(resized, [{ kind: 'rename-document', name: 'Renamed' }], client)).document;
+    for (const id of ['lower', 'upper']) expect(renamed.features.find(feature => feature.id === id)).toBe(resized.features.find(feature => feature.id === id));
+    client.dispose();
   });
 });

@@ -161,7 +161,8 @@ export function useCadSketchEditing<Inspection>(host: Host<Inspection>) {
     if (current.current) current.current.draft.setWorkflowOpen(open); else session.setWorkflowOpen(open);
   }, [session]);
   return { sketchId: owner?.draft.pin.sketchId ?? null, snapshot, working,
-    analysisReady: !working && !local.workflowOpen && !host.locked,
+    // A locked workspace, as while the draft is saved or captured, only pauses analysis: what it shows stays live.
+    analysisReady: !working && !local.workflowOpen, analysisPaused: host.locked,
     begin, cancel, finish, edit, prepare, inspect, inspectAreaRepairs, setWorkflowOpen,
     undo: () => { const owned = requireOwner(); requireIdle(owned); owned.draft.undo(); },
     redo: () => { const owned = requireOwner(); requireIdle(owned); owned.draft.redo(); } };
