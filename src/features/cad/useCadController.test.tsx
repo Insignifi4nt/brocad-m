@@ -26,6 +26,7 @@ import { storedCadDocument } from '@/domain/cad/cadStoredDocument';
 import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchSolveInput, CadSketchSolveResult } from './sketch-solver/cadSketchSolverTypes';
 import { inspectCadSketchRegions } from '@/domain/cad/cadSketchRegionInspection';
+import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
 import type { CadSketchCellReference } from '@/domain/cad/cadSketchRegionSelection';
 import { endTrim, trimPart } from '@/domain/cad/__tests__/cadSketchTrimFixtures';
 import type { CadSketchEndTrimPreparation } from '@/domain/cad/cadSketchTrimExtend';
@@ -660,6 +661,25 @@ describe('CAD controller asynchronous guards', () => {
     expect(click).toHaveBeenCalledOnce();
     expect(h.session.getSnapshot()).toBe(before);
     await expect(loadCadDocument(h.workbench().adapter, before.document.id)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+  it('names in the section DXF the plugin package of a construction star that a linked offset copies as material', async () => {
+    const h = await harness(true);
+    await act(async () => h.session.edit([{ kind: 'add-feature', feature: { id: 'stars', kind: 'sketch', name: 'Stars', plane: 'XY', offset: 0, suppressed: false, profiles: [] } },
+      { kind: 'add-plugin-profile', sketchId: 'stars', profileId: 'star', name: CAD_STAR_PLUGIN.name, package: CAD_STAR_PLUGIN, groupId: 'star_drivers' }]));
+    const drawn = h.session.getSnapshot().document.features.find(feature => feature.id === 'stars');
+    if (drawn?.kind !== 'sketch' || !drawn.graph) throw new Error('Missing star sketch');
+    const star = drawn.graph.relations.find(relation => relation.id === 'star' && relation.kind === 'generator');
+    if (star?.kind !== 'generator') throw new Error('Missing star generator');
+    const chain = compileCadSketchGraph(drawn.graph, h.session.getSnapshot().document.parameters).cycles[0].sourceRefs.map(({ entityId, reversed }) => ({ entityId, reversed }));
+    await act(async () => h.session.edit([{ kind: 'set-sketch-generator', sketchId: 'stars', generator: { ...star, construction: true } },
+      { kind: 'set-sketch-generator', sketchId: 'stars', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false, geometry: { kind: 'offset', chain, distance: 1 } } }]));
+    kernel.section.mockResolvedValue({ bodyId: 'pad', plane: 'XY', offset: 5, contourCount: 1, entities: [{ type: 'circle', layer: 'CAD', center: { x: 0, y: 0 }, radius: 10 }] });
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { if (blob instanceof Blob) blobs.push(blob); return 'blob:dxf'; });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    await h.cad().exportSectionDxf({ bodyId: 'pad', plane: 'XY', offset: 5 }, h.session.getSnapshot().version);
+    const lines = (await blobs[0].text()).split(/\r?\n/);
+    expect(lines.flatMap((line, index) => line.trim() === '999' ? [lines[index + 1]] : [])).toContain(`${CAD_STAR_PLUGIN.id}@${CAD_STAR_PLUGIN.version}: ${CAD_STAR_PLUGIN.notes}`);
   });
   it.each(['cancel', 'version', 'workflow', 'close', 'substitution'] as const)('rejects section DXF after %s while exact geometry is being computed', async change => {
     const h = await harness(true), before = h.session.getSnapshot(), abort = new AbortController();
