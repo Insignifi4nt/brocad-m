@@ -6,6 +6,8 @@ import type { CadSketchGenerator, CadSketchGraph } from '../cadSketchGraph';
 import { storedCadDocument, storedCadDocumentText } from '../cadStoredDocument';
 import { cadSketchOwnedGeometryLockReason } from '../cadSketchOwnedGeometry';
 import { expandCadSketchGenerators } from '../sketch-generators/cadSketchGenerators';
+import { CAD_SKETCH_GENERATOR_COUNTED_LISTS } from '../sketch-generators/cadSketchGeneratorKinds';
+import { CadSketchGeneratorGeometrySchema } from '../sketch-generators/cadSketchGeneratorSchema';
 import { CAD_GEAR_V3_PLUGIN, createCadPluginProfile } from '../plugins/cadPlugins';
 import { cadSketchProfileEdits, cadSketchProfileViews } from '../sketch-generators/cadSketchProfileViews';
 import { CadSession } from '../../../features/cad/cadSession';
@@ -143,6 +145,44 @@ describe('sketch generators in a document', () => {
       expect(graphOf(edit(changed, removal))).toMatchObject({ points: [], entities: [], relations: [] });
   });
 
+  it('refuse a generator listing fewer or more entries than its kind takes with the bound and the count, from every edit and a stored document', () => {
+    const empty = documentWith({ points: [], entities: [], relations: [] });
+    const record = (id: string, geometry: unknown) => ({ id, kind: 'generator', idPrefix: id, construction: false, geometry });
+    const links = (count: number) => Array.from({ length: count }, (_, at) => ({ entityId: `e${at}`, reversed: false }));
+    const seeds = (count: number) => Array.from({ length: count }, (_, at) => `e${at}`);
+    const cases: [unknown, string][] = [
+      [record('ring', { kind: 'offset', chain: links(513), distance: 1 }),
+        'Offset "ring" follows at most 512 curves, and its chain has 513. Offset a longer loop as an independent copy with offset-sketch-loop.'],
+      [record('ring', { kind: 'offset', chain: [], distance: 1 }), 'Offset "ring" follows at least 1 curve, and its chain has none.'],
+      [record('spin', { kind: 'circular-pattern', seedIds: seeds(65), centerId: '@origin', count: 2, angle: 360 }), 'Circular pattern "spin" copies at most 64 seed curves, and it has 65.'],
+      [record('spin', { kind: 'circular-pattern', seedIds: [], centerId: '@origin', count: 2, angle: 360 }), 'Circular pattern "spin" copies at least 1 seed curve, and it has none.'],
+      [record('plate', { kind: 'polygon', points: [[0, 0], [10, 0]] }), 'Polygon "plate" needs at least 3 points, and it has 2.'],
+      [record('route', { kind: 'path', segments: [] }), 'Path "route" needs at least 1 segment, and it has none.']
+    ];
+    for (const [generator, message] of cases) {
+      const graph = { points: [], entities: [], relations: [generator] };
+      const sketch = { id: 'other', kind: 'sketch', name: 'Other', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph };
+      for (const request of [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator }, { kind: 'append-sketch-entities', sketchId: 'sketch', geometry: graph },
+        { kind: 'add-feature', feature: sketch }, { kind: 'update-feature', feature: { ...sketch, id: 'sketch' } }])
+        expect(refusal(() => edit(empty, request as CadEdit)), request.kind).toEqual(expect.objectContaining({ code: 'invalid-sketch-generator', message }));
+      expect(refusal(() => documentWith(graph))).toEqual(expect.objectContaining({ code: 'invalid-sketch-generator', message }));
+    }
+    // At each bound the list is the schema's to accept, and an offset's chain of 512 links reaches its own checks.
+    expect(refusal(() => edit(empty, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: record('ring', { kind: 'offset', chain: links(512), distance: 1 }) as CadSketchGenerator })))
+      .toMatchObject({ code: 'invalid-sketch-generator', message: expect.not.stringMatching(/at most|Malformed/) });
+  });
+
+  it('bound each list of a generator kind as its schema does, so every count bound is refused with the bound and the count', () => {
+    for (const member of CadSketchGeneratorGeometrySchema.anyOf) {
+      const kind = member.properties.kind.const as keyof typeof CAD_SKETCH_GENERATOR_COUNTED_LISTS;
+      const bounded = Object.entries(member.properties as Record<string, { type?: string; minItems?: number; maxItems?: number }>)
+        .filter(([, field]) => field.type === 'array' && (field.minItems !== undefined || field.maxItems !== undefined))
+        .map(([field, schema]) => ({ field, min: schema.minItems ?? 0, max: schema.maxItems ?? Infinity }));
+      const counted = CAD_SKETCH_GENERATOR_COUNTED_LISTS[kind];
+      expect(counted ? [{ field: counted.field, min: counted.min, max: counted.max }] : [], kind).toEqual(bounded);
+    }
+  });
+
   it('key a listed polygon by entry id, so a vertex inserted mid-list reshapes only the edge it splits, and a reorder or a deletion keeps the other keys', () => {
     type Point = readonly [number, number];
     const outline = (points: readonly Point[], ids?: readonly number[]): CadSketchGenerator => ({ id: 'plate', kind: 'generator', idPrefix: 'p', construction: false,
@@ -194,7 +234,7 @@ describe('sketch generators in a document', () => {
     expect(graphOf(restored).relations[0]).toEqual(outline(hexagon));
     expect(graphOf(restored).points.filter(point => point.id.startsWith('p_'))).toEqual(graphOf(document).points.filter(point => point.id.startsWith('p_')));
     // Ids an edit gives are its own, one for each point.
-    expect(refusal(() => set(document, outline(hexagon, [0, 1, 2])))).toMatchObject({ code: 'invalid-sketch-generator', message: 'Polygon "plate" needs one entry id for each point.' });
+    expect(refusal(() => set(document, outline(hexagon, [0, 1, 2])))).toMatchObject({ code: 'invalid-sketch-generator', message: 'Polygon "plate" needs one entry id for each point, and it has 3 for 6 points.' });
     expect(position(set(released, outline(inserted, [0, 1, 2, 9, 3, 4, 5])), 'p_v9')).toEqual([28, 18]);
   });
 

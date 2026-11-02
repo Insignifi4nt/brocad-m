@@ -11,7 +11,7 @@ import { copiedCadSketchRelations, copyCadSketchRelations, type CadSketchRelatio
 import type { CadSketchOperandSignature, CadSketchOperandSlot, CadSketchRelationIntent } from '../sketch-relations/cadSketchRelationTypes';
 import { CAD_PRECISION, cadSupportedLength } from '@/domain/precision/cadPrecision';
 import { createArcSegment, createCircleSegment, createLineSegment } from '@/domain/path-intel/segments';
-import { CAD_SKETCH_ENTRY_ID_MAX } from './cadSketchGeneratorSchema';
+import { CAD_SKETCH_ENTRY_ID_MAX, CAD_SKETCH_OFFSET_LINKS_MAX, CAD_SKETCH_PATTERN_SEEDS_MAX } from './cadSketchGeneratorSchema';
 import type { PathSegment, Point2 } from '@/domain/path-intel/types';
 
 // Each kind of generator: what it reads and what it generates. Generation keys every point, edge and relation by its place in the
@@ -371,7 +371,8 @@ function listedKind<K extends 'polygon' | 'path'>(label: string, entry: string, 
     label: () => label, signature: noOperands, operands: () => [], withOperands: geometry => geometry,
     evaluate: (geometry, context, name) => {
       const { ids } = geometry as Listed;
-      if (ids && ids.length !== entriesOf(geometry as Listed).length) throw invalid(`${name} needs one entry id for each ${entry}.`);
+      const count = entriesOf(geometry as Listed).length;
+      if (ids && ids.length !== count) throw invalid(`${name} needs one entry id for each ${entry}, and it has ${ids.length} for ${count} ${entry}${count === 1 ? '' : 's'}.`);
       return profileEvaluation(resolveCadProfile(geometry as CadProfile, context.parameters), name, ids);
     },
     identify: identifiedEntries, reshaped
@@ -419,7 +420,7 @@ const regularPolygon: CadSketchGeneratorKind<Of<'regular-polygon'>> = {
     const e = (value: number | string) => evaluateCadScalar(value, context.parameters);
     const x = e(geometry.x), y = e(geometry.y), radius = e(geometry.radius), sides = e(geometry.sides);
     if (!Number.isInteger(sides) || sides < 3 || sides > CAD_SKETCH_REGULAR_POLYGON_MAX_SIDES)
-      throw invalid(`${name} needs a whole number of sides from 3 to ${CAD_SKETCH_REGULAR_POLYGON_MAX_SIDES}.`);
+      throw invalid(`${name} needs a whole number of sides from 3 to ${CAD_SKETCH_REGULAR_POLYGON_MAX_SIDES}, and it has ${sides}.`);
     if (!cadSupportedLength(radius)) throw invalid(`${name} needs a positive supported radius.`);
     const line = context.line(geometry.directionId);
     if (!line) throw invalid(`${name} needs a line or the H or V axis for its direction.`);
@@ -524,7 +525,7 @@ const circularPattern: CadSketchGeneratorKind<Of<'circular-pattern'>> = {
   evaluate: (geometry, context, name) => {
     const count = evaluateCadScalar(geometry.count, context.parameters), angle = evaluateCadScalar(geometry.angle, context.parameters);
     if (!Number.isInteger(count) || count < 1 || count > CAD_SKETCH_CIRCULAR_PATTERN_MAX_COUNT)
-      throw invalid(`${name} needs a whole number of occurrences from 1 to ${CAD_SKETCH_CIRCULAR_PATTERN_MAX_COUNT}, the seeds' own among them.`);
+      throw invalid(`${name} needs a whole number of occurrences from 1 to ${CAD_SKETCH_CIRCULAR_PATTERN_MAX_COUNT}, the seeds' own among them, and it has ${count}.`);
     if (!Number.isFinite(angle) || angle === 0 || Math.abs(angle) > 360) throw invalid(`${name} needs a nonzero angle of at most 360 degrees either way.`);
     const copies = (count - 1) * geometry.seedIds.length;
     if (copies > CAD_SKETCH_CIRCULAR_PATTERN_MAX_COPIES)
@@ -661,3 +662,41 @@ export const CAD_SKETCH_GENERATOR_KINDS: { readonly [K in CadSketchGeneratorGeom
   'circular-pattern': circularPattern,
   offset
 };
+
+/**
+ * The lists of a generator's geometry whose length its kind bounds, as the schema does: what the generator does with each entry, and
+ * what an entry is called.
+ */
+export const CAD_SKETCH_GENERATOR_COUNTED_LISTS: { readonly [K in CadSketchGeneratorGeometry['kind']]?: {
+  readonly field: string; readonly min: number; readonly max: number; readonly verb: string; readonly entry: string; readonly entries: string; readonly list: string } } = {
+  polygon: { field: 'points', min: 3, max: Infinity, verb: 'needs', entry: 'point', entries: 'points', list: 'it' },
+  path: { field: 'segments', min: 1, max: Infinity, verb: 'needs', entry: 'segment', entries: 'segments', list: 'it' },
+  'circular-pattern': { field: 'seedIds', min: 1, max: CAD_SKETCH_PATTERN_SEEDS_MAX, verb: 'copies', entry: 'seed curve', entries: 'seed curves', list: 'it' },
+  offset: { field: 'chain', min: 1, max: CAD_SKETCH_OFFSET_LINKS_MAX, verb: 'follows', entry: 'curve', entries: 'curves', list: 'its chain' }
+};
+
+/**
+ * Refuses a generator record, read before the schema check, whose geometry lists fewer or more entries than its kind takes, naming the
+ * bound and the count, where the schema check would only call the edit or document malformed.
+ */
+export function assertCadSketchGeneratorCounts(generator: unknown): void {
+  if (typeof generator !== 'object' || generator === null) return;
+  const { id, geometry } = generator as { readonly id?: unknown; readonly geometry?: unknown };
+  if (typeof geometry !== 'object' || geometry === null) return;
+  const kind = (geometry as { readonly kind?: unknown }).kind;
+  const counted = typeof kind === 'string' && Object.hasOwn(CAD_SKETCH_GENERATOR_COUNTED_LISTS, kind)
+    ? CAD_SKETCH_GENERATOR_COUNTED_LISTS[kind as CadSketchGeneratorGeometry['kind']] : undefined;
+  const list = counted && (geometry as { readonly [field: string]: unknown })[counted.field];
+  if (!counted || !Array.isArray(list) || (list.length >= counted.min && list.length <= counted.max)) return;
+  const over = list.length > counted.max, bound = over ? counted.max : counted.min;
+  const name = `${CAD_SKETCH_GENERATOR_KINDS[kind as 'offset'].label(geometry as never)}${typeof id === 'string' ? ` "${id}"` : ''}`;
+  throw invalid(`${name} ${counted.verb} at ${over ? 'most' : 'least'} ${bound} ${bound === 1 ? counted.entry : counted.entries}, and ${counted.list} has ${list.length || 'none'}.`
+    + (over && kind === 'offset' ? ' Offset a longer loop as an independent copy with offset-sketch-loop.' : ''));
+}
+
+/** Refuses each generator record of a sketch graph, read before the schema check, that lists too few or too many entries. */
+export function assertCadSketchGraphGeneratorCounts(graph: unknown): void {
+  const relations = typeof graph === 'object' && graph !== null ? (graph as { readonly relations?: unknown }).relations : undefined;
+  if (Array.isArray(relations)) for (const relation of relations as readonly unknown[])
+    if (typeof relation === 'object' && relation !== null && (relation as { readonly kind?: unknown }).kind === 'generator') assertCadSketchGeneratorCounts(relation);
+}

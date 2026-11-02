@@ -5,10 +5,11 @@ import { Value } from '@sinclair/typebox/value';
 import { createBrowserCacheAdapter } from '@/domain/storage/browserCacheAdapter';
 import { initializeWorkbenchCatalog } from '@/domain/workbench-catalog/workbenchCatalog';
 import { loadCadDocument } from '@/domain/cad/cadStorage';
-import { parseCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
+import { CAD_GEAR_V3_PLUGIN, createCadPluginProfile, parseCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
 import { parseDxf } from '@/domain/dxf/parseDxf';
 import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
+import { compileCadSketchGraph } from '@/domain/cad/cadSketchGraphGeometry';
 import { storedCadDocument } from '@/domain/cad/cadStoredDocument';
 import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
@@ -243,6 +244,24 @@ describe('CAD agent discovery and authoring journeys', () => {
     for (const feature of applied.features) expect(feature.kind === 'sketch' && feature.graph?.relations.some(relation => relation.id === tie), feature.id).toBe(false);
     await h.success('cad_history', { expectedVersion: h.session.getSnapshot().version, direction: 'undo' });
     expect(h.session.getSnapshot().document).toEqual(seeded.document);
+  });
+
+  it('refuses a linked offset of a 600-curve gear outline with the bound and the count, and offsets nothing', async () => {
+    const h = await mount(), profile = createCadPluginProfile(CAD_GEAR_V3_PLUGIN);
+    const gear: CadSketchGenerator = { id: 'gear', kind: 'generator', idPrefix: 'gear', construction: false, geometry: { ...profile, inputs: { ...profile.inputs, teeth: 12 } } };
+    await h.success('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [{ kind: 'add-feature', feature: { id: 'outline', name: 'Outline', kind: 'sketch',
+      suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [], entities: [], relations: [gear] } } }] });
+    const seeded = h.session.getSnapshot(), sketch = seeded.document.features.find(feature => feature.id === 'outline');
+    if (sketch?.kind !== 'sketch' || !sketch.graph) throw new Error('Sketch missing');
+    // The outline's one loop, linked as the offset tool links a loop it is given.
+    const [loop] = compileCadSketchGraph(sketch.graph, seeded.document.parameters).cycles;
+    expect(loop.sourceRefs).toHaveLength(600);
+    const chain = loop.sourceRefs.map(({ entityId, reversed }) => ({ entityId, reversed }));
+    const response = await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [{ kind: 'set-sketch-generator', sketchId: 'outline',
+      generator: { id: 'ring', kind: 'generator', idPrefix: 'ring', construction: false, geometry: { kind: 'offset', chain, distance: 1 } } }] });
+    expect(response).toEqual({ ok: false, error: { code: 'invalid-sketch-generator',
+      message: 'Offset "ring" follows at most 512 curves, and its chain has 600. Offset a longer loop as an independent copy with offset-sketch-loop.' } });
+    expect(h.session.getSnapshot()).toBe(seeded);
   });
 
   it('keeps initial CAD discovery below 50 KiB without repeating complete plugin recipe schemas', () => {

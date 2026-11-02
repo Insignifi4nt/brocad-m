@@ -31,6 +31,7 @@ import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
 import { assertCadSketchGeneratorRemovals, cadSketchGeneratorLockReason, cadSketchGeneratorName, cadSketchGeneratorRemovals } from './sketch-generators/cadSketchGenerators';
 import { cadSketchProfileGenerator, cadSketchProfileViews, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
 import { detachCadSketchGenerator, setCadSketchGenerator, settleCadDocumentGenerators } from './sketch-generators/cadSketchGeneratorEdits';
+import { assertCadSketchGraphGeneratorCounts } from './sketch-generators/cadSketchGeneratorKinds';
 
 export type CadEdit =
   | { readonly kind: 'add-feature'; readonly feature: CadFeature; readonly beforeId?: string }
@@ -176,24 +177,33 @@ function refuseFixedSketchElements(edit: unknown): void {
 }
 
 /**
- * The sketch data an edit adds, read for reserved ids before the schema check, as a document's is: a sketch feature's graph, appended
- * geometry, a relation, and the prefix new ids are made from.
+ * The sketch data an edit adds, read before the schema check, as a document's is, for what that check would refuse without a reason:
+ * reserved ids in a sketch feature's graph, appended geometry, a relation, or the prefix new ids are made from, and a generator listing
+ * fewer or more entries than its kind takes.
  */
-function refuseReservedSketchIds(edit: unknown): void {
+function refuseSketchData(edit: unknown): void {
   if (!edit || typeof edit !== 'object') return;
   const fields = edit as { readonly kind?: unknown; readonly feature?: { readonly kind?: unknown; readonly graph?: unknown } | null; readonly geometry?: unknown;
     readonly relation?: unknown; readonly idPrefix?: unknown };
-  if ((fields.kind === 'add-feature' || fields.kind === 'update-feature') && fields.feature?.kind === 'sketch') assertNoReservedCadSketchIds(fields.feature.graph);
-  else if (fields.kind === 'append-sketch-entities') assertNoReservedCadSketchIds(fields.geometry);
-  else if (fields.kind === 'set-sketch-relation') assertNoReservedCadSketchIds({ relations: [fields.relation] });
-  else if (fields.kind === 'set-sketch-generator') assertNoReservedCadSketchIds({ relations: [(fields as { readonly generator?: unknown }).generator] });
+  const graph = (fields.kind === 'add-feature' || fields.kind === 'update-feature') && fields.feature?.kind === 'sketch' ? fields.feature.graph
+    : fields.kind === 'append-sketch-entities' ? fields.geometry : fields.kind === 'set-sketch-relation' ? { relations: [fields.relation] }
+      : fields.kind === 'set-sketch-generator' ? { relations: [(fields as { readonly generator?: unknown }).generator] } : undefined;
+  assertNoReservedCadSketchIds(graph);
+  assertCadSketchGraphGeneratorCounts(graph);
   if (typeof fields.idPrefix === 'string' && SKETCH_ELEMENT_EDITS.has(fields.kind as string) && isCadSketchReservedId(fields.idPrefix))
     throw new CadError('reserved-sketch-id', `Sketch id prefix "${fields.idPrefix}" is reserved: ids starting with "@" name the origin and the H and V axes.`);
+}
+/**
+ * Refuses, from edits' unchecked own data, what their schema check would refuse without a reason, as `validateCadEditBatch` does first. A
+ * caller that checks edits against the schema itself, as the edit tool does, runs this before it.
+ */
+export function refuseCadEditsBeforeSchema(edits: readonly unknown[]): void {
+  for (const edit of edits) { refuseSketchData(edit); refuseFixedSketchElements(edit); }
 }
 export function validateCadEditBatch(edits: readonly CadEdit[]): void {
   if (!isCadImportData(edits) || !Array.isArray(edits)) throw new CadError('invalid-edit', 'CAD edits must contain their own complete JSON data fields.');
   if (edits.length > 256) throw new CadError('edit-limit', 'An edit batch may contain at most 256 edits.');
-  for (const edit of edits) { refuseReservedSketchIds(edit); refuseFixedSketchElements(edit); }
+  refuseCadEditsBeforeSchema(edits);
   for (const edit of edits) {
     if (!Value.Check(CadEditSchema, edit)) throw new CadError('invalid-edit', 'Malformed CAD edit.');
     if (edit.kind === 'set-sketch-relation' && edit.copyRelations !== undefined && edit.relation.kind !== 'linear-pattern')

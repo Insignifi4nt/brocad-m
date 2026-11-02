@@ -68,7 +68,7 @@ describe('sketch generators', () => {
     expect(regenerateCadSketchGenerators(seven, { n: 5 }).entities.map(entity => entity.id)).toEqual(five.entities.map(entity => entity.id));
     expect(expandCadSketchGenerators(graphOf([polygon(1024)]), {}).entities).toHaveLength(1024);
     for (const sides of [0, 1, 2, 2.5, 1025])
-      expect(() => expandCadSketchGenerators(graphOf([polygon(sides)]), {}), String(sides)).toThrow(/Regular polygon "poly" needs a whole number of sides from 3 to 1024/);
+      expect(() => expandCadSketchGenerators(graphOf([polygon(sides)]), {}), String(sides)).toThrow(`Regular polygon "poly" needs a whole number of sides from 3 to 1024, and it has ${sides}.`);
     expect(() => regenerateCadSketchGenerators(five, { n: 2 })).toThrow(/Regular polygon "poly"/);
   });
 

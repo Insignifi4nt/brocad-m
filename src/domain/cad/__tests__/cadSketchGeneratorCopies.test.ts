@@ -72,7 +72,7 @@ describe('circular sketch patterns', () => {
 
   it('bound the count, the angle and the copies, refusing out of range naming the pattern', () => {
     expect(ids(patterned(pattern(1)), 'pat_')).toEqual({ points: [], entities: [], relations: [] });
-    for (const count of [0, 2.5, 361]) expect(() => patterned(pattern(count))).toThrow(/Circular pattern "pat" needs a whole number of occurrences from 1 to 360/);
+    for (const count of [0, 2.5, 361]) expect(() => patterned(pattern(count))).toThrow(`Circular pattern "pat" needs a whole number of occurrences from 1 to 360, the seeds' own among them, and it has ${count}.`);
     for (const angle of [0, 400, -361]) expect(() => patterned(pattern(3, angle))).toThrow(/Circular pattern "pat" needs a nonzero angle of at most 360 degrees/);
     const many = Array.from({ length: 12 }, (_, index) => line(`m${index}`, 'a', 'b'));
     expect(() => expandCadSketchGenerators({ points: seeds.points, entities: [...seeds.entities, ...many], relations: [pattern(360, 360, many.map(item => item.id))] }, { x: 10 }))

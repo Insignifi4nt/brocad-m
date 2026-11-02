@@ -14,6 +14,7 @@ import { createCadBodyLineage } from './cadBodies';
 import { validateCadSketchConstraints } from './cadSketchConstraints';
 import { assertNoReservedCadSketchIds, cadSketchGraphWithPlacements, isAcceptedCadSketchGraph, type CadSketchGraph } from './cadSketchGraph';
 import { withoutGeneratedCadSketchMembers } from './sketch-generators/cadSketchGenerators';
+import { assertCadSketchGraphGeneratorCounts } from './sketch-generators/cadSketchGeneratorKinds';
 import { sameCadSketchGeometryParameters } from './cadSketchParameterReads';
 import { cadFeatureActive } from './features/cadFeatureActivity';
 import type { CadFeatureCheckContext, CadFeatureScalar, CadFeatureTrait } from './features/cadFeatureDefinitionTypes';
@@ -158,10 +159,15 @@ function withoutGeneratedMembers(value: unknown): unknown {
 export function parseCadDocument(value: unknown): CadDocument {
   if (typeof value === 'object' && value !== null && acceptedDocuments.has(value as CadDocument)) return value as CadDocument;
   if (!isCadImportData(value, isAcceptedFeature)) throw new CadError('invalid-document', 'CAD documents must contain their own complete JSON data fields.');
-  // A sketch storing a reserved id is refused with that reason, which the schema check below would not give.
+  // A sketch storing a reserved id, or a generator listing fewer or more entries than its kind takes, is refused with that reason, which
+  // the schema check below would not give.
   const features = (value as { readonly features?: unknown }).features;
   if (Array.isArray(features)) for (const feature of features as readonly unknown[]) {
-    if (typeof feature === 'object' && feature !== null && (feature as { readonly kind?: unknown }).kind === 'sketch') assertNoReservedCadSketchIds((feature as { readonly graph?: unknown }).graph);
+    if (typeof feature === 'object' && feature !== null && (feature as { readonly kind?: unknown }).kind === 'sketch') {
+      const graph = (feature as { readonly graph?: unknown }).graph;
+      assertNoReservedCadSketchIds(graph);
+      assertCadSketchGraphGeneratorCounts(graph);
+    }
   }
   if (!matchesCadDocumentSchema(value)) {
     const error = Value.Errors(CadDocumentSchema, value).First();

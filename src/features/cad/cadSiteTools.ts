@@ -1,5 +1,5 @@
 import { Type, type Static, type TSchema } from '@sinclair/typebox';
-import { CadEditSchema } from '@/domain/cad/cadOperations';
+import { CadEditSchema, refuseCadEditsBeforeSchema } from '@/domain/cad/cadOperations';
 import { CadParameterNameSchema } from '@/domain/cad/cadParameters';
 import { CadDocumentSchema } from '@/domain/cad/cadSchema';
 import { storedCadDocument, storedCadDocumentText } from '@/domain/cad/cadStoredDocument';
@@ -172,7 +172,8 @@ const agentFeatureKinds = cadFeatureKinds().filter(kind => cadFeaturePresentatio
 /** No code execution or hidden controller shortcuts: agents use the visible CAD operations. */
 export function cadSiteTools(getController: () => CadController) {
   function tool<S extends TSchema>(name: string, description: string, schema: S,
-    execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema) {
+    execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema,
+    refuse?: (input: unknown) => void) {
     const operation = siteTool(name, description, schema, async (input, signal) => {
       try { return await execute(getController(), input, signal); }
       catch (error) {
@@ -195,7 +196,10 @@ export function cadSiteTools(getController: () => CadController) {
         if (error instanceof CadError || error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }
-    }, readOnly);
+    }, readOnly, refuse && (input => {
+      try { refuse(input); }
+      catch (error) { throw error instanceof CadError ? new ToolError(error.code, error.message) : error; }
+    }));
     return { ...operation, inputSchema: discoverySchema ?? operation.inputSchema, execute(input: unknown, options?: { signal?: AbortSignal }) {
       // Validate portable own data before TypeBox reads fields or a handler runs.
       if (!options?.signal?.aborted && !isCadImportData(input)) return Promise.resolve({ ok: false,
@@ -377,7 +381,11 @@ export function cadSiteTools(getController: () => CadController) {
       await cad.edit(input.edits, input.expectedVersion, true, signal, found => { warnings = found; });
       // At most eight warnings, as other edit diagnostics are listed, with how many there were.
       return { ...context(cad), ...(warnings.length ? { sketchWarnings: { items: warnings.slice(0, 8), count: warnings.length, omittedCount: Math.max(0, warnings.length - 8) } } : {}) };
-    }, false, object({ ...version, edits: Type.Array(CadToolEditEnvelope, { minItems: 1, maxItems: 128 }) })),
+    }, false, object({ ...version, edits: Type.Array(CadToolEditEnvelope, { minItems: 1, maxItems: 128 }) }), input => {
+      // The domain's own reasons for edits its schema refuses, such as a generator's count bound, come before the bare schema refusal.
+      const edits = (input as { readonly edits?: unknown }).edits;
+      if (Array.isArray(edits)) refuseCadEditsBeforeSchema(edits);
+    }),
     tool('cad_describe_edits', 'Discover CAD edit fields without opening or changing a draft. No kind returns a catalog; kind returns its strict contract. Add/update features and plugin packages use their separate complete discovery tools. Execution always validates full definitions.', object({ kind: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })) }), (_cad, input) => {
       if (!input.kind) return { items: CadToolEditDefinitions.map(schema => ({ kind: schema.properties.kind.const, description: schema.description ?? null })) };
       const schema = CadToolEditDefinitions.find(schema => schema.properties.kind.const === input.kind);
