@@ -147,9 +147,6 @@ export function createCadIssue<T extends CadIssue>(issue: T): T {
   return detached(issue);
 }
 
-/** Whether issue lists are checked as they are made: in development and tests, where a malformed list is a programming error that throws. */
-const CHECKED = import.meta.env?.DEV === true;
-
 /**
  * The causal structure of list `issues`, found without recursion, so a history of any length is safe, in whatever order the list gives
  * it. The first issue of a repeated key stands for it. For each key:
@@ -241,9 +238,13 @@ export function cadIssueListProblems(issues: readonly CadIssue[]): readonly stri
   return problems;
 }
 
-/** The issues of one list, frozen; in development and tests a list that is not one causal graph (`cadIssueListProblems`) throws. */
-export function createCadIssueList(issues: readonly CadIssue[]): readonly CadIssue[] {
-  if (CHECKED) {
+/**
+ * The issues of one list, frozen. With `checked`, which development and tests ask for, a list that is not one causal graph
+ * (`cadIssueListProblems`) is a programming error that throws; production leaves it unchecked and the digest names what does not resolve.
+ * The caller decides, so this module reads no host flag: the app passes its bundler's development flag.
+ */
+export function createCadIssueList(issues: readonly CadIssue[], checked: boolean): readonly CadIssue[] {
+  if (checked) {
     const problems = cadIssueListProblems(issues);
     if (problems.length) throw new Error(`Malformed CAD issue list: ${problems.join(' ')}`);
   }

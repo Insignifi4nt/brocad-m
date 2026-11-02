@@ -75,6 +75,6 @@ describe('refusals in the CAD issue model', () => {
   it('makes frozen issues a checked list accepts', () => {
     const issue = cadRefusalIssue(refusal([extrude('body')]))!;
     expect(Object.isFrozen(issue) && Object.isFrozen(issue.subject)).toBe(true);
-    expect(createCadIssueList([issue])).toEqual([issue]);
+    expect(createCadIssueList([issue], true)).toEqual([issue]);
   });
 });

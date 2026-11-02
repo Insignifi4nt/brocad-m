@@ -27,10 +27,11 @@ const SELECTION_CODES: ReadonlySet<string> = new Set<CadRefusalCode>(['selection
  *   result the body is (F0), as blocked, linked to the issue of every failed or blocked input it reads. A feature that failed on its own
  *   and reads such an input is reported once, as its own failure, which lists those inputs' issues as causes too;
  * - every body issue the rebuild recorded (F0), with its body key and cause.
- * Repairs are prepared against `version`. Nothing here runs while a feature is hovered, dragged or previewed: the workbench builds issues
- * once per published build.
+ * Repairs are prepared against `version`. With `checked`, as in development and tests, a malformed list throws (`createCadIssueList`).
+ * Nothing here runs while a feature is hovered, dragged or previewed: the controller makes issues once per published build.
  */
-export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'parameters'>, build: Pick<CadBuildResult, 'diagnostics' | 'bodyIssues'>, version: string): CadBuildIssues {
+export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'parameters'>, build: Pick<CadBuildResult, 'diagnostics' | 'bodyIssues'>, version: string,
+  checked: boolean): CadBuildIssues {
   const featureOf = (id: string | undefined) => id === undefined ? undefined : document.features.find(feature => feature.id === id);
   // A code no registry lists becomes kernel-unrecognised, keeping the code it gave, as where a build reply is received.
   const diagnostics = build.diagnostics.map(cadReceivedDiagnostic);
@@ -68,7 +69,7 @@ export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'paramet
     items.push(issue); show(featureId, issue);
   }
   (build.bodyIssues ?? []).forEach((issue, index) => items.push(cadBodyIssue(issue, index)));
-  return Object.freeze({ items: createCadIssueList(items), byFeature });
+  return Object.freeze({ items: createCadIssueList(items, checked), byFeature });
 }
 
 function kernelFailure(diagnostic: CadDiagnostic, key: string, feature: CadFeature | undefined, causes: readonly string[], version: string): CadKernelIssueOf {
