@@ -640,4 +640,3 @@ describe.each(['browser-cache', 'directory'] as const)('CAD persistence in %s', 
 });
 /** `sketch`, an imported drawing, with its one contour generator given `geometry`. */
 const withContour = (sketch: CadSketchFeature, geometry: CadProfile) => withCadSketchProfile(sketch, { ...cadSketchProfileViews(sketch)[0], geometry });
-
