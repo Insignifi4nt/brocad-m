@@ -34,7 +34,10 @@ const SELECTION_CODES: ReadonlySet<string> = new Set<CadRefusalCode>(['selection
  */
 export function cadBuildIssues(document: Pick<CadDocument, 'features' | 'parameters'>, build: Pick<CadBuildResult, 'diagnostics' | 'bodyIssues'>, version: string,
   checked: boolean): CadBuildIssues {
-  const featureOf = (id: string | undefined) => id === undefined ? undefined : document.features.find(feature => feature.id === id);
+  // Features by id, which an accepted document never repeats, indexed once when a failure first names one: a clean build indexes none,
+  // and many failures read each id once.
+  let byId: ReadonlyMap<string, CadFeature> | undefined;
+  const featureOf = (id: string | undefined) => id === undefined ? undefined : (byId ??= new Map(document.features.map(feature => [feature.id, feature]))).get(id);
   // A code no registry lists becomes kernel-unrecognised, keeping the code it gave, as where a build reply is received.
   const diagnostics = build.diagnostics.map(cadReceivedDiagnostic);
   const key = (diagnostic: CadDiagnostic, index: number) => `kernel:${index}:${diagnostic.code}`;

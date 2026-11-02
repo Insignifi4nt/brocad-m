@@ -251,6 +251,26 @@ describe('long histories', () => {
     expect(items).toHaveLength(6001);
     expect(cadIssueDigest([...items].reverse())).toMatchObject({ blocked: [{ cause: 'kernel:0:empty-solid', count: 5998 }], unresolved: { count: 0 }, omittedCount: 5990 });
   });
+
+  it('read each feature\'s id a few times, for one root blocking a chain or as many independent failures as features, and a clean build none', () => {
+    /** `features`, counting every read of an id while issues are made from them. */
+    const counted = (features: readonly CadFeature[]) => {
+      let reads = 0;
+      const proxied = features.map(feature => new Proxy(feature, { get(target, key, receiver) { if (key === 'id') reads++; return Reflect.get(target, key, receiver); } }));
+      return { document: { features: proxied, parameters: {} }, reads: () => reads };
+    };
+    const n = 1200;
+    // As many independent failures as features: each failure looks its feature up once.
+    const independent = counted(Array.from({ length: n }, (_, at) => sketch(`s${at}`)));
+    expect(cadBuildIssues(independent.document, build(Array.from({ length: n }, (_, at) => failed(`s${at}`, 'empty-solid', 'No solid.'))), 'v7', false).items).toHaveLength(n);
+    expect(independent.reads()).toBeLessThan(n * 20);
+    const chain = counted(chained(n).features);
+    expect(cadBuildIssues(chain.document, build([failed('p', 'empty-solid', 'No solid.'), stopped('p')]), 'v7', false).items).toHaveLength(n + 2);
+    expect(chain.reads()).toBeLessThan((n + 2) * 20);
+    const clean = counted(chained(n).features);
+    expect(cadBuildIssues(clean.document, build([]), 'v7', false)).toMatchObject({ items: [], diagnosticKeys: [] });
+    expect(clean.reads()).toBe(0);
+  });
 });
 
 describe('issue digest', () => {
