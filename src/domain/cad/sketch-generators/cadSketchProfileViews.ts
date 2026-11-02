@@ -79,28 +79,42 @@ export function cadSketchOutlineViews(sketch: CadSketchFeature, parameters: Read
 export type CadSketchPluginNote = Readonly<Pick<CadPluginPackage, 'id' | 'version' | 'name' | 'notes'>>;
 
 /**
+ * The curves the generated curve `entityId` of `owner` copies: a linked offset's edges come from its chain, and a circular pattern's copy
+ * `i<k>_<seed>` from that seed. Other kinds copy no sketch curve.
+ */
+function copiedCurves(owner: CadSketchGenerator, entityId: string): readonly string[] {
+  if (owner.geometry.kind === 'offset') return owner.geometry.chain.map(link => link.entityId);
+  if (owner.geometry.kind !== 'circular-pattern') return [];
+  const seed = /^i\d+_(.+)$/.exec(entityId.slice(owner.idPrefix.length + 1))?.[1];
+  return seed !== undefined && owner.geometry.seedIds.includes(seed) ? [seed] : [];
+}
+
+/**
  * The plugin packages whose approximations the sketch's material geometry carries, one per shape, so export and CAM keep each package's
- * notes: every nonconstruction plugin profile, saved or generated, in profile-view order, then each construction plugin generator that
- * a nonconstruction linked offset or circular pattern copies from, directly or through another, since that copy is material made from
- * the same approximated curves. Callers that list a package once dedupe by id and version.
+ * notes: every nonconstruction plugin profile, saved or generated, in profile-view order, then each construction plugin generator whose
+ * curves a material curve copies, directly or through copies of copies, since that copy is material made from the same approximated
+ * curves. Only curves that exist and are material start the walk: a circular pattern of count 1 copies nothing, and its copies of a
+ * construction seed are construction, while a construction offset that a material offset copies is still walked through. Callers that
+ * list a package once dedupe by id and version.
  */
 export function cadSketchPluginPackages(sketch: CadSketchFeature): readonly CadSketchPluginNote[] {
   const packages: CadSketchPluginNote[] = cadSketchProfileViews(sketch).flatMap(profile => !profile.construction && profile.geometry.kind === 'plugin' ? [profile.geometry.package] : []);
   const graph = sketch.graph;
-  if (!graph) return packages;
-  const reached = new Set<string>();
-  const follow = (generator: CadSketchGenerator) => {
-    const inputs = generator.geometry.kind === 'offset' ? generator.geometry.chain.map(link => link.entityId)
-      : generator.geometry.kind === 'circular-pattern' ? generator.geometry.seedIds : [];
-    for (const id of inputs) {
-      const owner = cadSketchGeneratorOwner(graph, id);
-      if (!owner || reached.has(owner.id)) continue;
-      reached.add(owner.id);
-      if (owner.geometry.kind === 'plugin' && owner.construction) packages.push(owner.geometry.package);
-      follow(owner);
+  if (!graph || !cadSketchGenerators(graph).length) return packages;
+  const walked = new Set<string>(), reached = new Set<string>();
+  const walk = (entityId: string) => {
+    if (walked.has(entityId)) return;
+    walked.add(entityId);
+    const owner = cadSketchGeneratorOwner(graph, entityId);
+    if (!owner) return;
+    if (owner.geometry.kind === 'plugin') {
+      // A material plugin shape is listed by its view already.
+      if (owner.construction && !reached.has(owner.id)) { reached.add(owner.id); packages.push(owner.geometry.package); }
+      return;
     }
+    for (const id of copiedCurves(owner, entityId)) walk(id);
   };
-  for (const generator of cadSketchGenerators(graph)) if (!generator.construction) follow(generator);
+  for (const entity of graph.entities) if (!entity.construction) walk(entity.id);
   return packages;
 }
 

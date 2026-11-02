@@ -75,6 +75,30 @@ describe('plugin notes on export and CAM handoff', () => {
     expect(dxfComments(cadSketchToDxf(outer, 'sketch')).filter(comment => comment === dxfNote(CAD_STAR_PLUGIN))).toHaveLength(1);
   });
 
+  it('keeps the notes of a construction star only while a circular pattern makes material copies of it', () => {
+    // An unrelated material circle is all the sketch exports while the star is construction.
+    const star = placed(CAD_STAR_PLUGIN), refs = compileCadSketchGraph(sketchOf(star).graph!, star.parameters).cycles.find(cycle => !cycle.construction)!.sourceRefs;
+    const disc: CadSketchGenerator = { id: 'disc', kind: 'generator', idPrefix: 'disc', construction: false, geometry: { kind: 'circle', x: 200, y: 0, radius: 5 } };
+    const base = applyCadEdits(star, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...generatorOf(star, 'part'), construction: true } },
+      { kind: 'set-sketch-generator', sketchId: 'sketch', generator: disc }]);
+    const notes = (document: CadDocument) => [camNotes(cadSketchToCam(document, 'sketch')), camNotes(section(document)), dxfComments(cadSketchToDxf(document, 'sketch')).filter(comment => comment === dxfNote(CAD_STAR_PLUGIN)).length];
+    expect(notes(base)).toEqual([[], [], 0]);
+    const spin = (count: number): CadSketchGenerator => ({ id: 'spin', kind: 'generator', idPrefix: 'spin', construction: false,
+      geometry: { kind: 'circular-pattern', seedIds: refs.map(ref => ref.entityId), centerId: '@origin', count, angle: 360 } });
+    // A material pattern of count 1 makes no copies, and with construction seeds its copies stay construction: neither carries the star.
+    for (const count of [1, 2]) expect(notes(applyCadEdits(base, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: spin(count) }]))).toEqual([[], [], 0]);
+    // A material edge as another seed makes material copies of that edge only, which still carry nothing of the star.
+    const line = { kind: 'append-sketch-entities' as const, sketchId: 'sketch', geometry: { points: [{ id: 'a', position: [300, 0] as [number, number] }, { id: 'b', position: [310, 0] as [number, number] }],
+      entities: [{ id: 'ab', kind: 'line' as const, construction: false, startPointId: 'a', endPointId: 'b' }], relations: [] } };
+    const mixed = applyCadEdits(base, [line, { kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...spin(2), geometry: { ...spin(2).geometry, seedIds: [...refs.map(ref => ref.entityId), 'ab'] } as CadSketchGenerator['geometry'] } }]);
+    expect(notes(mixed)).toEqual([[], [], 0]);
+    // A material offset of the construction copies is material made from the star's curves, so its notes come back.
+    const copies = applyCadEdits(base, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { ...spin(2), construction: true } }]);
+    const wall = applyCadEdits(copies, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
+      geometry: { kind: 'offset', chain: refs.map(({ entityId, reversed }) => ({ entityId: `spin_i1_${entityId}`, reversed })), distance: 1 } } }]);
+    expect(notes(wall)).toEqual([[camNote(CAD_STAR_PLUGIN)], [camNote(CAD_STAR_PLUGIN)], 1]);
+  });
+
   it('writes a material star that a material offset copies once in DXF, as the one shape it is', () => {
     const star = placed(CAD_STAR_PLUGIN), cycle = compileCadSketchGraph(sketchOf(star).graph!, star.parameters).cycles.find(cycle => !cycle.construction)!;
     const document = applyCadEdits(star, [{ kind: 'set-sketch-generator', sketchId: 'sketch', generator: { id: 'wall', kind: 'generator', idPrefix: 'wall', construction: false,
