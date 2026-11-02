@@ -208,6 +208,17 @@ describe('sketch generators', () => {
     } finally { resolve.mockRestore(); }
   });
 
+  it('generate each pinned package\'s own outline, so an updated package with the same inputs is not drawn from the earlier one', () => {
+    const turned = (offset: number) => [`innerRadius * cos((index + ${offset}) * 2 * pi / count)`, `innerRadius * sin((index + ${offset}) * 2 * pi / count)`] as const;
+    const updated: CadPluginPackage = { ...CAD_STAR_PLUGIN, version: '1.1.0', generator: { kind: 'polygon-recipe', repeat: 'lobes', points: [
+      ['outerRadius * cos(index * 2 * pi / count)', 'outerRadius * sin(index * 2 * pi / count)'], [...turned(0.25)]] } };
+    const inner = (plugin: CadPluginPackage) => position(expandCadSketchGenerators(graphOf([pluginOf(plugin, {})]), {}), 'g_r0_v1');
+    const at = (offset: number) => [20 * Math.cos(offset * Math.PI / 4), 20 * Math.sin(offset * Math.PI / 4)];
+    for (const [plugin, offset] of [[CAD_STAR_PLUGIN, 0.5], [updated, 0.25], [CAD_STAR_PLUGIN, 0.5]] as const) {
+      inner(plugin).forEach((value, axis) => expect(value).toBeCloseTo(at(offset)[axis], 9));
+    }
+  });
+
   it('are evaluated once for each check of a graph, however many generators it holds', () => {
     const hexagons = Array.from({ length: 200 }, (_, at): CadSketchGenerator => ({ id: `h${at}`, kind: 'generator', idPrefix: `g-h${at}`, construction: false,
       geometry: { kind: 'regular-polygon', x: (at % 20) * 30, y: Math.floor(at / 20) * 30, radius: 'r', sides: 6, directionId: '@h' } }));
