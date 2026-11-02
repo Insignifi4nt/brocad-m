@@ -5,6 +5,8 @@ import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { cadIssueListProblems, preparedCadIssueRepair } from '@/domain/cad/cadIssues';
 import { cadSketchAnalysisIssues, cadSketchIssues, noCadSketchIssues } from './cadSketchIssues';
 import type { CadSketchSolveDiagnostics } from './sketch-solver/cadSketchSolverTypes';
+import { CAD_SKETCH_SOLVER_STOPPED } from './sketch-solver/cadSketchSolverFailure';
+import { CAD_SKETCH_NATIVE_LOAD_FAILED } from './sketch-solver/cadSketchSolverMessages';
 
 const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }, { id: 'c', position: [10, 10] }, { id: 'd', position: [5, -5] }, { id: 'e', position: [5, 15] }],
   entities: [{ id: 'ab', kind: 'line', construction: false, startPointId: 'a', endPointId: 'b' }, { id: 'bc', kind: 'line', construction: false, startPointId: 'b', endPointId: 'c' },
@@ -82,6 +84,33 @@ describe('sketch issues in the CAD issue model', () => {
     expect(issues.refusal?.causes).toHaveLength(8);
     const collapsed = { ...refused, message: `Plate: ${CAD_SKETCH_MIRROR_COLLAPSE}`, reason: 'invalid-input' as const };
     expect(cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', feedback: collapsed }).refusal).toMatchObject({ code: 'sketch-invalid-input', details: { cause: 'mirror-collapse' } });
+  });
+
+  it('names a solver that failed rather than judged the sketch as the cause of its refusal, with its words, from a refused edit or the analysis alike', () => {
+    const unjudged = { ...diagnostics({}), status: null, degreesOfFreedom: null };
+    const refused = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Plate', graph, unavailable: { kernelMessage: 'Uncaught RangeError: out of memory' },
+      rejection: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_SOLVER_STOPPED, diagnostics: unjudged } }).feedback;
+    const edit = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', feedback: refused });
+    expect(edit.refusal).toMatchObject({ code: 'sketch-failed', message: `Plate: ${CAD_SKETCH_SOLVER_STOPPED}`, causes: [],
+      details: { cause: 'solver-unavailable', subjectCount: 0, omittedSubjectCount: 0, kernelMessage: 'Uncaught RangeError: out of memory' } });
+    expect(edit.message).toBe(`Plate: ${CAD_SKETCH_SOLVER_STOPPED}`);
+    // The analysis of the accepted sketch, which the solver could not give, refuses it the same way.
+    const unavailable = cadSketchAnalysisIssues({ kind: 'unavailable', message: CAD_SKETCH_SOLVER_STOPPED, cause: 'solver-unavailable', kernelMessage: 'Uncaught RangeError: out of memory',
+      diagnostics: unjudged });
+    expect(unavailable).toMatchObject({ kind: 'unavailable', reason: 'failed', cause: 'solver-unavailable', message: CAD_SKETCH_SOLVER_STOPPED });
+    const analysed = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', analysis: unavailable });
+    expect(analysed.refusal).toMatchObject({ key: 'analysis/refusal', code: 'sketch-failed', message: CAD_SKETCH_SOLVER_STOPPED,
+      details: { cause: 'solver-unavailable', subjectCount: 0, omittedSubjectCount: 0, kernelMessage: 'Uncaught RangeError: out of memory' } });
+    // A solver that could not load says how to recover, and names the same cause without words.
+    const unloaded = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1',
+      analysis: cadSketchAnalysisIssues({ kind: 'rejected', reason: 'failed', message: CAD_SKETCH_NATIVE_LOAD_FAILED, diagnostics: unjudged }) });
+    expect(unloaded.refusal).toMatchObject({ message: CAD_SKETCH_NATIVE_LOAD_FAILED, details: { cause: 'solver-unavailable' } });
+    expect('kernelMessage' in unloaded.refusal!.details).toBe(false);
+    // An analysis that is unavailable for another reason, or a solver that failed for a reason of the sketch, names no such cause.
+    expect(cadSketchAnalysisIssues({ kind: 'unavailable', message: 'Constraint analysis is unavailable.', diagnostics: unjudged })).toBeNull();
+    const judged = cadSketchIssues({ sketchId: 'sketch', graph, version: 'v1', analysis: cadSketchAnalysisIssues({ kind: 'rejected', reason: 'failed', message: 'No.', diagnostics: unjudged }) });
+    expect(judged.refusal).toMatchObject({ message: 'The sketch solver could not solve this sketch.', details: { cause: null } });
+    expect(cadIssueListProblems(edit.issues)).toEqual([]); expect(cadIssueListProblems(analysed.issues)).toEqual([]);
   });
 
   it('records the curves a shrink kept, leaving out those the graph no longer has', () => {

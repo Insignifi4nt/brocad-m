@@ -42,7 +42,8 @@ export function CadSketchContextHeader({ name, status, issues, inspectedIssue, i
   relationsShown, onShowDimensions, onShowRelations, viewModes, actions }: CadSketchContextHeaderProps) {
   const [open, setOpen] = useState(false), listId = useId(), owner = useId();
   const trigger = useRef<HTMLButtonElement>(null), shown = useRef<string | null>(null);
-  const count = issues.list.length + issues.omitted;
+  // A refusal that names no item, as a solver that failed rather than judged the sketch gives, is itself the one issue shown.
+  const count = issues.list.length + issues.omitted || (issues.refusal ? 1 : 0);
   useLayoutEffect(() => { if (!count) setOpen(false); }, [count]);
   const hide = () => { if (shown.current) highlight?.hide(owner); shown.current = null; };
   const show = (issue: CadSketchIssue) => { shown.current = issue.key; highlight?.show(owner, { kind: 'geometry', ...highlightOf(issue) }); };

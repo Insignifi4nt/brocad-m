@@ -11,6 +11,7 @@ import { createCadPathDraft, updateCadPathDraft, type CadPathDraftPick } from '.
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { appendCadSketchGraphWithInferences, cadSketchInferenceNote } from './cadSketchInferenceFallback';
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
+import { CAD_SKETCH_SOLVER_STOPPED, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 
 let solves = 0;
 const solver = createCadSketchTestSolver({ onSolve: () => { solves++; } });
@@ -90,6 +91,23 @@ describe('inferred line relations at commit', () => {
     const stale = append(document, graph, ['repeat', 'plumb'], { current: () => false });
     await expect(stale.result).rejects.toBeInstanceOf(CadSketchPreparationError); expect(stale.attempts).toHaveLength(1);
     expect(aborted.onDropped).not.toHaveBeenCalled(); expect(stale.onDropped).not.toHaveBeenCalled();
+  });
+
+  it('keeps every inference when the solver failed rather than judged the drawing, so a retry would not drop them', async () => {
+    const document = levelPart(), { graph } = drawing(document, repeated), attempts: CadSketchGraph[] = [], onDropped = vi.fn();
+    // The solver fails once and would solve the next request, as a restarted worker does.
+    let failed = false;
+    const flaky = { solve: async (input: Parameters<typeof solver.solve>[0]) => {
+      if (!failed) { failed = true; throw new CadSketchSolverFailure(CAD_SKETCH_SOLVER_STOPPED, 'Uncaught RangeError: out of memory'); }
+      return solver.solve(input);
+    } };
+    const result = appendCadSketchGraphWithInferences({ graph, inferredIds: ['repeat', 'plumb'], current: () => true, onDropped, submit: async next => {
+      attempts.push(next); return prepareCadEdits(document, [{ kind: 'append-sketch-entities', sketchId: 'sketch', geometry: next }], flaky);
+    } });
+    const reported = await Promise.resolve(result).then(() => null, (error: unknown) => error);
+    expect(reported).toBeInstanceOf(CadSketchPreparationError);
+    expect((reported as CadSketchPreparationError).feedback).toMatchObject({ reason: 'failed', cause: 'solver-unavailable' });
+    expect(attempts).toHaveLength(1); expect(onDropped).not.toHaveBeenCalled();
   });
 
   it('describes dropped relations neutrally', () => {

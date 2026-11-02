@@ -13,6 +13,8 @@ import { Value } from '@sinclair/typebox/value';
 import { CadToolEditDefinitions } from './cadToolSchemas';
 import { applyCadEdits } from '@/domain/cad/cadOperations';
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
+import { CAD_SKETCH_SOLVER_UNREADABLE, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { cadSketchAnalysisIssues, cadSketchIssues } from './cadSketchIssues';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { span: 20 }, features: [{
@@ -304,6 +306,23 @@ describe('accepted sketch constraint inspection', () => {
     await expect(inspectCadSketchConstraints(document, 'sketch', async () => { abort.abort(); return solver; }, abort.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(JSON.stringify(document)).toBe(exact);
     expect((await inspectCadSketchConstraints(document, 'sketch', async () => solver)).analysis.kind).toBe('solved');
+  });
+
+  it('reports a solver that failed rather than judged the sketch as an unavailable analysis naming that cause, with its words bounded for agents, and the sketch refusal its header shows', async () => {
+    const words = `The reply could not be deserialized: ${'孔'.repeat(1000)}`;
+    const failed = await inspectCadSketchConstraints(source(), 'sketch', async () => ({ solve: async () => { throw new CadSketchSolverFailure(CAD_SKETCH_SOLVER_UNREADABLE, words); } }));
+    expect(failed.analysis).toMatchObject({ kind: 'unavailable', message: CAD_SKETCH_SOLVER_UNREADABLE, cause: 'solver-unavailable', kernelMessage: words,
+      diagnostics: { status: null, degreesOfFreedom: null } });
+    const summary = summarizeCadSketchConstraintAnalysis(failed.analysis) as Record<string, unknown>;
+    expect(summary).toMatchObject({ kind: 'unavailable', message: CAD_SKETCH_SOLVER_UNREADABLE, cause: 'solver-unavailable', kernelMessage: expect.stringMatching(/^The reply could not be deserialized: 孔+…$/) });
+    expect(new TextEncoder().encode(JSON.stringify(summary.kernelMessage)).byteLength).toBeLessThanOrEqual(1024);
+    const header = cadSketchIssues({ sketchId: 'sketch', graph: failed.graph!, version: 'v1', analysis: cadSketchAnalysisIssues(failed.analysis) });
+    expect(header.refusal).toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_UNREADABLE, details: { cause: 'solver-unavailable', kernelMessage: words } });
+    // Any other failure stays an unavailable analysis without that cause, and no refusal.
+    const other = await inspectCadSketchConstraints(source(), 'sketch', async () => { throw new Error('Failed to fetch dynamically imported module'); });
+    expect(other.analysis).not.toHaveProperty('cause');
+    expect(summarizeCadSketchConstraintAnalysis(other.analysis)).not.toHaveProperty('cause');
+    expect(cadSketchAnalysisIssues(other.analysis)).toBeNull();
   });
 
   it('bounds native diagnostic summaries and keeps unknown freedom distinct from zero', async () => {

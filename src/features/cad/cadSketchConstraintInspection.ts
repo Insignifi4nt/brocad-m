@@ -14,10 +14,14 @@ import { summarizeMessage, summarizeDiagnostic } from '@/features/webmcp/diagnos
 import type { CadSketchSolveDiagnostics, CadSketchSolveResult, CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import type { CadSketchConstraintSection } from './cadToolSchemas';
 import { deepFreezeCadData } from '@/domain/cad/cadDeepFreeze';
+import { CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
+import { cadAgentKernelMessage } from './cadAgentIssues';
 
 export type CadSketchConstraintAnalysis = { readonly kind: 'solved'; readonly diagnostics: CadSketchSolveDiagnostics }
   | { readonly kind: 'rejected'; readonly reason: Extract<CadSketchSolveResult, { kind: 'rejected' }>['reason']; readonly message: string; readonly diagnostics: CadSketchSolveDiagnostics }
-  | { readonly kind: 'unavailable' | 'legacy'; readonly message: string; readonly diagnostics: CadSketchSolveDiagnostics };
+  | { readonly kind: 'unavailable' | 'legacy'; readonly message: string; readonly diagnostics: CadSketchSolveDiagnostics;
+    /** Only when the solver failed rather than judged the sketch (`CadSketchSolverFailure`), with the browser's or its worker's words when it gave any. */
+    readonly cause?: 'solver-unavailable'; readonly kernelMessage?: string };
 export interface CadSketchConstraintInspection {
   readonly sketchId: string;
   readonly pointCount: number; readonly entityCount: number; readonly relationCount: number;
@@ -54,7 +58,9 @@ export async function inspectCadSketchConstraints(document: CadDocument, sketchI
         : { kind: 'rejected', reason: result.reason, message: result.message, diagnostics };
     } catch (error) {
       signal?.throwIfAborted();
-      analysis = { kind: 'unavailable', message: error instanceof Error ? error.message : 'Constraint analysis is unavailable. Retry to restart the solver.', diagnostics: unknownDiagnostics() };
+      analysis = error instanceof CadSketchSolverFailure ? { kind: 'unavailable', message: error.message, diagnostics: unknownDiagnostics(), cause: 'solver-unavailable',
+        ...error.kernelMessage ? { kernelMessage: error.kernelMessage } : {} }
+        : { kind: 'unavailable', message: error instanceof Error ? error.message : 'Constraint analysis is unavailable. Retry to restart the solver.', diagnostics: unknownDiagnostics() };
     }
   }
   const result: CadSketchConstraintInspection = { sketchId, graph, parameters: accepted.parameters,
@@ -156,6 +162,7 @@ export function summarizeCadSketchConstraintAnalysis(analysis: CadSketchConstrai
   return { kind: analysis.kind, status: diagnostics.status, degreesOfFreedom: diagnostics.degreesOfFreedom,
     ...(analysis.kind === 'rejected' ? { reason: analysis.reason } : {}),
     ...('message' in analysis ? summarizeMessage(analysis.message) : {}),
+    ...(analysis.kind === 'unavailable' && analysis.cause ? { cause: analysis.cause, ...analysis.kernelMessage ? { kernelMessage: cadAgentKernelMessage(analysis.kernelMessage) } : {} } : {}),
     conflicting: ids(diagnostics.conflictingIds), redundant: ids(diagnostics.redundantIds), partiallyRedundant: ids(diagnostics.partiallyRedundantIds),
     issues: diagnostics.issues.slice(0, 2).map(summarizeDiagnostic), issueCount: diagnostics.issues.length,
     omittedIssueCount: Math.max(0, diagnostics.issues.length - 2),

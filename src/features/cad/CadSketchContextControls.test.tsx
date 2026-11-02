@@ -9,6 +9,8 @@ import { CadSketchRelationList, CAD_SKETCH_RELATION_ROW_HEIGHT, cadSketchRelatio
 import { CadSketchSelectionActions, cadSketchCenterSymmetryOffer, cadSketchSelectionActions, cadSketchSelectionRelationActions, placeCadSketchSelectionActions, type CadSketchSelectionActionsModel } from './CadSketchSelectionActions';
 import { createCadSketchHighlightStore } from './cadSketchDimensionSelection';
 import { cadSketchIssues, type CadSketchIssues } from './cadSketchIssues';
+import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { CAD_SKETCH_SOLVER_STOPPED } from './sketch-solver/cadSketchSolverFailure';
 
 let container: HTMLDivElement, root: Root;
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); container = document.createElement('div'); document.body.append(container); root = createRoot(container); });
@@ -431,6 +433,21 @@ describe('sketch context header', () => {
     // A pending edit of another sketch keeps each issue from opening on the canvas.
     await h.render({ ...issues, omitted: 4 }, { locked: true });
     expect(container.querySelector<HTMLButtonElement>('ul[aria-label="Constraint issues"] button')!.disabled).toBe(true);
+  });
+
+  it('counts a refusal that names no item, as a solver that failed gives, as one issue whose list shows its message', async () => {
+    const source = graph(), unjudged = { status: null, degreesOfFreedom: null, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] };
+    const failure = new CadSketchPreparationError({ sketchId: 'sketch', sketchName: 'Sketch 1', graph: source, unavailable: { kernelMessage: 'Uncaught RangeError: out of memory' },
+      rejection: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_SOLVER_STOPPED, diagnostics: unjudged } });
+    const issues = cadSketchIssues({ sketchId: 'sketch', graph: source, version: 'v1', feedback: failure.feedback }), h = mount(issues);
+    await h.render(issues);
+    const count = container.querySelector<HTMLButtonElement>('[data-cad-sketch-issues]')!;
+    expect([count.getAttribute('aria-label'), count.disabled]).toEqual(['1 constraint issue', false]);
+    await act(async () => count.click());
+    expect(container.querySelector('.cad-sketch-header-issue-message')?.textContent).toBe(`Sketch 1: ${CAD_SKETCH_SOLVER_STOPPED}`);
+    expect(container.querySelectorAll('ul[aria-label="Constraint issues"] > li')).toHaveLength(0);
+    // The header shows the message only: the solver's own words stay for agents.
+    expect(container.querySelector('[data-cad-sketch-header]')!.textContent).not.toContain('out of memory');
   });
 
   it('keeps focus as an edit fixes the issues: on the row taking the fixed one\'s place, then the count, then the sketch canvas', async () => {

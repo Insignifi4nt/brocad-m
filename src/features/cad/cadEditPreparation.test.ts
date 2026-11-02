@@ -16,6 +16,7 @@ import { extendPart, lineExtend } from '@/domain/cad/__tests__/cadSketchExtendFi
 import { createCadSketchTestSolver } from './sketch-solver/__tests__/cadSketchTestSolver';
 import { circleRow, circleRowPart, rowSketch } from '@/domain/cad/__tests__/cadSketchLinearPatternFixtures';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
+import { CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 
 const solver = createCadSketchTestSolver();
 const source = () => parseCadDocument({ ...createCadDocument('Line', 'line'), schemaVersion: 2, parameters: { length: 20 }, features: [{
@@ -204,6 +205,28 @@ describe('shared CAD edit preparation with the real sketch solver', () => {
         expect(session.getSnapshot()).toBe(before);
       }
     }
+  });
+
+  it('refuses the edit of the sketch being solved when the solver fails rather than judges it, and keeps cancellation and other errors as they are', async () => {
+    const edits: CadEdit[] = [{ kind: 'set-parameter', name: 'length', value: 30 }];
+    const failing = (error: () => Error, before?: () => void) => ({ solve: async () => { before?.(); throw error(); } });
+    const outcome = (solve: ReturnType<typeof failing>, signal?: AbortSignal) => prepareCadEdits(source(), edits, solve, signal).then(() => null, (error: unknown) => error);
+    const refused = await outcome(failing(() => new CadSketchSolverFailure(CAD_SKETCH_SOLVER_STOPPED, 'Uncaught RangeError: out of memory')));
+    expect(refused).toBeInstanceOf(CadSketchPreparationError);
+    expect(refused).toMatchObject({ code: 'sketch-failed', message: `Sketch: ${CAD_SKETCH_SOLVER_STOPPED}`, solverMessage: CAD_SKETCH_SOLVER_STOPPED,
+      kernelMessage: 'Uncaught RangeError: out of memory', diagnostics: { status: null, conflictingIds: [], redundantIds: [], issues: [] } });
+    expect((refused as CadSketchPreparationError).feedback).toEqual({ sketchId: 'sketch', reason: 'failed', message: `Sketch: ${CAD_SKETCH_SOLVER_STOPPED}`, subjects: [],
+      subjectCount: 0, omittedSubjectCount: 0, cause: 'solver-unavailable', kernelMessage: 'Uncaught RangeError: out of memory' });
+    // A failure that gave no words names its cause without them.
+    const silent = await outcome(failing(() => new CadSketchSolverFailure(CAD_SKETCH_SOLVER_TIMEOUT))) as CadSketchPreparationError;
+    expect(silent.feedback).toMatchObject({ reason: 'failed', message: `Sketch: ${CAD_SKETCH_SOLVER_TIMEOUT}`, cause: 'solver-unavailable' });
+    expect('kernelMessage' in silent.feedback).toBe(false); expect(silent.kernelMessage).toBeUndefined();
+    // A solve cancelled while the solver failed stays cancelled, and any other error is not a refusal of the sketch.
+    const controller = new AbortController();
+    const canceled = await outcome(failing(() => new CadSketchSolverFailure(CAD_SKETCH_SOLVER_STOPPED), () => controller.abort()), controller.signal);
+    expect(canceled).not.toBeInstanceOf(CadSketchPreparationError); expect(canceled).toMatchObject({ name: 'AbortError' });
+    const other = await outcome(failing(() => new Error('The sketch solve queue is full.')));
+    expect(other).not.toBeInstanceOf(CadSketchPreparationError); expect(other).toMatchObject({ message: 'The sketch solve queue is full.' });
   });
 
   it('rejects a solver-projected cut and a native conflicting split batch without accepting partial topology', async () => {

@@ -5,6 +5,7 @@ import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
 import { cadSketchIssues } from './cadSketchIssues';
 import { cadSiteTools } from './cadSiteTools';
 import type { CadController } from './useCadController';
+import { CAD_SKETCH_SOLVER_STOPPED, CadSketchSolverFailure } from './sketch-solver/cadSketchSolverFailure';
 
 describe('CAD tool structured sketch rejection', () => {
   it('retains exact machine identities and candidate labels within the tool byte budget', async () => {
@@ -42,6 +43,26 @@ describe('CAD tool structured sketch rejection', () => {
     expect(failure.diagnostics.issues).toHaveLength(3);
     expect(failure.solverMessage).toBe(rawMessage);
     expect(getController).toHaveBeenCalledOnce();
+  });
+
+  it('gives a solver that failed rather than judged the edit as the refusal its sketch header shows, its words bounded once in the issue', async () => {
+    const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }], entities: [], relations: [] });
+    const solverFailure = new CadSketchSolverFailure(CAD_SKETCH_SOLVER_STOPPED, `Uncaught RangeError: ${'🧭'.repeat(1000)}`);
+    const failure = new CadSketchPreparationError({ sketchId: 's', sketchName: 'Outline', graph, unavailable: { kernelMessage: solverFailure.kernelMessage },
+      rejection: { kind: 'rejected', reason: 'failed', message: solverFailure.message,
+        diagnostics: { status: null, degreesOfFreedom: null, conflictingIds: [], redundantIds: [], partiallyRedundantIds: [], issues: [] } } });
+    const header = cadSketchIssues({ sketchId: 's', graph, version: 'current', feedback: failure.feedback });
+    const tool = cadSiteTools(() => { throw failure; }).find(tool => tool.name === 'cad_edit_document')!;
+    const reply = await tool.execute({ expectedVersion: 'current', edits: [{ kind: 'rename-document', name: 'Pending' }] });
+    expect(header.refusal).toMatchObject({ code: 'sketch-failed', message: `Outline: ${CAD_SKETCH_SOLVER_STOPPED}`, details: { cause: 'solver-unavailable', kernelMessage: solverFailure.kernelMessage } });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'sketch-failed', message: header.refusal!.message, details: {
+      feedback: { sketchId: 's', reason: 'failed', cause: 'solver-unavailable', subjectCount: 0 },
+      analysis: { kind: 'rejected', reason: 'failed', message: CAD_SKETCH_SOLVER_STOPPED },
+      issue: { key: header.refusal!.key, code: 'sketch-failed', message: header.refusal!.message, details: { cause: 'solver-unavailable', kernelMessage: expect.stringMatching(/^Uncaught RangeError: (🧭)+…$/) } },
+      issues: { items: [{ key: header.refusal!.key }], omitted: 0 } } } });
+    const details = (reply as { error: { details: { feedback: object; issue: { details: { kernelMessage: string } } } } }).error.details;
+    expect(details.feedback).not.toHaveProperty('kernelMessage');
+    expect(jsonByteLength(details.issue.details.kernelMessage)).toBeLessThanOrEqual(1024);
   });
 
   it('gives a refused sketch edit the refusal issue its sketch header shows, with no repair when no accepted sketch can be read', async () => {

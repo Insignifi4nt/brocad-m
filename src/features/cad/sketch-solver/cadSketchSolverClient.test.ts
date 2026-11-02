@@ -4,6 +4,8 @@ import { parseCadSketchGraph } from '../../../domain/cad/cadSketchGraph';
 import { CAD_SKETCH_SOLVE_TIMEOUT_MS, createCadSketchSolverClient, type CadSketchSolverTransport } from './cadSketchSolverClient';
 import { cadSketchSolverWireResult, type CadSketchSolverRequest } from './cadSketchSolverProtocol';
 import type { CadSketchSolveResult } from './cadSketchSolverTypes';
+import { CAD_SKETCH_SOLVER_ERROR, CAD_SKETCH_SOLVER_NOT_SENT, CAD_SKETCH_SOLVER_NOT_STARTED, CAD_SKETCH_SOLVER_STOPPED, CAD_SKETCH_SOLVER_TIMEOUT, CAD_SKETCH_SOLVER_UNREADABLE,
+  CadSketchSolverFailure } from './cadSketchSolverFailure';
 
 class Transport implements CadSketchSolverTransport {
   onmessage: CadSketchSolverTransport['onmessage'] = null;
@@ -51,19 +53,21 @@ describe('sketch solver worker lifetime', () => {
   it('bounds queued work and rejects every outstanding request on disposal', async () => {
     const worker = new Transport(), client = createCadSketchSolverClient(() => worker);
     const pending = Array.from({ length: 5 }, () => client.solve({ graph, parameters: {} }));
-    await expect(client.solve({ graph, parameters: {} })).rejects.toThrow('queue is full');
+    const full = await client.solve({ graph, parameters: {} }).catch((error: unknown) => error);
+    expect(full).toBeInstanceOf(Error); expect(full).not.toBeInstanceOf(CadSketchSolverFailure); expect((full as Error).message).toMatch('queue is full');
     expect(worker.messages).toHaveLength(1);
     client.dispose();
     const settled = await Promise.allSettled(pending);
-    expect(settled.every(result => result.status === 'rejected' && result.reason instanceof Error && result.reason.name === 'AbortError')).toBe(true);
+    expect(settled.every(result => result.status === 'rejected' && result.reason instanceof Error && result.reason.name === 'AbortError' && !(result.reason instanceof CadSketchSolverFailure))).toBe(true);
     expect(worker.terminated).toBe(true);
-    await expect(client.solve({ graph, parameters: {} })).rejects.toThrow('disposed');
+    const disposed = await client.solve({ graph, parameters: {} }).catch((error: unknown) => error);
+    expect(disposed).not.toBeInstanceOf(CadSketchSolverFailure); expect((disposed as Error).message).toMatch('disposed');
   });
   it('terminates a timed-out worker and only retries through a new explicit request', async () => {
     vi.useFakeTimers();
     const workers: Transport[] = [], client = createCadSketchSolverClient(() => { const worker = new Transport(); workers.push(worker); return worker; });
     try {
-      const pending = client.solve({ graph, parameters: {} }), rejected = expect(pending).rejects.toThrow('time limit');
+      const pending = client.solve({ graph, parameters: {} }), rejected = expect(pending).rejects.toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_TIMEOUT });
       await vi.advanceTimersByTimeAsync(CAD_SKETCH_SOLVE_TIMEOUT_MS); await rejected;
       expect(workers).toHaveLength(1); expect(workers[0].terminated).toBe(true);
       const retry = client.solve({ graph, parameters: {} });
@@ -71,15 +75,59 @@ describe('sketch solver worker lifetime', () => {
       expect(await retry).toEqual(result); expect(vi.getTimerCount()).toBe(0);
     } finally { client.dispose(); vi.useRealTimers(); }
   });
-  it('rejects values for a changed expression driver at the worker boundary and restarts after worker errors', async () => {
+  it('rejects values for a changed expression driver at the worker boundary as an unreadable reply and restarts after worker errors', async () => {
     const workers: Transport[] = [], client = createCadSketchSolverClient(() => { const worker = new Transport(); workers.push(worker); return worker; });
     const driven = parseCadSketchGraph({ ...graph, points: [{ id: 'point', position: ['x', 0] }] });
-    const pending = client.solve({ graph: driven, parameters: { x: 4 } }), rejected = expect(pending).rejects.toThrow('does not match');
+    const pending = client.solve({ graph: driven, parameters: { x: 4 } });
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_UNREADABLE, kernelMessage: expect.stringContaining('does not match') });
     workers[0].onmessage?.(new MessageEvent('message', { data: { id: 1, kind: 'result', result: { ...reply, values: [4, 0] } } }));
     await rejected; expect(workers[0].terminated).toBe(true);
-    const retry = client.solve({ graph, parameters: {} }), stopped = expect(retry).rejects.toThrow('worker stopped');
+    const retry = client.solve({ graph, parameters: {} }), stopped = expect(retry).rejects.toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_STOPPED, kernelMessage: 'stopped' });
     workers[1].onerror?.(Object.assign(new Event('error'), { message: 'stopped', filename: '', lineno: 0, colno: 0, error: new Error('stopped') })); await stopped;
     expect(workers).toHaveLength(2); expect(workers[1].terminated).toBe(true);
+    client.dispose();
+  });
+  it('fails the request of a worker that cannot start, refuses the sketch, fails, replies unreadably or replies with an error as a coded solver failure, and starts a new worker for the next', async () => {
+    const workers: Transport[] = [];
+    let refuseStart = true, refuseHandOver = false;
+    const client = createCadSketchSolverClient(() => {
+      if (refuseStart) throw new DOMException('Refused to create a worker: blocked by the content security policy.', 'SecurityError');
+      const worker = new Transport();
+      if (refuseHandOver) worker.postMessage = () => { throw new DOMException('The object could not be cloned.', 'DataCloneError'); };
+      workers.push(worker); return worker;
+    });
+    const failure = (pending: Promise<unknown>) => pending.then(() => { throw new Error('The solve did not fail.'); }, (error: unknown) => error as CadSketchSolverFailure);
+    const started = await failure(client.solve({ graph, parameters: {} }));
+    expect(started).toBeInstanceOf(CadSketchSolverFailure);
+    expect(started).toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_NOT_STARTED, kernelMessage: 'Refused to create a worker: blocked by the content security policy.' });
+    expect(workers).toHaveLength(0);
+    refuseStart = false; refuseHandOver = true;
+    expect(await failure(client.solve({ graph, parameters: {} }))).toMatchObject({ code: 'sketch-failed', message: CAD_SKETCH_SOLVER_NOT_SENT, kernelMessage: 'The object could not be cloned.' });
+    expect(workers).toHaveLength(1); expect(workers[0].terminated).toBe(true);
+    refuseHandOver = false;
+    // Each failure stops its worker; the next request starts a new one and the late events of the stopped worker are ignored.
+    const cases: readonly [string, (worker: Transport) => void, string, unknown][] = [
+      ['error event', worker => worker.onerror?.(Object.assign(new Event('error'), { message: 'Uncaught RangeError: out of memory' }) as ErrorEvent), CAD_SKETCH_SOLVER_STOPPED, 'Uncaught RangeError: out of memory'],
+      ['script that failed to load', worker => worker.onerror?.(new Event('error') as ErrorEvent), CAD_SKETCH_SOLVER_STOPPED, undefined],
+      ['undeserializable reply', worker => worker.onmessageerror?.(new MessageEvent('messageerror')), CAD_SKETCH_SOLVER_UNREADABLE, 'The reply could not be deserialized.'],
+      ['reply off the protocol', worker => worker.onmessage?.(new MessageEvent('message', { data: { id: worker.messages[0].id, kind: 'noise' } })), CAD_SKETCH_SOLVER_UNREADABLE, expect.any(String)],
+      ['error reply', worker => worker.onmessage?.(new MessageEvent('message', { data: { id: worker.messages[0].id, kind: 'error', message: 'unreachable code' } })), CAD_SKETCH_SOLVER_ERROR, 'unreachable code']
+    ];
+    for (const [name, act, message, words] of cases) {
+      const pending = failure(client.solve({ graph, parameters: {} })), worker = workers.at(-1)!;
+      act(worker);
+      const error = await pending;
+      expect(error, name).toBeInstanceOf(CadSketchSolverFailure);
+      expect({ code: error.code, message: error.message }, name).toEqual({ code: 'sketch-failed', message });
+      expect(error.kernelMessage, name).toEqual(words);
+      expect(worker.terminated, name).toBe(true);
+      worker.onmessage?.(new MessageEvent('message', { data: { id: worker.messages[0].id, kind: 'result', result: reply } }));
+    }
+    expect(workers).toHaveLength(6);
+    const next = client.solve({ graph, parameters: {} });
+    expect(workers).toHaveLength(7);
+    workers[6].onmessage?.(new MessageEvent('message', { data: { id: workers[6].messages[0].id, kind: 'result', result: reply } }));
+    expect(await next).toEqual(result); expect(workers[6].terminated).toBe(false);
     client.dispose();
   });
   it('cancels a waiting solve without disturbing the active worker', async () => {

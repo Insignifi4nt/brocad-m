@@ -72,10 +72,11 @@ interface CadSketchItemDetails { readonly origin: CadSketchItemOrigin; readonly 
 export type CadSketchIssueOf =
   /**
    * The refusal of an edit or of the accepted analysis. It lists as its causes the items it names, which the list holds, and counts them
-   * and those it leaves out.
+   * and those it leaves out. A solver that failed rather than judged the sketch (`cause: 'solver-unavailable'`) keeps the browser's or its
+   * worker's own words, bounded, as `kernelMessage` when it gave any; the message never repeats them.
    */
-  | CadIssueOf<'sketch', CadSketchRefusalCode, { readonly cause: CadSketchRefusalCause | null; readonly subjectCount: number; readonly omittedSubjectCount: number },
-    SubjectOf<'feature'>, 'failed'>
+  | CadIssueOf<'sketch', CadSketchRefusalCode, { readonly cause: CadSketchRefusalCause | null; readonly subjectCount: number; readonly omittedSubjectCount: number;
+    readonly kernelMessage?: string }, SubjectOf<'feature'>, 'failed'>
   /** A relation, edge or point the solver or the graph check names. */
   | CadIssueOf<'sketch', CadSketchRelationCode | Exclude<CadSketchGraphCode, 'relation-residual'>, CadSketchItemDetails, SketchItemSubject, 'failed'>
   /** A relation the solved sketch does not meet, by how much in millimetres, or null when the check could not measure it. */

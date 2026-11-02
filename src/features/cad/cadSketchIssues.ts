@@ -5,6 +5,7 @@ import { CAD_SKETCH_MIRROR_COLLAPSE } from '@/domain/cad/cadSketchSymmetryRelati
 import type { CadSketchEditWarning } from './cadEditPreparation';
 import { cadSketchDiagnosticSubjects, describeCadSketchConstraintSource, type CadSketchConstraintFeedback, type CadSketchConstraintFeedbackSubject } from './cadSketchConstraintFeedback';
 import type { CadSketchSolveDiagnostics, CadSketchSolveResult } from './sketch-solver/cadSketchSolverTypes';
+import { cadSketchSolverRecoveryMessages } from './sketch-solver/cadSketchSolverMessages';
 
 /**
  * What is wrong with the sketch being edited, for its header and its relation rows: the sketch producer's adapter into the CAD issue model.
@@ -51,12 +52,22 @@ export interface CadSketchIssues {
   /** The refusal, then each row's issue: one causal list. */
   readonly issues: readonly CadIssue[];
 }
-/** The accepted analysis of the sketch, kept only while it names something. */
+/**
+ * The accepted analysis of the sketch, kept only while it names something. A solver that failed rather than judged the sketch, or could not
+ * load, gives reason `failed` with its own message, which names the cause and the next step, the cause `solver-unavailable` and, when the
+ * browser or the worker gave any, their words.
+ */
 export interface CadSketchAnalysisIssues {
   readonly kind: CadSketchSolveResult['kind'] | 'unavailable' | 'legacy';
   readonly reason: Extract<CadSketchSolveResult, { kind: 'rejected' }>['reason'] | null;
   readonly diagnostics: Pick<CadSketchSolveDiagnostics, 'conflictingIds' | 'redundantIds' | 'partiallyRedundantIds' | 'issues'>;
+  readonly cause?: 'solver-unavailable';
+  readonly message?: string;
+  readonly kernelMessage?: string;
 }
+/** An analysis as the sketch's status reports it: a solve result, or one the solver could not give, maybe because the solver failed. */
+export type CadSketchAnalysisInput = CadSketchSolveResult | { readonly kind: CadSketchAnalysisIssues['kind']; readonly reason?: CadSketchAnalysisIssues['reason']; readonly message?: string;
+  readonly cause?: 'solver-unavailable'; readonly kernelMessage?: string; readonly diagnostics: CadSketchSolveDiagnostics };
 
 const STATES: Record<CadSketchIssueCategory, string> = {
   conflicting: 'Conflict', redundant: 'Redundant', 'partially-redundant': 'Partly redundant', 'not-met': 'Not met', geometry: 'Geometry issue', shrink: 'Shrinks'
@@ -71,13 +82,21 @@ const ANALYSIS_MESSAGES: Record<NonNullable<CadSketchAnalysisIssues['reason']>, 
 };
 export const NO_CAD_SKETCH_ISSUES_BY_RELATION: ReadonlyMap<string, readonly CadSketchIssue[]> = new Map();
 
+/** The solver's failure an analysis reports: one it failed with, or a solver that could not load; null when the solver judged the sketch. */
+function solverFailure(analysis: CadSketchAnalysisInput): { readonly message: string; readonly kernelMessage?: string } | null {
+  if ('cause' in analysis && analysis.cause === 'solver-unavailable' && analysis.message) return { message: analysis.message, ...analysis.kernelMessage ? { kernelMessage: analysis.kernelMessage } : {} };
+  return analysis.kind === 'rejected' && 'reason' in analysis && analysis.reason === 'failed' && analysis.message && cadSketchSolverRecoveryMessages.has(analysis.message)
+    ? { message: analysis.message } : null;
+}
+
 /** The accepted analysis worth keeping: its named identities and issues, or null when it names nothing. Reuses `previous` when equal. */
-export function cadSketchAnalysisIssues(analysis: CadSketchSolveResult | { readonly kind: CadSketchAnalysisIssues['kind']; readonly reason?: CadSketchAnalysisIssues['reason']; readonly diagnostics: CadSketchSolveDiagnostics },
-  previous?: CadSketchAnalysisIssues | null): CadSketchAnalysisIssues | null {
+export function cadSketchAnalysisIssues(analysis: CadSketchAnalysisInput, previous?: CadSketchAnalysisIssues | null): CadSketchAnalysisIssues | null {
   const { conflictingIds, redundantIds, partiallyRedundantIds, issues } = analysis.diagnostics;
-  const reason = analysis.kind === 'rejected' && 'reason' in analysis ? analysis.reason ?? null : null;
+  const failure = solverFailure(analysis);
+  const reason = failure ? 'failed' : analysis.kind === 'rejected' && 'reason' in analysis ? analysis.reason ?? null : null;
   if (!conflictingIds.length && !redundantIds.length && !partiallyRedundantIds.length && !issues.length && !reason) return null;
-  const next: CadSketchAnalysisIssues = Object.freeze({ kind: analysis.kind, reason, diagnostics: Object.freeze({ conflictingIds, redundantIds, partiallyRedundantIds, issues }) });
+  const next: CadSketchAnalysisIssues = Object.freeze({ kind: analysis.kind, reason, diagnostics: Object.freeze({ conflictingIds, redundantIds, partiallyRedundantIds, issues }),
+    ...failure ? { cause: 'solver-unavailable' as const, ...failure } : {} });
   return previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
 }
 
@@ -137,11 +156,13 @@ export function cadSketchIssues({ sketchId, graph, version, analysis, feedback, 
       relationId: warning.relationId, pointIds: subject.pointIds, entityIds: [...new Set([...subject.entityIds, ...shrunk.map(curve => curve.entityId)])], origin: 'warning', subject: null }));
   }
   const reason = refused ? refused.reason : analysis?.reason ?? null;
-  const message = refused ? refused.message : reason ? ANALYSIS_MESSAGES[reason] : null;
+  const message = refused ? refused.message : reason ? analysis?.message ?? ANALYSIS_MESSAGES[reason] : null;
+  // A solver that failed names that cause and keeps its words, which the message never repeats.
+  const failed = refused ? refused.cause : analysis?.cause, kernelMessage = refused ? refused.kernelMessage : analysis?.kernelMessage;
   const refusal: CadSketchRefusalIssue | null = reason && message !== null ? createCadIssue({ key: `${origin}/refusal`, namespace: 'sketch',
     code: `sketch-${reason}` satisfies CadSketchRefusalCode, severity: 'error', state: 'failed', subject: { kind: 'feature', featureId: sketchId }, message, causes: named, repairs: [],
-    details: { cause: message.includes(CAD_SKETCH_MIRROR_COLLAPSE) ? 'mirror-collapse' : null, subjectCount: refused ? refused.subjectCount : named.length,
-      omittedSubjectCount: refused?.omittedSubjectCount ?? 0 } }) : null;
+    details: { cause: failed ?? (message.includes(CAD_SKETCH_MIRROR_COLLAPSE) ? 'mirror-collapse' : null), subjectCount: refused ? refused.subjectCount : named.length,
+      omittedSubjectCount: refused?.omittedSubjectCount ?? 0, ...kernelMessage ? { kernelMessage } : {} } }) : null;
   const byRelation = new Map<string, CadSketchIssue[]>();
   for (const row of list) if (row.relationId) byRelation.set(row.relationId, [...byRelation.get(row.relationId) ?? [], row]);
   const issues = createCadIssueList([...refusal ? [refusal] : [], ...list.map(row => row.issue)], import.meta.env.DEV);

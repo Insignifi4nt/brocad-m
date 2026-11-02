@@ -164,7 +164,8 @@ export function cadSiteTools(getController: () => CadController) {
         // A refused sketch edit gives the issues its sketch's header gives: the refusal, as `issue`, and the subjects it names.
         if (error instanceof CadSketchPreparationError) {
           const sketchIssues = sketchRefusalIssues(error, cad);
-          throw new ToolError(error.code, error.message, { feedback: error.feedback,
+          const { kernelMessage: _words, ...feedback } = error.feedback;
+          throw new ToolError(error.code, error.message, { feedback,
             analysis: summarizeCadSketchConstraintAnalysis({ kind: 'rejected', reason: error.feedback.reason, message: error.solverMessage, diagnostics: error.diagnostics }),
             ...(sketchIssues.refusal ? { issue: cadAgentIssue(sketchIssues.refusal) } : {}), issues: cadAgentIssueDigest(sketchIssues.issues) });
         }
