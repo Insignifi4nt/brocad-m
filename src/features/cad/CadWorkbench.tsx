@@ -8,7 +8,7 @@ import type { CadSketchGraphSelection } from './cadSketchGraphInteraction';
 import { isCadSketchGraphSelected, reconcileCadSketchGraphSelection, toggleCadSketchGraphSelection, type CadSketchGeometryPick } from './cadSketchGraphSelection';
 import { cadSketchFixedElementError, cadSketchVirtualSubject, isCadSketchVirtualId, isCadSketchVirtualSelection } from '@/domain/cad/sketch-relations/cadSketchVirtualElements';
 import type { CadSketchGraph, CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
-import { cadSketchProfileGenerator, cadSketchProfileViews, cadSketchShapeEdits, withCadSketchProfile, withoutCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { cadSketchProfileEdits, cadSketchProfileGenerator, cadSketchProfileViews, cadSketchShapeEdits, withCadSketchProfile, withoutCadSketchProfile } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 import { createCadFreshSketchDrawing, createCadFreshSketchGraph, type CadFreshSketchDrawing } from '@/domain/cad/cadFreshSketchGraph';
 import { createCadPathDraftGraph } from './cadPathDraftGraph';
 import { inspectCadSketchCornerTarget } from '@/domain/cad/cadSketchCornerTreatment';
@@ -1595,8 +1595,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     setTool('select'); setGraphRelationCommand(null); setPlacementInteraction(null);
     setPlacementCommand({sketchId:sketch.id,selections:graphGeometry,token:crypto.randomUUID()}); setInspectorCollapsed(false);
   };
-  const exactProfileEditor = profile && sketch ? <CadProfileEditor onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} key={`${profile.id}-${cancelSignal}`} profile={profile} document={document} onInspectInput={inspectInput} onPreviewProfile={setProfilePreview} onPreviewParameters={setPreviewParameters} onApply={async (next, parameters, signal) => {
-    await props.onEditMany([...Object.entries(parameters).map(([name, value]): CadEdit => ({ kind: 'set-parameter', name, value })), { kind: 'update-feature', feature: withCadSketchProfile(sketch, next) }], signal); signal?.throwIfAborted(); setEditorPending(false);
+  const exactProfileEditor = profile && sketch ? <CadProfileEditor onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} key={`${profile.id}-${cancelSignal}`} profile={profile} document={document} onInspectInput={inspectInput} onPreviewProfile={setProfilePreview} onPreviewParameters={setPreviewParameters} onApply={async (next, parameters, signal, removedRelationIds) => {
+    await props.onEditMany(cadSketchProfileEdits(sketch, next, parameters, removedRelationIds), signal); signal?.throwIfAborted(); setEditorPending(false);
   }} onCancel={cancel} onPendingChange={setEditorPending} /> : null;
   // A generator's shape is configured by the exact editor alone: the profile panel's dimensions belong to saved profiles.
   const selectedProfileEditor = profile && sketch && profile.geometry.kind !== 'plugin' && !cadSketchProfileGenerator(sketch, profile.id) ? <CadSketchProfilePanel key={`${profile.id}-${cancelSignal}`} document={document} sketch={sketch} profile={profile} command={profileCommand} onCommandConsumed={token => setProfileCommand(current => current?.token === token ? null : current)} otherEditorPending={editorPending} onEditMany={props.onEditMany} onPendingChange={setEditorPending} onPreviewProfile={setProfilePreview} onPreviewParameters={setPreviewParameters} onPrepareEdits={props.onPrepareEdits} onPreviewDocument={publishSketchPreview} interactionLocked={sketchEditorLocked} cancelSignal={cancelSignal} exactGeometryEditor={profile.geometry.kind === 'polygon' || profile.geometry.kind === 'path' ? exactProfileEditor : undefined} /> : exactProfileEditor;

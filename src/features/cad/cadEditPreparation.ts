@@ -1,7 +1,7 @@
 import type { CadDocument, CadFeature } from '@/domain/cad/cadDocument';
 import { CadError } from '@/domain/cad/cadError';
 import { evaluateCadScalar } from '@/domain/cad/cadExpression';
-import { cadEditsOnlyPlaceDimensions, placeCadSketchDimensions, reduceCadEditIntents, validateCadEditBatch, type CadEdit } from '@/domain/cad/cadOperations';
+import { cadEditGeneratorRemovals, cadEditsOnlyPlaceDimensions, placeCadSketchDimensions, reduceCadEditIntents, validateCadEditBatch, type CadEdit } from '@/domain/cad/cadOperations';
 import { hasValidCadSketchGeometry, parseCadDocument } from '@/domain/cad/cadSchema';
 import type { CadSketchSolveDiagnostics, CadSketchSolverClient } from './sketch-solver/cadSketchSolverTypes';
 import { cadSketchShrinkWarnings, type CadSketchShrinkWarning } from './cadSketchShrinkWarnings';
@@ -12,7 +12,7 @@ import { assertCadSketchExternalReferences, refreshCadSketchExternalReferences }
 import { cadSketchSolutionMatchesInput } from './sketch-solver/cadSketchSolverProtocol';
 import { cadSketchPatternSnapshotNeedsExact } from '@/domain/cad/cadSketchLinearPattern';
 import { cadSketchOwnedGeometryError } from '@/domain/cad/cadSketchOwnedGeometry';
-import { isRegeneratedCadSketchGraph, settleCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
+import { cadSketchGeneratorRemovals, isRegeneratedCadSketchGraph, settleCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { checkCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { cadSketchFeaturesEqualButPlacement, cadSketchRelationsEqualButPlacement, withoutCadSketchDimensionAnnotation } from '@/domain/cad/cadSketchPlacedDimensions';
 
@@ -114,14 +114,16 @@ export async function prepareCadEdits(document: CadDocument, edits: readonly Cad
       assertCadSketchExternalReferences({ sketch: { ...refreshed, graph: result.graph }, parameters: target.parameters, previous });
       if (!cadSketchSolutionMatchesInput(input, result.graph)) throw exact?.error() ?? new CadError('invalid-sketch-solution', 'The sketch solution changed source records or fixed geometry.');
       // Generated geometry follows the solved inputs it reads, and is solved again so the relations on it hold.
-      // A graph settled back as it was given was solved already, even one an earlier settle regenerated.
-      let source = result.graph, graph = settleCadSketchGenerators(source, refreshed.graph, target.parameters);
+      // A graph settled back as it was given was solved already, even one an earlier settle regenerated. Relations that leave with
+      // members it regenerates must be among those the batch confirms it removes.
+      const removals = cadSketchGeneratorRemovals(cadEditGeneratorRemovals(captured));
+      let source = result.graph, graph = settleCadSketchGenerators(source, refreshed.graph, target.parameters, removals);
       for (let pass = 0; graph !== source && isRegeneratedCadSketchGraph(graph); pass++) {
         if (pass === 2) throw new CadError('invalid-sketch-generator', 'The inputs of a generator keep moving with the geometry it generates. Fix the inputs it reads, or detach it.');
         const again = await solver.solve({ graph, parameters: target.parameters }, signal);
         signal?.throwIfAborted();
         if (again.kind !== 'solved') throw new CadSketchPreparationError({ sketchId: feature.id, sketchName: feature.name, graph, rejection: again });
-        source = again.graph; graph = settleCadSketchGenerators(source, graph, target.parameters);
+        source = again.graph; graph = settleCadSketchGenerators(source, graph, target.parameters, removals);
       }
       const solved = { ...refreshed, graph };
       features.push(solved);

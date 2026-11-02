@@ -8,6 +8,7 @@ import { resolveCadProfile } from '@/domain/cad/cadSketchGeometry';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
 import { CadSession } from './cadSession';
 import { CadProfileEditor } from './CadFeatureEditor';
+import { cadSketchProfileEdits, cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
 
 const dxf = ['0', 'SECTION', '2', 'HEADER', '9', '$INSUNITS', '70', '4', '0', 'ENDSEC', '0', 'SECTION', '2', 'ENTITIES',
   '0', 'LINE', '8', 'PROFILE', '10', '0', '20', '0', '11', '20', '21', '0',
@@ -170,5 +171,35 @@ describe('imported analytic profile editing', () => {
     await input(selector, '512'); expect(selector.value).toBe('512'); expect(field('End Y').value).toBe('0');
     expect(container.querySelectorAll('input')).toHaveLength(7); expect(container.querySelector<HTMLButtonElement>('[aria-label="Next path segment"]')?.disabled).toBe(true);
     await input(selector, '513'); expect(selector.value).toBe('512'); expect(session.getSnapshot()).toBe(before);
+  });
+});
+
+describe('generator profile editing', () => {
+  it('shows the relations a regeneration removes, and applies exactly the previewed edit when Apply confirms them', async () => {
+    const document = parseCadDocument({ ...createCadDocument('Rounded plate', 'cad_rounded_plate'), schemaVersion: 2, features: [{ id: 'sketch', name: 'Sketch',
+      kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: { points: [{ id: 'u', position: [0, 0] }], entities: [], relations: [
+        { id: 'rect', kind: 'generator', idPrefix: 'g-rect', construction: false, geometry: { kind: 'rectangle', x: 0, y: 0, width: 20, height: 10, cornerRadius: 0 } },
+        { id: 'tie', kind: 'coincident', pointIds: ['u', 'g-rect_p0'] }] } }] });
+    session = new CadSession(document);
+    const before = session.getSnapshot(), previews: (CadDocument | null)[] = [];
+    const applied = vi.fn<(removed: readonly string[] | undefined) => void>();
+    function Harness() {
+      const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
+      const sketch = snapshot.document.features[0] as CadSketchFeature, profile = cadSketchProfileViews(sketch)[0];
+      return <CadProfileEditor profile={profile} document={snapshot.document} onPreviewDocument={candidate => { previews.push(candidate); }}
+        onApply={(next, parameters, _signal, removed) => { applied(removed); session.edit(cadSketchProfileEdits(sketch, next, parameters, removed), snapshot.version); }}
+        onCancel={() => undefined} onPendingChange={() => undefined} />;
+    }
+    await act(async () => root.render(<Harness />));
+    // Rounding the corners regenerates them as arcs, so the sharp corner the free point is tied to leaves, and its relation with it.
+    await input(field('Corner radius'), '2');
+    const notice = [...container.querySelectorAll('[role="status"]')].find(element => element.textContent?.startsWith('This removes one relation'));
+    expect(notice?.textContent).toMatch(/^This removes one relation on geometry the shape no longer has: Coincident relation 2 · .*\. Apply removes it, or Cancel keeps it\.$/);
+    const shown = previews.filter(Boolean).at(-1)!;
+    expect((shown.features[0] as CadSketchFeature).graph!.relations.filter(relation => !relation.id.startsWith('g-rect_')).map(relation => relation.id)).toEqual(['rect']);
+    expect(session.getSnapshot()).toBe(before);
+    await click('Apply');
+    expect(applied).toHaveBeenCalledExactlyOnceWith(['tie']);
+    expect(session.getSnapshot().document).toEqual(shown);
   });
 });

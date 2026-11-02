@@ -37,10 +37,11 @@ export const CAD_PROFILE_QUANTITIES: readonly CadFeatureQuantityPath[] = [
   ...each('length', '{rectangle}.x', '{rectangle}.y', '{rectangle}.width', '{rectangle}.height', '{rectangle}.cornerRadius', '{circle}.x', '{circle}.y',
     '{circle}.radius', '{slot}.x', '{slot}.y', '{slot}.length', '{slot}.width', '{polygon}.points.*.*'),
   ...each('angle', '{slot}.angle'), ...cadQuantitiesUnder('{path}.segments.*', CAD_PATH_SEGMENT_QUANTITIES), ...each('plugin', '{plugin}.inputs.*')];
-/** A sketch generator's geometry: a profile's, or a regular polygon's centre, radius and number of sides. */
+/** A sketch generator's geometry: a profile's, or a regular polygon's centre, radius and number of sides. A listed entry's id is no scalar. */
 export function mapCadSketchGeneratorGeometryScalars(geometry: CadSketchGeneratorGeometry, path: string, map: CadScalarMapper): CadSketchGeneratorGeometry {
   if (geometry.kind !== 'regular-polygon') return mapCadProfileScalars(geometry as CadProfile, path, map) as CadSketchGeneratorGeometry;
   return { ...geometry, x: map(geometry.x, `${path}.x`), y: map(geometry.y, `${path}.y`), radius: map(geometry.radius, `${path}.radius`), sides: map(geometry.sides, `${path}.sides`) };
 }
 export const CAD_SKETCH_GENERATOR_QUANTITIES: readonly CadFeatureQuantityPath[] = [...CAD_PROFILE_QUANTITIES,
-  ...each('length', '{regular-polygon}.x', '{regular-polygon}.y', '{regular-polygon}.radius'), ...each('count', '{regular-polygon}.sides')];
+  ...each('length', '{regular-polygon}.x', '{regular-polygon}.y', '{regular-polygon}.radius'), ...each('count', '{regular-polygon}.sides'),
+  ...each('index', '{polygon}.ids.*', '{path}.ids.*')];

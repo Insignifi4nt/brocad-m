@@ -7,13 +7,15 @@ import { resolveCadProfile, validateCadSketchGeometry, type ResolvedCadProfile }
 import { resolveCadPluginOutline, type CadPluginOutlineParts, type CadPluginProfile } from '../plugins/cadPlugins';
 import type { CadSketchOperandSignature, CadSketchRelationIntent } from '../sketch-relations/cadSketchRelationTypes';
 import { CAD_PRECISION, cadSupportedLength } from '@/domain/precision/cadPrecision';
+import { CAD_SKETCH_ENTRY_ID_MAX } from './cadSketchGeneratorSchema';
 import type { Point2 } from '@/domain/path-intel/types';
 
 // Each kind of generator: what it reads and what it generates. Generation keys every point, edge and relation by its place in the
 // shape, never by coordinates or by its place among samples, so regenerating after an input change keeps each id `<idPrefix>_<key>`
-// while the shape keeps that part: tooth 3's tip stays `t3_tip` however many teeth the gear has. A part that changes kind, such as a
-// rectangle's corner that becomes an arc, takes a new key, and so do the chords of a curve sampled anew. Profile kinds generate exactly
-// what a legacy profile of that geometry resolves to, after the same checks, so their regions and solids build as before.
+// while the shape keeps that part: tooth 3's tip stays `t3_tip` however many teeth the gear has, and a listed polygon's or path's
+// entry keeps its members wherever an edit inserts or removes others. A part that changes kind, such as a rectangle's corner that
+// becomes an arc, takes a new key, and so do the chords of a curve sampled anew. Profile kinds generate exactly what a legacy profile
+// of that geometry resolves to, after the same checks, so their regions and solids build as before.
 
 /** Points, edges and relations a generator makes, with their final ids. */
 export interface CadSketchGeneratedGeometry {
@@ -46,12 +48,13 @@ export interface CadSketchGeneratorKind<G extends CadSketchGeneratorGeometry> {
   readonly withOperands: (geometry: G, ids: readonly string[]) => G;
   /** Its inputs evaluated now, refused with the reason when out of range; `name` names the generator in a refusal. */
   readonly evaluate: (geometry: G, context: CadSketchGeneratorContext, name: string) => CadSketchGeneratorEvaluation;
+  /** `next`, the record's geometry after an edit, with the ids of the entries it kept from `previous`: see `identifiedEntries`. */
+  readonly identify?: (previous: G, next: G) => G;
   /**
-   * The keys whose part of the shape `next` changes though the key stays, which settling takes through the relation remap as members
-   * that leave: in a list of points or segments that grows or shrinks, those from the first entry that changed on. Undefined when each
-   * key keeps its part.
+   * The keys whose edge `next` joins to other parts of the shape than `previous` did, such as an edge an inserted vertex splits, which
+   * settling takes through the relation remap as members that leave though their keys stay. Undefined when there are none.
    */
-  readonly renumbered?: (previous: G, next: G) => ((key: string) => boolean) | undefined;
+  readonly reshaped?: (previous: G, next: G) => ((key: string) => boolean) | undefined;
 }
 type Of<K extends CadSketchGeneratorGeometry['kind']> = Extract<CadSketchGeneratorGeometry, { kind: K }>;
 
@@ -181,13 +184,14 @@ function pathOutput(output: Output, segments: readonly ResolvedCadPathSegment[],
     else output.arc(key.segment, output.point(key.centre, segment.center), start, end, segment.sweep < 0 ? 'cw' : 'ccw');
   });
 }
-function profileOutput(output: Output, geometry: ResolvedCadProfile): void {
+/** A profile's members; a listed polygon's or path's keyed by the entry ids `ids` when it has them, else by index. */
+function profileOutput(output: Output, geometry: ResolvedCadProfile, ids?: readonly number[]): void {
   switch (geometry.kind) {
     case 'rectangle': return rectangleOutput(output, geometry);
     case 'circle': return circleOutput(output, [geometry.x, geometry.y], geometry.radius);
     case 'slot': return slotOutput(output, geometry);
-    case 'polygon': polygonOutput(output, geometry.points); return;
-    case 'path': return pathOutput(output, geometry.segments);
+    case 'polygon': polygonOutput(output, geometry.points, ids ? index => listedVertex(ids[index]) : listedVertex); return;
+    case 'path': return pathOutput(output, geometry.segments, ids ? index => listedSegment(ids[index]) : listedSegment);
     default: { const exhaustive: never = geometry; throw exhaustive; }
   }
 }
@@ -232,16 +236,78 @@ function partsOutput(output: Output, shape: ResolvedCadProfile, parts: CadPlugin
   if (parts.kind === 'recipe' && shape.kind === 'polygon') { polygonOutput(output, shape.points, recipeKeys(parts, shape.points.length)); return; }
   throw new CadError('invalid-plugin', `A ${parts.kind} outline cannot be a ${shape.kind}.`);
 }
+type Listed = Of<'polygon'> | Of<'path'>;
+const entriesOf = (geometry: Listed): readonly unknown[] => geometry.kind === 'polygon' ? geometry.points : geometry.segments;
+/** Each entry's id: the one stored for it, or its index. */
+const cadSketchEntryIds = (geometry: Listed): readonly number[] => geometry.ids ?? entriesOf(geometry).map((_, index) => index);
+// The largest middle of two lists, in entries of each multiplied, compared entry by entry for the entries they share.
+const ENTRY_COMPARISON_LIMIT = 1_000_000;
 /**
- * Keys of a listed polygon's or path's members from the first entry that changed on, when the list grows or shrinks: a vertex or
- * segment there is no longer the one the key named, so the user relations on it are taken through the remap. A list of the same length
- * keeps every key, as an edit of one entry's fields does.
+ * `next` with an id for each entry. Ids `next` gives are its own. Otherwise a list of the same length keeps the ids in place, as an
+ * edit of entries' fields does, unless it holds the same entries in another order, whose ids go with them. A list that grows or shrinks
+ * keeps the id of each entry it holds unchanged: those in place, matched as the longest common run in order, then those moved, as the
+ * same closed outline from another start holds them. In each gap between the entries in place, the changed entries take the ids of the
+ * gap's changed previous entries from its end, as a segment split in two keeps its id on the piece that ends where it ended, which keys
+ * the joint there, and the others take fresh ids. Ids that are the indices are not stored.
  */
-function listRenumbered(previous: readonly unknown[], next: readonly unknown[], pattern: RegExp): ((key: string) => boolean) | undefined {
-  if (previous.length === next.length) return undefined;
-  let first = 0;
-  while (first < Math.min(previous.length, next.length) && JSON.stringify(previous[first]) === JSON.stringify(next[first])) first++;
-  return key => { const match = pattern.exec(key); return match !== null && Number(match[1]) >= first; };
+function identifiedEntries<G extends Listed>(previous: G, next: G): G {
+  if (next.ids) return next;
+  const before = entriesOf(previous).map(entry => JSON.stringify(entry)), after = entriesOf(next).map(entry => JSON.stringify(entry)), had = cadSketchEntryIds(previous);
+  const places = (from: number, to: number, taken: (index: number) => boolean) => {
+    const found = new Map<string, number[]>();
+    for (let index = from; index < to; index++) if (!taken(index)) { const list = found.get(before[index]); if (list) list.push(index); else found.set(before[index], [index]); }
+    return found;
+  };
+  let ids: (number | undefined)[] = new Array(after.length);
+  if (before.length === after.length) {
+    const found = places(0, before.length, () => false), moved = after.map(entry => found.get(entry)?.shift());
+    ids = moved.every(index => index !== undefined) ? moved.map(index => had[index!]) : [...had];
+  } else {
+    const claimed = new Uint8Array(before.length), keep = (from: number, to: number) => { ids[to] = had[from]; claimed[from] = 1; };
+    let start = 0, endBefore = before.length, endAfter = after.length;
+    while (start < endBefore && start < endAfter && before[start] === after[start]) { keep(start, start); start++; }
+    while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) keep(--endBefore, --endAfter);
+    // The unchanged entries of the middle in place, as pairs of indices in order.
+    const pairs: [number, number][] = [], rows = endBefore - start, columns = endAfter - start;
+    if (rows * columns <= ENTRY_COMPARISON_LIMIT && rows && columns) {
+      const lengths = new Uint32Array((rows + 1) * (columns + 1)), at = (row: number, column: number) => row * (columns + 1) + column;
+      for (let row = rows - 1; row >= 0; row--) for (let column = columns - 1; column >= 0; column--)
+        lengths[at(row, column)] = before[start + row] === after[start + column] ? lengths[at(row + 1, column + 1)] + 1 : Math.max(lengths[at(row + 1, column)], lengths[at(row, column + 1)]);
+      for (let row = 0, column = 0; row < rows && column < columns;) {
+        if (before[start + row] === after[start + column]) { pairs.push([start + row, start + column]); keep(start + row, start + column); row++; column++; }
+        else if (lengths[at(row + 1, column)] >= lengths[at(row, column + 1)]) row++; else column++;
+      }
+    }
+    const moved = places(start, endBefore, index => claimed[index] === 1);
+    for (let index = start; index < endAfter; index++) if (ids[index] === undefined) { const from = moved.get(after[index])?.shift(); if (from !== undefined) keep(from, index); }
+    let gapBefore = start, gapAfter = start;
+    for (const [matchedBefore, matchedAfter] of [...pairs, [endBefore, endAfter] as [number, number]]) {
+      const olds: number[] = [], news: number[] = [];
+      for (let index = gapBefore; index < matchedBefore; index++) if (!claimed[index]) olds.push(index);
+      for (let index = gapAfter; index < matchedAfter; index++) if (ids[index] === undefined) news.push(index);
+      for (let back = 1; back <= Math.min(olds.length, news.length); back++) keep(olds[olds.length - back], news[news.length - back]);
+      gapBefore = matchedBefore + 1; gapAfter = matchedAfter + 1;
+    }
+    let fresh = Math.max(-1, ...had) + 1;
+    for (let index = 0; index < ids.length; index++) if (ids[index] === undefined) ids[index] = fresh++;
+    if (fresh - 1 > CAD_SKETCH_ENTRY_ID_MAX) throw invalid(`This ${next.kind} has used every entry id up to ${CAD_SKETCH_ENTRY_ID_MAX}. Detach it, and draw a new one.`);
+  }
+  const { ids: _none, ...plain } = next;
+  return (ids.every((id, index) => id === index) ? plain : { ...plain, ids }) as G;
+}
+/** The entry after each one in the closed list, or the one before it, by id. */
+function neighbours(geometry: Listed, step: 1 | -1): ReadonlyMap<number, number> {
+  const ids = cadSketchEntryIds(geometry);
+  return new Map(ids.map((id, index) => [id, ids[(index + step + ids.length) % ids.length]]));
+}
+/**
+ * Keys `<prefix><id>` of the entries whose neighbour `step` away differs from `previous` to `next`, such as the polygon edge an
+ * inserted vertex splits, which now ends at it.
+ */
+function rejoined(previous: Listed, next: Listed, step: 1 | -1, prefix: string): ((key: string) => boolean) | undefined {
+  const was = neighbours(previous, step), keys = new Set<string>();
+  for (const [id, neighbour] of neighbours(next, step)) if (was.has(id) && was.get(id) !== neighbour) keys.add(`${prefix}${id}`);
+  return keys.size ? key => keys.has(key) : undefined;
 }
 /** A shape that passed the legacy checks, with the parts a plugin's outline is made of. */
 interface Checked { readonly shape: ResolvedCadProfile; readonly parts?: CadPluginOutlineParts }
@@ -265,17 +331,38 @@ function shapeEvaluation(key: string, resolve: () => Checked, name: string): Cad
     return output.result();
   } };
 }
-function profileEvaluation(geometry: ResolvedCadProfile, name: string): CadSketchGeneratorEvaluation {
-  return shapeEvaluation(JSON.stringify(geometry), () => ({ shape: geometry }), name);
+function profileEvaluation(geometry: ResolvedCadProfile, name: string, ids?: readonly number[]): CadSketchGeneratorEvaluation {
+  const key = JSON.stringify(geometry), resolve = () => ({ shape: geometry });
+  if (!ids) return shapeEvaluation(key, resolve, name);
+  return { key: `${key}\u0000${JSON.stringify(ids)}`, shape: () => checked(key, resolve, name).shape, build: (id, construction) => {
+    const output = new Output(id, construction);
+    profileOutput(output, checked(key, resolve, name).shape, ids);
+    return output.result();
+  } };
 }
 
 const NO_OPERANDS: CadSketchOperandSignature = Object.freeze({ slots: Object.freeze([]) });
 /** A parametric profile kind: its geometry evaluates exactly as a legacy profile's does. */
-function profileKind<K extends 'rectangle' | 'circle' | 'slot' | 'polygon' | 'path'>(label: string, renumbered?: CadSketchGeneratorKind<Of<K>>['renumbered']): CadSketchGeneratorKind<Of<K>> {
+function profileKind<K extends 'rectangle' | 'circle' | 'slot'>(label: string): CadSketchGeneratorKind<Of<K>> {
   return {
     label: () => label, signature: NO_OPERANDS, operands: () => [], withOperands: geometry => geometry,
-    evaluate: (geometry, context, name) => profileEvaluation(resolveCadProfile(geometry as CadProfile, context.parameters), name),
-    ...renumbered ? { renumbered } : {}
+    evaluate: (geometry, context, name) => profileEvaluation(resolveCadProfile(geometry as CadProfile, context.parameters), name)
+  };
+}
+/**
+ * A listed polygon or path: a profile whose points or segments may carry entry ids, which key their members. A polygon's edge `e<id>`
+ * runs from its vertex `v<id>` to the next, so an inserted vertex reshapes the edge before it; a path's segment `s<id>` ends at its
+ * joint `j<id>`, so an inserted segment reshapes the one after it, whose start it now is.
+ */
+function listedKind<K extends 'polygon' | 'path'>(label: string, entry: string, reshaped: CadSketchGeneratorKind<Of<K>>['reshaped']): CadSketchGeneratorKind<Of<K>> {
+  return {
+    label: () => label, signature: NO_OPERANDS, operands: () => [], withOperands: geometry => geometry,
+    evaluate: (geometry, context, name) => {
+      const { ids } = geometry as Listed;
+      if (ids && ids.length !== entriesOf(geometry as Listed).length) throw invalid(`${name} needs one entry id for each ${entry}.`);
+      return profileEvaluation(resolveCadProfile(geometry as CadProfile, context.parameters), name, ids);
+    },
+    identify: identifiedEntries, reshaped
   };
 }
 
@@ -342,8 +429,8 @@ export const CAD_SKETCH_GENERATOR_KINDS: { readonly [K in CadSketchGeneratorGeom
   plugin,
   rectangle: profileKind<'rectangle'>('Rectangle'),
   circle: profileKind<'circle'>('Circle'),
-  polygon: profileKind<'polygon'>('Polygon', (previous, next) => listRenumbered(previous.points, next.points, /^[ve](\d+)$/)),
-  path: profileKind<'path'>('Path', (previous, next) => listRenumbered(previous.segments, next.segments, /^[sjc](\d+)$/)),
+  polygon: listedKind<'polygon'>('Polygon', 'point', (previous, next) => rejoined(previous, next, 1, 'e')),
+  path: listedKind<'path'>('Path', 'segment', (previous, next) => rejoined(previous, next, -1, 's')),
   slot: profileKind<'slot'>('Slot'),
   'regular-polygon': regularPolygon
 };

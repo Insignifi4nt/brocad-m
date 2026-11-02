@@ -5,14 +5,18 @@ import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { needsCadSketchPreparation } from './cadEditPreparation';
 import { CadSketchPreparationError, type CadSketchConstraintFeedback } from './cadSketchConstraintFeedback';
 import type { CadSketchDiagnosisMarks } from './cadSketchDefinitionMarks';
+import { cadGeneratorRemovalIds } from './cadGeneratorRemovals';
 
 export type CadPrepareEdits = (edits: readonly CadEdit[], signal: AbortSignal) => Promise<CadDocument>;
 type Preview = { readonly kind: 'idle' | 'waiting' } | { readonly kind: 'ready'; readonly document: CadDocument }
-  | { readonly kind: 'error'; readonly message: string; readonly feedback?: CadSketchConstraintFeedback; readonly marks?: CadSketchDiagnosisMarks | null };
+  | { readonly kind: 'error'; readonly message: string; readonly feedback?: CadSketchConstraintFeedback; readonly marks?: CadSketchDiagnosisMarks | null;
+    /** The relations the edit removes as a generator regenerates, which the same edits confirming them with removedRelationIds apply. */
+    readonly removals?: readonly string[] };
 
 function previewError(error: unknown, fallback: string): Extract<Preview, { kind: 'error' }> {
+  const removals = cadGeneratorRemovalIds(error);
   return { kind: 'error', message: userFacingMessage(error, fallback),
-    ...(error instanceof CadSketchPreparationError ? { feedback: error.feedback, marks: error.marks } : {}) };
+    ...(error instanceof CadSketchPreparationError ? { feedback: error.feedback, marks: error.marks } : {}), ...removals ? { removals } : {} };
 }
 
 /** The operands a rejected preview reported, which the canvas colours until the preview changes or ends. */

@@ -23,7 +23,8 @@ import {
 // relations with ids `<idPrefix>_<key>`, and adds them to the accepted graph, so every reader of the graph sees them as geometry. Saving
 // writes the record alone. Members are fixed in the solver, and an edit of one is refused, naming its generator, until the generator is
 // detached. A change of the generator's inputs or parameters regenerates its members in the same edit, and a member that leaves with
-// the user relations on it goes through the relation remap, which keeps, removes or refuses each one.
+// the user relations on it goes through the relation remap, which keeps, removes or refuses each one. A relation the remap would remove
+// with a leaving member stays until the edit confirms its removal, as a trim does, by listing its id in removedRelationIds.
 
 type Kind = CadSketchGeneratorKind<CadSketchGeneratorGeometry>;
 export function cadSketchGeneratorKind(geometry: CadSketchGeneratorGeometry): Kind {
@@ -43,6 +44,27 @@ export const cadSketchGeneratedId = (idPrefix: string, key: string) => `${idPref
 const invalid = (message: string) => new CadError('invalid-sketch-generator', message);
 const stale = (message: string) => new CadError('stale-sketch-generator', message);
 const owned = (message: string) => new CadError('owned-sketch-generator', message);
+
+/**
+ * The relations an edit batch confirms it removes, its removedRelationIds, when members they use leave as a generator regenerates, and
+ * those settling has removed so far.
+ */
+export interface CadSketchGeneratorRemovals { readonly confirmed: ReadonlySet<string>; readonly removed: Set<string> }
+export const cadSketchGeneratorRemovals = (confirmed: Iterable<string> = []): CadSketchGeneratorRemovals => ({ confirmed: new Set(confirmed), removed: new Set() });
+/** A regeneration that removes user relations no one confirmed it removes; `relationIds` are all those the batch removes. */
+export class CadSketchGeneratorRemovalError extends CadError {
+  readonly relationIds: readonly string[];
+  constructor(message: string, relationIds: readonly string[]) {
+    super('unconfirmed-sketch-generator-removals', message);
+    this.relationIds = Object.freeze([...relationIds]);
+  }
+}
+/** Refuses removedRelationIds that settling did not remove, which a request made for other inputs or geometry carries. */
+export function assertCadSketchGeneratorRemovals(removals: CadSketchGeneratorRemovals): void {
+  const extra = [...removals.confirmed].filter(id => !removals.removed.has(id));
+  if (extra.length) throw new CadError('stale-sketch-generator-removals', `This edit no longer removes ${extra.map(id => `"${id}"`).join(', ')}. Send exactly the IDs it removes as removedRelationIds.`);
+}
+const listed = (items: readonly string[]) => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 
 interface GeneratorIndex {
   readonly generators: readonly CadSketchGenerator[];
@@ -296,10 +318,13 @@ function sameMembers(a: Members, b: Members): boolean {
  * is the sketch's graph before the edit. The candidate's members of a generator must be untouched, which regenerates them from the inputs
  * they had before, or exactly what the generator makes now, as an edit that regenerated them leaves them; a member edited, removed or
  * added directly refuses the edit, naming the generator. Members that leave in a regeneration take the user relations on them through
- * the relation remap, as `regenerateCadSketchGenerators` says. A generator stored without members gets them, taking the place of those it
- * had before. The candidate itself when nothing needs generating.
+ * the relation remap, as `regenerateCadSketchGenerators` says; a relation it removes must be one of `removals`, confirmed, or the
+ * edit is refused with a CadSketchGeneratorRemovalError that lists them. A generator stored without members gets them, taking the place
+ * of those it had before. The candidate itself when nothing needs generating.
  */
-export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: CadSketchGraph | undefined, parameters: Readonly<Record<string, number>>): CadSketchGraph {
+export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: CadSketchGraph | undefined, parameters: Readonly<Record<string, number>>,
+  removals?: CadSketchGeneratorRemovals): CadSketchGraph {
+  candidate = withIdentifiedEntries(candidate, previous);
   const graph = isAcceptedCadSketchGraph(candidate) ? candidate : detachCadSketchGraph(candidate), index = generatorIndex(graph);
   if (!index.generators.length) return graph === candidate ? candidate : acceptCadSketchGraph(graph);
   if (isSettled(graph, index, parameters)) return graph;
@@ -328,8 +353,8 @@ export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: C
     markSettled(graph, generations, parameters);
     return acceptCadSketchGraph(graph);
   }
-  // Members that leave, whose id now names another kind of edge, or whose key the kind says now names another part of the shape, end
-  // the user relations on them.
+  // Members that leave, whose id now names another kind of edge, or whose edge the kind says now joins other parts of the shape, end the
+  // user relations on them.
   const curves = new Map<string, readonly never[]>(), points = new Map<string, null>(), owners = new Map<string, CadSketchGenerator>();
   const records = previous && previous !== candidate ? generatorIndex(previous).byPrefix : undefined;
   for (const { generator, members } of generations) {
@@ -338,7 +363,7 @@ export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: C
     const kinds = new Map(members.entities.map(entity => [entity.id, entity.kind])), keptPoints = new Set(members.points.map(point => point.id));
     const record = records?.get(generator.idPrefix), from = generator.idPrefix.length + 1;
     const moved = record && record !== generator && record.geometry.kind === generator.geometry.kind
-      ? cadSketchGeneratorKind(generator.geometry).renumbered?.(record.geometry, generator.geometry) : undefined;
+      ? cadSketchGeneratorKind(generator.geometry).reshaped?.(record.geometry, generator.geometry) : undefined;
     for (const entity of kept.entities) if (kinds.get(entity.id) !== entity.kind || moved?.(entity.id.slice(from))) { curves.set(entity.id, []); owners.set(entity.id, generator); }
     for (const point of kept.points) if (!keptPoints.has(point.id) || moved?.(point.id.slice(from))) { points.set(point.id, null); owners.set(point.id, generator); }
   }
@@ -351,19 +376,50 @@ export function settleCadSketchGenerators(candidate: CadSketchGraph, previous: C
       relations: [...stored.relations, ...[...had.values()].flatMap(item => item.relations)] };
     const outcomes = remapCadSketchRelations(was, { curves, points })
       .filter(outcome => outcome.relation.kind !== 'generator' && !cadSketchGeneratorOwner(graph, outcome.relation.id));
-    const blocked = outcomes.find(outcome => outcome.kind === 'blocked');
-    if (blocked?.kind === 'blocked') {
-      const definition = cadSketchRelationDefinition(blocked.relation), operands = definition.operands(blocked.relation);
-      const leaving = [...operands, ...definition.owns?.(blocked.relation, was).entityIds ?? []].find(id => owners.has(id))
-        ?? cadSketchRelationPointsOf(was, blocked.relation).find(id => owners.has(id));
-      const generator = (leaving === undefined ? undefined : owners.get(leaving)) ?? generations[0].generator;
-      throw owned(`${cadSketchGeneratorName(generator)} no longer generates geometry that ${definition.nameOf?.(blocked.relation) ?? definition.name} "${blocked.relation.id}" uses. ${blocked.reason} Remove the relation first, or keep the generator's inputs.`);
+    const blocked = outcomes.flatMap(outcome => outcome.kind === 'blocked' ? [outcome] : []);
+    // The generator whose leaving member a relation uses, and how the relation is named.
+    const ownerOf = (relation: CadSketchGraphRelation) => {
+      const definition = cadSketchRelationDefinition(relation);
+      const leaving = [...definition.operands(relation), ...definition.owns?.(relation, was).entityIds ?? []].find(id => owners.has(id))
+        ?? cadSketchRelationPointsOf(was, relation).find(id => owners.has(id));
+      return (leaving === undefined ? undefined : owners.get(leaving)) ?? generations[0].generator;
+    };
+    const named = (relation: CadSketchGraphRelation) => { const definition = cadSketchRelationDefinition(relation); return `${definition.nameOf?.(relation) ?? definition.name} "${relation.id}"`; };
+    const refused = blocked.find(outcome => !outcome.confirmable);
+    if (refused) throw owned(`${cadSketchGeneratorName(ownerOf(refused.relation))} no longer generates geometry that ${named(refused.relation)} uses. ${refused.reason} Remove the relation first, or keep the generator's inputs.`);
+    if (blocked.length && (!removals || blocked.some(outcome => !removals.confirmed.has(outcome.relation.id)))) {
+      const generators = [...new Set(blocked.map(outcome => cadSketchGeneratorName(ownerOf(outcome.relation))))];
+      const ids = [...new Set([...removals?.removed ?? [], ...blocked.map(outcome => outcome.relation.id)])];
+      throw new CadSketchGeneratorRemovalError(`${listed(generators)} no longer generate${generators.length === 1 ? 's' : ''} geometry that ${listed(blocked.map(outcome => named(outcome.relation)))} ${blocked.length === 1 ? 'uses' : 'use'}.`
+        + `${blocked.length === 1 ? ` ${blocked[0].reason}` : ''} This removes ${ids.length === 1 ? 'one relation' : `${ids.length} relations`}: ${ids.join(', ')}.`
+        + ` Send exactly these IDs as removedRelationIds to confirm, or keep the generator's inputs.`, ids);
     }
+    for (const outcome of blocked) removals?.removed.add(outcome.relation.id);
     relations = applyCadSketchRemapOutcomes(stored.relations, outcomes);
   }
   const result = accepted(stored, generations, graph, parameters, relations);
   regeneratedGraphs.add(result);
   return result;
+}
+/**
+ * `graph` with each generator record whose kind identifies its entries, a listed polygon or path, given the ids of the entries it kept
+ * from its record in `previous`, so its members keep their keys wherever an edit inserts or removes others.
+ */
+function withIdentifiedEntries(graph: CadSketchGraph, previous: CadSketchGraph | undefined): CadSketchGraph {
+  if (!previous || previous === graph) return graph;
+  const records = generatorIndex(previous).byPrefix;
+  if (!records.size) return graph;
+  let changed = false;
+  const relations = graph.relations.map(relation => {
+    if (relation.kind !== 'generator') return relation;
+    const record = records.get(relation.idPrefix), identify = cadSketchGeneratorKind(relation.geometry).identify;
+    if (!identify || !record || record === relation || record.geometry.kind !== relation.geometry.kind) return relation;
+    const geometry = identify(record.geometry, relation.geometry);
+    if (geometry === relation.geometry || JSON.stringify(geometry) === JSON.stringify(relation.geometry)) return relation;
+    changed = true;
+    return { ...relation, geometry };
+  });
+  return changed ? { ...graph, relations } : graph;
 }
 // Settled graphs whose generators made other members than the graph before them carried.
 const regeneratedGraphs = new WeakSet<CadSketchGraph>();

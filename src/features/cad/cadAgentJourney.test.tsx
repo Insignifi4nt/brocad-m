@@ -11,6 +11,7 @@ import type { CadEdit } from '@/domain/cad/cadOperations';
 import type { CadSketchGenerator } from '@/domain/cad/cadSketchGraph';
 import { storedCadDocument } from '@/domain/cad/cadStoredDocument';
 import { cadSketchProfileViews } from '@/domain/cad/sketch-generators/cadSketchProfileViews';
+import { expandCadSketchGenerators } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CadSession } from './cadSession';
 import { useCadController, type CadController } from './useCadController';
 import { cadSiteTools } from './cadSiteTools';
@@ -87,6 +88,29 @@ describe('CAD agent discovery and authoring journeys', () => {
     await act(async () => h.session.setWorkflowOpen(true));
     expect(await h.call('cad_inspect_sketch_handles', { ...query, expectedVersion: h.session.getSnapshot().version })).toMatchObject({ ok: false, error: { code: 'WORKFLOW_OPEN' } });
     expect(await h.call('cad_edit_document', { expectedVersion: h.session.getSnapshot().version, edits: [edit] })).toMatchObject({ ok: false, error: { code: 'WORKFLOW_OPEN' } });
+  });
+
+  it('removes the relations on geometry a generator stops making only when the edit lists them, as one undo step', async () => {
+    const h = await mount(), empty = h.session.getSnapshot();
+    const polygon: CadSketchGenerator = { id: 'poly', kind: 'generator', idPrefix: 'poly', construction: false,
+      geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 'n', directionId: '@h' } };
+    const corner = expandCadSketchGenerators({ points: [], entities: [], relations: [polygon] }, { n: 5 }).points.find(point => point.id === 'poly_v4')!.position;
+    await h.success('cad_edit_document', { expectedVersion: empty.version, edits: [{ kind: 'set-parameter', name: 'n', value: 5 },
+      { kind: 'add-feature', feature: { id: 'plate', name: 'Plate', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0, profiles: [],
+        graph: { points: [{ id: 'u', position: corner }], entities: [], relations: [] } } },
+      { kind: 'set-sketch-generator', sketchId: 'plate', generator: polygon },
+      { kind: 'set-sketch-relation', sketchId: 'plate', relation: { id: 'c4', kind: 'coincident', pointIds: ['u', 'poly_v4'] } }] });
+    const seeded = h.session.getSnapshot(), fewer = { kind: 'set-parameter', name: 'n', value: 4 };
+    // Four sides lose the fifth corner: the edit names the polygon and lists every relation it would remove, and changes nothing.
+    expect(await h.call('cad_edit_document', { expectedVersion: seeded.version, edits: [fewer] })).toMatchObject({ ok: false, error: {
+      code: 'unconfirmed-sketch-generator-removals', message: expect.stringContaining('Regular polygon "poly" no longer generates geometry'),
+      details: { relationIds: ['c4'], relationCount: 1 } } });
+    expect(h.session.getSnapshot()).toMatchObject({ version: seeded.version }); expect(h.session.getSnapshot().document).toBe(seeded.document);
+    await h.success('cad_edit_document', { expectedVersion: seeded.version, edits: [{ ...fewer, removedRelationIds: ['c4'] }] });
+    const reduced = h.session.getSnapshot(), sketch = reduced.document.features[0];
+    expect(sketch.kind === 'sketch' && sketch.graph?.relations.filter(relation => !relation.id.startsWith('poly_')).map(relation => relation.id)).toEqual(['poly']);
+    await h.success('cad_history', { expectedVersion: reduced.version, direction: 'undo' });
+    expect(h.session.getSnapshot().document).toEqual(seeded.document);
   });
 
   it('keeps initial CAD discovery below 50 KiB without repeating complete plugin recipe schemas', () => {

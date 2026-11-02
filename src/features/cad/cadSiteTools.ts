@@ -29,6 +29,7 @@ import { CadSketchCutAxesSchema } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchSplitDependencyError } from '@/domain/cad/cadSketchSplit';
 import { CadSketchTrimDependencyError, CadSketchExtendDependencyError } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchTangentOwnershipError } from '@/domain/cad/cadSketchTangentRelations';
+import { CadSketchGeneratorRemovalError } from '@/domain/cad/sketch-generators/cadSketchGenerators';
 import { CadSketchPlacementDependencyError } from '@/domain/cad/cadSketchPlacement';
 import { CAD_SKETCH_AGENT_RELATION_KINDS } from '@/domain/cad/sketch-relations/cadSketchRelationRegistry';
 import { CadConstructionPointSchema, CadPathConstructionStepSchema, createCadPathProfile, createCadOpenCurveSegments } from '@/domain/cad/cadPathConstruction';
@@ -145,6 +146,8 @@ export function cadSiteTools(getController: () => CadController) {
           pointIds: error.pointIds.slice(0, 8), pointCount: error.pointIds.length, omittedPointCount: Math.max(0, error.pointIds.length - 8)
         });
         if (error instanceof CadSketchTangentOwnershipError) throw new ToolError(error.code, error.message, { ownerRelationId: error.ownerRelationId });
+        // Every ID: a confirmation must list exactly the relations the edit removes.
+        if (error instanceof CadSketchGeneratorRemovalError) throw new ToolError(error.code, error.message, { relationIds: [...error.relationIds], relationCount: error.relationIds.length });
         if (error instanceof CadError || error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);
         throw error;
       }

@@ -2,7 +2,8 @@ import type { CadFeature, CadSketchFeature } from '../cadDocument';
 import { CadError } from '../cadError';
 import type { CadSketchGenerator, CadSketchGraph } from '../cadSketchGraph';
 import {
-  cadSketchGeneratorMembers, cadSketchGeneratorName, cadSketchGeneratorOwner, cadSketchGenerators, cadSketchIdNamespace, settleCadSketchGenerators
+  cadSketchGeneratorMembers, cadSketchGeneratorName, cadSketchGeneratorOwner, cadSketchGenerators, cadSketchIdNamespace, settleCadSketchGenerators,
+  type CadSketchGeneratorRemovals
 } from './cadSketchGenerators';
 
 const EMPTY_GRAPH: CadSketchGraph = Object.freeze({ points: Object.freeze([]), entities: Object.freeze([]), relations: Object.freeze([]) });
@@ -77,14 +78,16 @@ export function cadSketchGeneratorDeletion(graph: CadSketchGraph, selected: { re
 
 /**
  * The features an edit batch made from `before`, with each sketch's generators settled under `parameters`: members an edit left as they
- * were regenerate from the current inputs, and an edit of a member itself is refused, naming its generator. Unchanged features whose
- * generators make the same members are kept as they are.
+ * were regenerate from the current inputs, and an edit of a member itself is refused, naming its generator. Relations the remap removes
+ * with leaving members must be among the batch's confirmed `removals`. Unchanged features whose generators make the same members are
+ * kept as they are.
  */
-export function settleCadDocumentGenerators(before: readonly CadFeature[], features: readonly CadFeature[], parameters: Readonly<Record<string, number>>): CadFeature[] {
+export function settleCadDocumentGenerators(before: readonly CadFeature[], features: readonly CadFeature[], parameters: Readonly<Record<string, number>>,
+  removals?: CadSketchGeneratorRemovals): CadFeature[] {
   const previous = new Map(before.map(feature => [feature.id, feature]));
   return features.map(feature => {
     if (feature.kind !== 'sketch' || !feature.graph || !feature.graph.relations.some(relation => relation.kind === 'generator')) return feature;
-    const earlier = previous.get(feature.id), graph = settleCadSketchGenerators(feature.graph, earlier?.kind === 'sketch' ? earlier.graph : undefined, parameters);
+    const earlier = previous.get(feature.id), graph = settleCadSketchGenerators(feature.graph, earlier?.kind === 'sketch' ? earlier.graph : undefined, parameters, removals);
     return graph === feature.graph ? feature : { ...feature, graph };
   });
 }

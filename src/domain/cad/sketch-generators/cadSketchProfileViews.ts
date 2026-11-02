@@ -1,4 +1,5 @@
 import type { CadDocument, CadProfile, CadSketchFeature, CadSketchProfile } from '../cadDocument';
+import { Value } from '@sinclair/typebox/value';
 import { CadError } from '../cadError';
 import type { CadEdit } from '../cadOperations';
 import type { CadSketchGenerator } from '../cadSketchGraph';
@@ -15,12 +16,16 @@ export type CadSketchProfileGenerator = CadSketchGenerator & { readonly geometry
 const isProfileGenerator = (generator: CadSketchGenerator): generator is CadSketchProfileGenerator => generator.geometry.kind !== 'regular-polygon';
 
 const views = new WeakMap<CadSketchGenerator, CadSketchProfile>();
-/** The profile `generator` is seen as; one object per record, so an unchanged record keeps its view. */
+/**
+ * The profile `generator` is seen as; one object per record, so an unchanged record keeps its view. A listed polygon's or path's entry ids
+ * are the record's, not the profile's: a view written back with other points or segments takes them anew from the record it replaces.
+ */
 function generatorProfile(generator: CadSketchProfileGenerator): CadSketchProfile {
   let view = views.get(generator);
   if (!view) {
+    const { ids: _ids, ...geometry } = generator.geometry as CadProfile & { readonly ids?: readonly number[] };
     view = Object.freeze({ id: generator.id, name: generator.name ?? cadSketchGeneratorKind(generator.geometry).label(generator.geometry),
-      construction: generator.construction, geometry: generator.geometry });
+      construction: generator.construction, geometry: 'ids' in generator.geometry ? geometry as CadProfile : generator.geometry });
     views.set(generator, view);
   }
   return view;
@@ -53,8 +58,24 @@ export function withCadSketchProfile(sketch: CadSketchFeature, next: CadSketchPr
   const { name: _name, ...unnamed } = generator;
   // A name left as the one shown, the kind's own when the generator has none, is not stored.
   const name = next.name.trim() && next.name !== generatorProfile(generator).name ? next.name : generator.name;
-  const replaced: CadSketchGenerator = { ...unnamed, ...name ? { name } : {}, construction: next.construction, geometry: next.geometry };
+  const geometry = next.geometry === generatorProfile(generator).geometry ? generator.geometry : next.geometry;
+  const replaced: CadSketchGenerator = { ...unnamed, ...name ? { name } : {}, construction: next.construction, geometry };
   return { ...sketch, graph: { ...sketch.graph, relations: sketch.graph.relations.map(relation => relation === generator ? replaced : relation) } };
+}
+
+/**
+ * The edits that set `parameters`, then write the profile view `next` back to `sketch`: a generator's inputs with set-sketch-generator,
+ * which confirms it removes `removedRelationIds` with the members that leave, and a legacy profile with an update of the sketch. A
+ * view that only reads changed parameters confirms the removals with its last parameter.
+ */
+export function cadSketchProfileEdits(sketch: CadSketchFeature, next: CadSketchProfile, parameters: Readonly<Record<string, number>> = {},
+  removedRelationIds: readonly string[] = []): CadEdit[] {
+  const set: CadEdit[] = Object.entries(parameters).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([name, value]) => ({ kind: 'set-parameter', name, value }));
+  const generator = cadSketchProfileGenerator(sketch, next.id), confirmed = removedRelationIds.length ? { removedRelationIds: [...removedRelationIds] } : {};
+  if (!generator) return [...set, { kind: 'update-feature', feature: withCadSketchProfile(sketch, next) }];
+  const replaced = withCadSketchProfile(sketch, next).graph!.relations.find(relation => relation.id === next.id) as CadSketchGenerator;
+  if (Value.Equal(replaced, generator) && set.length) return [...set.slice(0, -1), { ...set[set.length - 1], ...confirmed }];
+  return [...set, { kind: 'set-sketch-generator', sketchId: sketch.id, generator: replaced, ...confirmed }];
 }
 
 /** The sketch without the profile view `profileId`: a legacy profile goes alone, a generator with its members and the relations on them. */

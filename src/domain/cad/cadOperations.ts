@@ -20,14 +20,15 @@ import { keepCadSketchLineSides } from './cadSketchPointLineDistanceRelations';
 import { cadSketchRelationsEqualButPlacement } from './cadSketchPlacedDimensions';
 import { CadSketchPlacementRequestSchema, placeCadSketchGraph, type CadSketchPlacementRequest } from './cadSketchPlacement';
 import { CadSketchSplitTargetSchema, splitCadSketchEntity, type CadSketchSplitTarget } from './cadSketchSplit';
-import { CadSketchTrimTargetSchema, trimCadSketchEntity, type CadSketchTrimTarget, CadSketchExtendTargetSchema, extendCadSketchEntity, type CadSketchExtendTarget } from './cadSketchTrimExtend';
+import { CadSketchTrimTargetSchema, trimCadSketchEntity, type CadSketchTrimTarget, CadSketchExtendTargetSchema, extendCadSketchEntity, type CadSketchExtendTarget,
+  CadSketchRemovedRelationIdsSchema } from './cadSketchTrimExtend';
 import { CadSketchOffsetRequestSchema, prepareCadSketchOffset, type CadSketchOffsetRequest } from './cadSketchOffset';
 import { CadSketchMirrorRequestSchema, prepareCadSketchMirror, type CadSketchMirrorRequest } from './cadSketchMirror';
 import { CadSketchProfileCopyRequestSchema, prepareCadSketchProfileCopy, type CadSketchProfileCopyRequest } from './cadSketchProfileCopy';
 import { CadSketchUseEntityRequestSchema, prepareCadSketchUseEntity, cadSketchExternalReferenceLockReason, type CadSketchUseEntityRequest } from './cadSketchExternalReferences';
 import { prepareCadSketchPatternSnapshot, reconcileCadSketchLinearPattern } from './cadSketchLinearPattern';
 import { cadSketchOwnedGeometryLockReason } from './cadSketchOwnedGeometry';
-import { cadSketchGeneratorLockReason, cadSketchGeneratorName } from './sketch-generators/cadSketchGenerators';
+import { assertCadSketchGeneratorRemovals, cadSketchGeneratorLockReason, cadSketchGeneratorName, cadSketchGeneratorRemovals } from './sketch-generators/cadSketchGenerators';
 import { cadSketchProfileGenerator, cadSketchProfileViews, withCadSketchProfile } from './sketch-generators/cadSketchProfileViews';
 import { detachCadSketchGenerator, setCadSketchGenerator, settleCadDocumentGenerators } from './sketch-generators/cadSketchGeneratorEdits';
 
@@ -36,7 +37,7 @@ export type CadEdit =
   | { readonly kind: 'update-feature'; readonly feature: CadFeature }
   | { readonly kind: 'delete-feature'; readonly featureId: string; readonly cascade: boolean }
   | { readonly kind: 'move-feature'; readonly featureId: string; readonly beforeId: string | null }
-  | { readonly kind: 'set-parameter'; readonly name: string; readonly value: number }
+  | { readonly kind: 'set-parameter'; readonly name: string; readonly value: number; readonly removedRelationIds?: readonly string[] }
   | { readonly kind: 'remove-parameter'; readonly name: string }
   | { readonly kind: 'rename-parameter'; readonly name: string; readonly newName: string }
   | { readonly kind: 'set-parameter-group'; readonly group: CadParameterGroup }
@@ -66,7 +67,7 @@ export type CadEdit =
   | { readonly kind: 'set-sketch-relation'; readonly sketchId: string; readonly relation: CadSketchGraphRelation; readonly copyRelations?: boolean }
   | { readonly kind: 'remove-sketch-relation'; readonly sketchId: string; readonly relationId: string }
   /** Creates a generator, or replaces the inputs of the one with its id; its members regenerate in the same edit. */
-  | { readonly kind: 'set-sketch-generator'; readonly sketchId: string; readonly generator: CadSketchGenerator }
+  | { readonly kind: 'set-sketch-generator'; readonly sketchId: string; readonly generator: CadSketchGenerator; readonly removedRelationIds?: readonly string[] }
   /** Removes a generator and keeps its members as ordinary geometry. */
   | { readonly kind: 'detach-sketch-generator'; readonly sketchId: string; readonly generatorId: string }
   | { readonly kind: 'rename-document'; readonly name: string };
@@ -79,7 +80,7 @@ export const CadEditSchema = Type.Union([
   Type.Object({ kind: Type.Literal('update-feature'), feature: CadFeatureSchema }, strict),
   Type.Object({ kind: Type.Literal('delete-feature'), featureId: identifier, cascade: Type.Boolean() }, strict),
   Type.Object({ kind: Type.Literal('move-feature'), featureId: identifier, beforeId: Type.Union([identifier, Type.Null()]) }, strict),
-  Type.Object({ kind: Type.Literal('set-parameter'), name: parameterName, value: Type.Number({ minimum: -1e9, maximum: 1e9 }) }, strict),
+  Type.Object({ kind: Type.Literal('set-parameter'), name: parameterName, value: Type.Number({ minimum: -1e9, maximum: 1e9 }), removedRelationIds: CadSketchRemovedRelationIdsSchema }, strict),
   Type.Object({ kind: Type.Literal('remove-parameter'), name: parameterName }, strict),
   Type.Object({ kind: Type.Literal('rename-parameter'), name: parameterName, newName: parameterName }, strict),
   Type.Object({ kind: Type.Literal('set-parameter-group'), group: CadParameterGroupSchema }, strict),
@@ -108,12 +109,17 @@ export const CadEditSchema = Type.Union([
   Type.Object({ kind: Type.Literal('set-sketch-relation'), sketchId: identifier, relation: CadSketchGraphSchema.properties.relations.items,
     copyRelations: Type.Optional(Type.Boolean()) }, strict),
   Type.Object({ kind: Type.Literal('remove-sketch-relation'), sketchId: identifier, relationId: identifier }, strict),
-  Type.Object({ kind: Type.Literal('set-sketch-generator'), sketchId: identifier, generator: CadSketchGeneratorSchema }, strict),
+  Type.Object({ kind: Type.Literal('set-sketch-generator'), sketchId: identifier, generator: CadSketchGeneratorSchema, removedRelationIds: CadSketchRemovedRelationIdsSchema }, strict),
   Type.Object({ kind: Type.Literal('detach-sketch-generator'), sketchId: identifier, generatorId: identifier }, strict),
   Type.Object({ kind: Type.Literal('rename-document'), name: Type.String({ minLength: 1, maxLength: 160, pattern: '\\S' }) }, strict)
 ]);
 
 /** Validates the complete final document once; a failed batch never mutates the input. */
+/** The relations `edits` confirm they remove as the generators they change or the parameters they set regenerate members. */
+export function cadEditGeneratorRemovals(edits: readonly CadEdit[]): string[] {
+  return edits.flatMap(edit => edit.kind === 'set-sketch-generator' || edit.kind === 'set-parameter' ? edit.removedRelationIds ?? [] : []);
+}
+
 export function applyCadEdits(document: CadDocument, edits: readonly CadEdit[]): CadDocument {
   return placeCadSketchDimensions(document, edits) ?? parseCadDocument(reduceCadEditIntents(document, edits));
 }
@@ -223,6 +229,8 @@ function refuseGeneratedSketchEdit(features: readonly CadFeature[], edit: CadEdi
 /** Internal unsolved intent stage. Only parseCadDocument may accept its result. */
 export function reduceCadEditIntents(document: CadDocument, edits: readonly CadEdit[]): CadDocument {
   validateCadEditBatch(edits);
+  // The relations the batch confirms it removes as generators regenerate, whichever of its edits regenerates them.
+  const removals = cadSketchGeneratorRemovals(cadEditGeneratorRemovals(edits));
   let features = [...document.features];
   let parameters = { ...document.parameters };
   let parameterGroups = document.parameterGroups ? [...document.parameterGroups] : undefined;
@@ -454,7 +462,7 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
         const index = indexOf(edit.sketchId), feature = features[index];
         if (feature.kind !== 'sketch') throw new CadError('missing-sketch', 'Choose an existing sketch to edit.');
         // Settled at once, so later edits of the batch see the members, and a generator detached in the batch that made it keeps them.
-        const [settled] = settleCadDocumentGenerators([feature], [edit.kind === 'set-sketch-generator' ? setCadSketchGenerator(feature, edit.generator) : feature], parameters);
+        const [settled] = settleCadDocumentGenerators([feature], [edit.kind === 'set-sketch-generator' ? setCadSketchGenerator(feature, edit.generator) : feature], parameters, removals);
         features[index] = edit.kind === 'set-sketch-generator' ? settled : detachCadSketchGenerator(settled as CadSketchFeature, edit.generatorId);
         break;
       }
@@ -482,12 +490,13 @@ export function reduceCadEditIntents(document: CadDocument, edits: readonly CadE
     // same generator again, as moving a shape after setting its inputs does.
     const changed = features.filter(feature => before.get(feature.id) !== feature);
     if (changed.length) {
-      const settled = new Map(settleCadDocumentGenerators([...before.values()], changed, parameters).map(feature => [feature.id, feature]));
+      const settled = new Map(settleCadDocumentGenerators([...before.values()], changed, parameters, removals).map(feature => [feature.id, feature]));
       features = features.map(feature => settled.get(feature.id) ?? feature);
     }
   }
   // Generated geometry follows the edited inputs and parameters in the same step, so one undo restores both.
-  features = settleCadDocumentGenerators(document.features, features, parameters);
+  features = settleCadDocumentGenerators(document.features, features, parameters, removals);
+  assertCadSketchGeneratorRemovals(removals);
   const schemaVersion = features.some(feature => feature.kind === 'sketch' && feature.graph) ? 2 : document.schemaVersion;
   return { ...document, schemaVersion, name, parameters, features, ...(parameterGroups ? { parameterGroups } : {}), ...(parameterMetadata ? { parameterMetadata } : {}) };
 }

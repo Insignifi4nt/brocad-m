@@ -17,8 +17,17 @@ const ref = Type.String({ pattern: CAD_SKETCH_ELEMENT_ID_PATTERN });
  */
 export const CAD_SKETCH_GENERATOR_PREFIX_PATTERN = '^[A-Za-z0-9][A-Za-z0-9-]{0,47}$';
 
+/** The largest entry id of a listed polygon or path. */
+export const CAD_SKETCH_ENTRY_ID_MAX = 999_999;
+/**
+ * A listed polygon's points or path's segments may carry entry ids, one each, which key the members each entry generates in place of
+ * its place in the list: an entry inserted, removed or moved leaves the others their members. Without them an entry's id is its index.
+ */
+const entryIds = Type.Optional(Type.Array(Type.Integer({ minimum: 0, maximum: CAD_SKETCH_ENTRY_ID_MAX }), { uniqueItems: true }));
+const [plugin, rectangle, circle, polygon, path, slot] = CadProfileSchema.anyOf;
+
 export const CadSketchGeneratorGeometrySchema = Type.Union([
-  ...CadProfileSchema.anyOf,
+  plugin, rectangle, circle, Type.Object({ ...polygon.properties, ids: entryIds }, strict), Type.Object({ ...path.properties, ids: entryIds }, strict), slot,
   /**
    * A regular polygon about its centre, with `sides` vertices on the circle of `radius`. Its first vertex lies from the centre along
    * the direction of `directionId`, a line of the sketch or the H or V axis, so the polygon turns with that line.
