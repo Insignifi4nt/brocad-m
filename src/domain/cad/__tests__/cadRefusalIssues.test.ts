@@ -8,6 +8,7 @@ import { cadRefusalAt, cadRefusalMark, cadRefusalSubject } from '../cadRefusalSu
 import { evaluateCadScalar } from '../cadExpression';
 import { createCadDocument, parseCadDocument } from '../cadSchema';
 import { cadFeatureDefinition } from '../features/cadFeatureRegistry';
+import { CadSketchGeneratorRemovalError } from '../sketch-generators/cadSketchGenerators';
 
 const sketch: CadSketchFeature = { id: 'sketch1', name: 'Profile', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
   profiles: [{ id: 'disc', name: 'disc', construction: false, role: 'outer', geometry: { kind: 'circle', x: 0, y: 0, radius: 5 } }] };
@@ -200,6 +201,9 @@ describe('refusals in the CAD issue model', () => {
     expect([(malformed as CadError).code, cadRefusalIssue(malformed)]).toEqual(['invalid-document', null]);
     expect(cadRefusalIssue(new CadError('stale-repair', 'Read the issues again.'))).toBeNull();
     expect(cadRefusalIssue(new CadError('sketch-conflicting', 'Sketch constraints conflict.'))).toBeNull();
+    // A generator edit that would remove relations no one confirmed is a pending confirmation, answered through the paged removal flow.
+    const removal = new CadSketchGeneratorRemovalError([{ relationId: 'tie', name: 'Coincident "tie"', generator: 'Rectangle "g1"', reason: 'Its point is regenerated.', confirmed: false }]);
+    expect([removal.code, cadRefusalIssue(removal)]).toEqual(['unconfirmed-sketch-generator-removals', null]);
     // A section refused outside a CAM or export step is not a feature refusal either.
     expect(cadRefusalIssue(new CadError('empty-section', 'The plane misses the body.'))).toBeNull();
   });

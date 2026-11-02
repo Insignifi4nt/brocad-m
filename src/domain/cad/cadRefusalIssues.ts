@@ -16,7 +16,8 @@ export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf | CadExportIssue
  *   document when it was checking none, with the facts its code carries.
  * Where it was raised is what the steps of the reader's operation recorded (`since`, when the reader marked its start), never a step of
  * an earlier operation that raised the same refusal. Its message is the refusal's own. It has no repairs, since a refused edit was never applied and leaves nothing to repair, and no causes.
- * Null for any other refusal, which its own producer reports (a sketch refusal) or which is no problem of the part (a stale version). A CAM
+ * Null for any other refusal, which its own producer reports (a sketch refusal) or which is no problem of the part: a stale version, or
+ * `unconfirmed-sketch-generator-removals`, a pending confirmation answered through the paged removal flow. A CAM
  * or export step's other failures are no problem of the step or its source either, so they give null too:
  * - `kernel-unavailable`: the kernel could not be loaded, or its worker could not be started or handed the request, failed with an
  *   unexpected error, or sent a reply that could not be read, which fails every request alike;
