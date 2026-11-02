@@ -6,7 +6,7 @@ import type { CadFeatureKind } from '../features/cadFeatureDefinitionTypes';
 import { CAD_FEATURE_SHARED_DIAGNOSTICS, cadFeatureDefinition, cadFeatureKinds } from '../features/cadFeatureRegistry';
 
 const FEATURES = 'src/domain/cad/features/', SCHEMA = 'src/domain/cad/cadSchema.ts', KERNEL = 'src/features/cad/kernel/cadKernelModel.ts';
-const EVIDENCE = 'src/features/cad/kernel/cadKernelCutEvidence.ts';
+const EVIDENCE = 'src/features/cad/kernel/cadKernelCutEvidence.ts', TYPES = 'cadFeatureDefinitionTypes.ts';
 
 /**
  * Functions that evaluate one input feature from its own data: a sketch's contours, solved graph and placement, a curve's geometry and
@@ -89,8 +89,9 @@ beforeAll(() => {
     ...[...walked].some(name => name.startsWith('src/features/cad/kernel/cadKernelPocket.ts:')) ? ['pocket'] : []];
   options = {
     templates: { [`${EVIDENCE}: prefix`]: operations, [`${EVIDENCE}: operation.toLowerCase()`]: operations },
-    // The catalog leads to every kind; the parse's context to every check it offers, which a kind's walk takes one by one.
-    stop: new Set([`${FEATURES}cadFeatureRegistry.ts:catalog`, `${SCHEMA}:context`]),
+    // The catalog leads to every kind, and so does a call of a definition's or a slot's member; the parse's context to every check it
+    // offers. A kind's walk takes them one by one.
+    stop: new Set([`${FEATURES}cadFeatureRegistry.ts:catalog`, `${SCHEMA}:context`, `${FEATURES}${TYPES}:CadFeatureDefinition`, `${FEATURES}${TYPES}:CadFeatureSlot`]),
     receivers: (file, name) => file.startsWith(FEATURES) && name === 'context' ? { file: SCHEMA, node: context } : undefined
   };
 }, 60_000);

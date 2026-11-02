@@ -81,6 +81,30 @@ describe('CAD diagnostic reach', () => {
       .toEqual({ codes: ['missing-point', 'pair-refusal', 'point-refusal'], unexpanded: [] });
   });
 
+  it('follows a method called on another receiver through the receiver\'s type, not its name', () => {
+    // The only method of that name in the source is no method of a platform receiver.
+    expect(reach(`class Timer { abort() { throw new CadError('timer-refusal', ''); } }
+      export function check(controller: AbortController) { new Timer(); controller.abort(); }`)).toEqual({ codes: [], unexpanded: [] });
+    // Another method of the same name hides none of the receiver's, and adds none of its own.
+    expect(reach(`class Timer { start() { throw new CadError('timer-refusal', ''); } }
+      class Motor { start() { throw new CadError('motor-refusal', ''); } }
+      export function check(timer: Timer) { timer.start(); }`)).toEqual({ codes: ['timer-refusal'], unexpanded: [] });
+    expect(reach(`class Timer { start() { throw new CadError('timer-refusal', ''); } }
+      class Countdown extends Timer { override start() { throw new CadError('countdown-refusal', ''); } }
+      export function check(timer: Timer) { timer.start(); }`).codes).toEqual(['countdown-refusal', 'timer-refusal']);
+  });
+
+  it('runs the members of the objects and classes that fit an interface\'s, unless the interface is stopped', () => {
+    const source = `interface Step { run(): void }
+      const STEPS: Step[] = [{ run() { throw new CadError('step-refusal', ''); } }];
+      const later = Object.freeze({ run: () => { throw new CadError('frozen-refusal', ''); } });
+      class Unrelated { run(times: number) { throw new CadError('unrelated-refusal', String(times)); } }
+      export function check(step: Step) { step.run(); }`;
+    expect(reach(source)).toEqual({ codes: ['frozen-refusal', 'step-refusal'], unexpanded: [] });
+    expect(reach(source, { stop: new Set([`${FILE}:Step`]) })).toEqual({ codes: [], unexpanded: [] });
+    expect(reach(source.replace('check(step: Step)', 'check(step: any)')).unexpanded).toEqual([`${FILE}: step.run, a method its receiver's type does not declare`]);
+  });
+
   it('reports what a call returns when it cannot read it', () => {
     const check = `export function check(sketch: { name: string }) {
       const inspection = inspect(sketch);
