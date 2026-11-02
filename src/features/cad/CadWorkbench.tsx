@@ -1602,11 +1602,13 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       setGraphPick(current => current?.dimensions?.some(pick => ids.includes(pick.id)) ? null : current);
       setRelationRowPick(current => current?.relationIds.some(id => ids.includes(id)) ? null : current);
     };
-    // Shapes' rows go as their shapes do, naming first the other shapes that go with them. A selection mixing shapes with other relations
-    // removes exactly what it lists, so it refuses while anything else depends on those shapes.
-    if (ids.every(id => graph.relations.some(relation => relation.id === id && relation.kind === 'generator'))) {
-      deleteFromSketch(() => ids.length === 1 ? prepareCadSketchShapeDeletion(sketch, ids[0])
-        : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [], relationIds: ids, name: `${ids.length} shapes` }), removed, ids.length > 1);
+    // Shapes' rows go as their shapes do, with the relations on their geometry, naming first the other shapes that go with them. Rows that
+    // mix shapes with other relations go together as one exact set, so the order they were selected in never matters.
+    const shapes = ids.filter(id => graph.relations.some(relation => relation.id === id && relation.kind === 'generator'));
+    if (shapes.length) {
+      const others = ids.filter(id => !shapes.includes(id)), named = `${shapes.length} ${shapes.length === 1 ? 'shape' : 'shapes'}`;
+      deleteFromSketch(() => ids.length === 1 ? prepareCadSketchShapeDeletion(sketch, ids[0]) : prepareCadSketchDeletion({ sketch, pointIds: [], entityIds: [],
+        relationIds: ids, name: others.length ? `${named} and ${cadSketchAnnotationCount(graph, others)}` : named }), removed, ids.length > 1);
       return;
     }
     submitEdit(signal => props.onEditMany(ids.map(id => ({ kind: 'remove-sketch-relation' as const, sketchId: sketch.id, relationId: id })), signal), removed, SKETCH_RELATION_FAILURE);

@@ -540,6 +540,54 @@ describe('CAD sketch interaction', () => {
       expect(sketchGraph().relations).toEqual([]); expect(sketchGraph().points.map(point => point.id)).toEqual(['pin']);
     } finally { setCadPreferences({ ...getCadPreferences(), showRelations: true }); }
   });
+  it('deletes a shape and a relation on it selected together in the Relations list as one exact set, whichever row was selected first', async () => {
+    // A hexagon, a free point tied to its first corner and another level with it; with marks hidden all are rows of the Relations list only.
+    const hex = { id: 'hex', kind: 'generator', idPrefix: 'hex', name: 'Hex', construction: false, geometry: { kind: 'regular-polygon', x: 0, y: 0, radius: 10, sides: 6, directionId: '@h' } } as const;
+    const off = { id: 'off', kind: 'generator', idPrefix: 'off', construction: false,
+      geometry: { kind: 'offset', chain: [0, 1, 2, 3, 4, 5].map(index => ({ entityId: `hex_e${index}`, reversed: false })), distance: 2 } } as const;
+    const points = [{ id: 'free', position: [10, 0] }, { id: 'far', position: [30, 0] }] as const;
+    const part = (relations: readonly CadSketchGraphRelation[]) => parseCadDocument({ ...createCadDocument('Nut', 'mixed-delete'), schemaVersion: 2, features: [{ id: 'sketch',
+      kind: 'sketch', name: 'Nut', plane: 'XY', offset: 0, suppressed: false, profiles: [], graph: { points, entities: [], relations } }] });
+    const tie = { id: 'tie', kind: 'coincident', pointIds: ['free', 'hex_v0'] } as const, level = { id: 'level', kind: 'horizontal', pointIds: ['free', 'far'] } as const;
+    const dialog = () => container.querySelector('[role="dialog"]');
+    const row = (id: string) => { const found = container.querySelector<HTMLButtonElement>(`button[data-cad-sketch-relation-row="${id}"]`); if (!found) throw new Error(`${id} row missing.`); return found; };
+    const selectRows = async (first: string, second: string) => {
+      await act(async () => row(first).click());
+      await act(async () => row(second).dispatchEvent(new MouseEvent('click', { button: 0, shiftKey: true, bubbles: true, cancelable: true })));
+      expect([first, second].map(id => row(id).getAttribute('aria-pressed'))).toEqual(['true', 'true']);
+    };
+    const pressDelete = (id: string) => act(async () => { row(id).focus(); row(id).dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true })); });
+    const open = async (initial: CadDocument) => {
+      await mount(initial, { build: null, buildState: 'idle' });
+      await act(async () => viewport().apply({ kind: 'edit-sketch', sketchId: 'sketch' }));
+      const toggle = container.querySelector<HTMLButtonElement>('[data-cad-sketch-relation-list] .cad-sketch-relation-list-toggle');
+      if (toggle?.getAttribute('aria-expanded') === 'false') await act(async () => toggle.click());
+    };
+    await act(async () => setCadPreferences({ ...getCadPreferences(), showRelations: false }));
+    try {
+      // The shape and the tie on it go together at once, in either order, keeping the points and the level, and one Undo restores the part.
+      const initial = part([hex, tie, level]);
+      await open(initial);
+      for (const [first, second] of [['hex', 'tie'], ['tie', 'hex']]) {
+        await selectRows(first, second); await pressDelete(second);
+        expect(dialog()).toBeNull(); expect(container.querySelector('[role="alert"]')).toBeNull();
+        expect(sketchGraph()).toEqual({ points, entities: [], relations: [level] });
+        await act(async () => currentSession.undo()); expect(currentDocument).toEqual(initial);
+      }
+      // With a relation elsewhere selected too, an offset made from the hexagon is outside the selection, so it is named first, in either
+      // order; Cancel keeps everything, and Delete takes the shape, the tie on it, the level and the offset in one undo step.
+      const offset = part([hex, tie, level, off]);
+      await open(offset);
+      for (const [first, second] of [['hex', 'level'], ['level', 'hex']]) {
+        await selectRows(first, second); await pressDelete(second);
+        expect(dialog()?.textContent).toBe('Delete 1 shape and 1 relation?This also removes the shape Offset "off" made from them.Cancel Delete');
+        await click('Cancel'); expect(currentDocument).toBe(offset);
+      }
+      await pressDelete('hex'); await click('Delete');
+      expect(sketchGraph()).toEqual({ points, entities: [], relations: [] });
+      await act(async () => currentSession.undo()); expect(currentDocument).toEqual(offset);
+    } finally { setCadPreferences({ ...getCadPreferences(), showRelations: true }); }
+  });
   it('asks before geometry Delete removes a shape made from what it deletes, naming it for all the items it deletes', async () => {
     // A circle, a free point tied level with its centre, and an offset made from the circle.
     const rim = { id: 'rim', kind: 'generator', idPrefix: 'rim', construction: false, geometry: { kind: 'offset', chain: [{ entityId: 'c', reversed: false }], distance: 2 } } as const;
