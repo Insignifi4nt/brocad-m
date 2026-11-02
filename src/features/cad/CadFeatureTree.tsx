@@ -1,15 +1,16 @@
-import { readableMessage } from '@/lib/userMessage';
 import { cadFeatureActive, cadFeatureSuppressionFlag } from '@/domain/cad/features/cadFeatureActivity';
 import { Tooltip } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
-import { AdjustIcon, BooleanIcon, ChamferIcon, CircleIcon, CircularPatternIcon, ClosedPathIcon, CurveIcon, DatumPlaneIcon, ExpandRightIcon, FileBodyIcon, FilletIcon, ImportedBodyIcon, LayersIcon, LinearPatternIcon, LinkIcon, LoftIcon, MirrorIcon, Move3dIcon, PadIcon, PluginIcon, PocketIcon, RectangleIcon, RevolveIcon, ShellIcon, SketchIcon, SlotIcon, SweepIcon, WarningIcon, type WorkbenchIconComponent } from '@wire-edm/icons-react';
-import type { CadBuildResult, CadCurveFeature, CadDocument, CadFeature, CadPlane, CadSketchFeature, CadSketchPlane, CadSketchProfile } from '@/domain/cad/cadDocument';
+import { AdjustIcon, BooleanIcon, ChamferIcon, CircleIcon, CircularPatternIcon, ClosedPathIcon, CurveIcon, DatumPlaneIcon, ExpandRightIcon, FileBodyIcon, FilletIcon, ImportedBodyIcon, LayersIcon, LinearPatternIcon, LinkIcon, LoftIcon, MirrorIcon, Move3dIcon, PadIcon, PluginIcon, PocketIcon, RectangleIcon, RevolveIcon, ShellIcon, SketchIcon, SlotIcon, SweepIcon, InfoIcon, WarningIcon, type WorkbenchIconComponent } from '@wire-edm/icons-react';
+import { NO_CAD_BUILD_ISSUES, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
+import type { CadCurveFeature, CadDocument, CadFeature, CadPlane, CadSketchFeature, CadSketchPlane, CadSketchProfile } from '@/domain/cad/cadDocument';
 import { cadFeatureDependencies } from '@/domain/cad/cadFeatureInputs';
 import { featureLabels } from './CadFeatureEditor';
 import { CadContextMenu, type CadContextMenuAnchor, type CadContextMenuItem } from './CadContextMenu';
 import { CadTreeRename } from './CadTreeRename';
 import { cadFeatureTreeRelationships } from './cadFeatureTreeModel';
+import { cadIssueRowText } from './cadIssuePresentation';
 import type { CadEditCompletion } from './useCadEditSubmission';
 import './cad-feature-tree.css';
 
@@ -25,7 +26,8 @@ type TreeTarget = { kind: 'feature'; featureId: string } | { kind: 'profile'; fe
 type TreeBranch = 'part' | 'model' | 'reference' | 'parameters';
 export interface CadFeatureTreeProps {
   document: CadDocument;
-  diagnostics?: CadBuildResult['diagnostics'];
+  /** The issues of the shown build: a feature that failed is marked as an error, one an input keeps from evaluating as blocked. */
+  issues?: CadBuildIssues;
   selectedId: string | null;
   selectedProfileId: string | null;
   locked: boolean;
@@ -76,7 +78,7 @@ export interface CadFeatureTreeProps {
 }
 
 /** One ordered model history, with links taken from the same reference model as rebuild. */
-export function CadFeatureTree({ document, diagnostics = [], selectedId, selectedProfileId, locked, selectionOnly = false, highlightedFeatureIds = [], onSelect, onConfigure, onEditSketch, onEditCurve, onSelectProfile,
+export function CadFeatureTree({ document, issues = NO_CAD_BUILD_ISSUES, selectedId, selectedProfileId, locked, selectionOnly = false, highlightedFeatureIds = [], onSelect, onConfigure, onEditSketch, onEditCurve, onSelectProfile,
   selectableFeatureIds, allowPrincipalPlaneSelection = false, onSuppress, onProperties, onChangeSketchPlane, onDelete, onUpdateProfile, onDeleteProfile, onCopyProfile, onContextMenuOpenChange, onRename, onRenamePendingChange, cancelSignal = 0, onCreateSketch, sketchContent, selectedReferencePlane, onSelectReferencePlane, hoveredReferencePlane = null, onHoverReferencePlane, onSectionView, parameterContent, parameterMenu }: CadFeatureTreeProps) {
 
   const treeId = useId();
@@ -217,19 +219,20 @@ export function CadFeatureTree({ document, diagnostics = [], selectedId, selecte
     const content = sketchContent?.sketchId === feature.id ? sketchContent.content : null;
     const expandable = nested.length > 0 || shared.length > 0 || missing.length > 0 || profiles.length > 0 || content !== null;
     const open = expanded.has(feature.id), detailsId = `${treeId}-${position}`;
-    const diagnostic = diagnostics.find(diagnostic => diagnostic.featureId === feature.id);
+    const issue = issues.byFeature.get(feature.id), issueText = issue ? cadIssueRowText(issue, issues.items, document) : null;
+    const failed = issue?.state === 'failed', blocked = issue?.state === 'blocked';
     const datumPlane = feature.kind === 'datum-plane', planeHovered = datumPlane && typeof hoveredReferencePlane === 'object' && hoveredReferencePlane?.featureId === feature.id;
     return <li key={feature.id} className={`cad-feature-node${highlightedFeatureIds.includes(feature.id) ? ' is-parameter-related' : ''}`} data-cad-feature-id={feature.id} data-cad-history-position={position}>
       <div className="cad-feature-history-row">
         {expandable ? <Button type="button" className="cad-feature-disclosure" disabled={locked || Boolean(renameCurrent)} aria-label={`${open ? 'Collapse' : 'Expand'} ${feature.name}`} aria-expanded={open} aria-controls={open ? detailsId : undefined} onClick={() => toggle(feature.id)}><ExpandRightIcon size={12} /></Button>
           : <span className="cad-feature-disclosure-placeholder" aria-hidden="true" />}
-        {renameCurrent?.target.kind === 'feature' && renameCurrent.target.featureId === feature.id ? renameEditor(feature) : <Button type="button" className={`cad-tree-row${profileSelected ? ' is-context' : selected ? ' is-selected' : ''}${planeHovered ? ' is-hovered' : ''}${!cadFeatureActive(feature, document) ? ' is-suppressed' : ''}${diagnostic ? ' has-error' : ''}`} disabled={selectionDisabled(feature.id)}
+        {renameCurrent?.target.kind === 'feature' && renameCurrent.target.featureId === feature.id ? renameEditor(feature) : <Button type="button" className={`cad-tree-row${profileSelected ? ' is-context' : selected ? ' is-selected' : ''}${planeHovered ? ' is-hovered' : ''}${!cadFeatureActive(feature, document) ? ' is-suppressed' : ''}${failed ? ' has-error' : blocked ? ' is-blocked' : ''}`} disabled={selectionDisabled(feature.id)}
           onPointerEnter={datumPlane && cadFeatureActive(feature, document) ? () => onHoverReferencePlane?.({ kind: 'datum-plane', featureId: feature.id }) : undefined} onPointerLeave={datumPlane ? () => onHoverReferencePlane?.(null) : undefined}
-          aria-label={`Select ${feature.name} in history`} aria-pressed={selected && !profileSelected} title={`${featureLabels[feature.kind]} · ${feature.name}${diagnostic ? ` · ${readableMessage(diagnostic.message)}` : ''}`}
+          aria-label={`Select ${feature.name} in history`} aria-pressed={selected && !profileSelected} title={`${featureLabels[feature.kind]} · ${feature.name}${issueText ? ` · ${issueText}` : ''}`}
           onContextMenu={event => openMenu(event, feature.id)} onKeyDown={event => openMenu(event, feature.id)}
           onClick={() => onSelect(feature.id)} onDoubleClick={() => { if (selectionOnly) return; if (feature.kind === 'sketch') onEditSketch(feature); else if (feature.kind === 'curve') onEditCurve(feature); else onConfigure?.(feature); }}>
           <Icon size={14} /><span className="cad-feature-name">{feature.name}</span>
-          {diagnostic && <span className="cad-tree-error" aria-label={readableMessage(diagnostic.message)}><WarningIcon size={12} /></span>}{!cadFeatureActive(feature, document) && <span className="cad-tree-muted">off</span>}
+          {failed && <span className="cad-tree-error" aria-label={issueText!} data-cad-issue-code={issue.code}><WarningIcon size={12} /></span>}{blocked && <span className="cad-tree-blocked" aria-label={issueText!} data-cad-issue-code={issue.code}><InfoIcon size={12} /></span>}{!cadFeatureActive(feature, document) && <span className="cad-tree-muted">off</span>}
         </Button>}
       </div>
       {expandable && open && <div id={detailsId} className="cad-feature-details">

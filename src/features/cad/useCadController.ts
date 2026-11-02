@@ -5,6 +5,7 @@ import type { useWorkbenchAppController } from '@/app/useWorkbenchAppController'
 import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { cadFeatureProducesBody, createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
 import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
+import { cadBuildIssues, NO_CAD_BUILD_ISSUES, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { archiveCadDocument, listCadDocuments, loadCadDocument, renameCadDocument, restoreCadDocument, saveCadDocument, type CadLibraryEntry } from '@/domain/cad/cadStorage';
 import { readExactUtf8Blob } from '@/domain/storage/exactTextStream';
 import { applyCadEdits, validateCadEditBatch, type CadEdit } from '@/domain/cad/cadOperations';
@@ -62,6 +63,8 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   useCadUnloadGuard(session);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const [build, setBuild] = useState<CadBuildResult | null>(null);
+  /** The issues of each published build, made once as it is published: never while a feature is hovered, dragged or previewed. */
+  const buildIssues = useRef(new WeakMap<CadBuildResult, CadBuildIssues>());
   const [buildVersion, setBuildVersion] = useState<string | null>(null);
   const [buildState, setBuildState] = useState<'idle' | 'building' | 'ready' | 'error'>('idle');
   const [featurePreview, setFeaturePreview] = useState<CadFeaturePreviewState>({ kind: 'idle' });
@@ -159,8 +162,9 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     }
     return inspection;
   }
-  function publishBuild(result: CadBuildResult, version: string) {
+  function publishBuild(result: CadBuildResult, version: string, document: CadDocument) {
     const state = result.diagnostics.length ? 'error' : 'ready';
+    buildIssues.current.set(result, cadBuildIssues(document, result, version, import.meta.env.DEV));
     liveBuild.current = { result, version, state };
     setErrorMessage(null);
     setBuild(result); setBuildVersion(version); setBuildState(state);
@@ -205,7 +209,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const timer = setTimeout(() => {
       void getKernel().then(client => client.build(snapshot.document, controller.signal)).then(result => {
         if (controller.signal.aborted || session.getSnapshot().version !== snapshot.version) return;
-        publishBuild(result, snapshot.version);
+        publishBuild(result, snapshot.version, snapshot.document);
       }).catch((error: unknown) => {
         if (controller.signal.aborted) return;
         setBuildState('error'); setErrorMessage(userFacingMessage(error, 'CAD kernel could not build this model.'));
@@ -700,7 +704,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     const document = session.getSnapshot().document;
     const result = await (await getKernel()).build(document, signal);
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed();
-    publishBuild(result, expectedVersion);
+    publishBuild(result, expectedVersion, document);
     return result;
   }
   const topology = createCadTopologyActions({
@@ -839,7 +843,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
     openDocument, newDocument, importDocument, importDocumentValue, importSolidSource, importDxfSource, importDxfCurveSource, importFile, confirmImport, cancelImport, measureSketch, inspectSketchConstraints, inspectSketchHandles, measureCurve, inspectSketchRegions, readSketchRegionReference, inspectPlugin, inspectParameters, inspectPlane, inspectLoft, inspectSweep, exportDocument, exportSolid, exportDxf, exportCurveDxf, exportSectionDxf, inspectBuild, inspectSection, sendSectionToCam, sendToCam, back,
     setViewportControls, readViewport: (expectedVersion: string) => getViewport(expectedVersion).getState(), changeViewport, captureViewport, previewArtifact,
     inspectTopology, resolveTopologyPicks, topologyAdjacency, topologyTangentChain, buildFeatureInput: featureInputCoordinator.build, releaseFeatureInput,
-    build, buildVersion, buildState, featurePreview, previewFeature: featurePreviewCoordinator.update, errorMessage, setErrorMessage, storageBusy, isBusy, isOpen: () => current.current.open,
+    build, buildVersion, buildState, buildIssues: (build && buildIssues.current.get(build)) ?? NO_CAD_BUILD_ISSUES, buildIssuesOf: (result: CadBuildResult) => buildIssues.current.get(result) ?? NO_CAD_BUILD_ISSUES, featurePreview, previewFeature: featurePreviewCoordinator.update, errorMessage, setErrorMessage, storageBusy, isBusy, isOpen: () => current.current.open,
     undo: (expected?: string) => { editable(expected); session.undo(expected); },
     redo: (expected?: string) => { editable(expected); session.redo(expected); }
   };

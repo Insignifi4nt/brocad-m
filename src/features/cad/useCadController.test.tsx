@@ -542,6 +542,7 @@ describe('CAD controller asynchronous guards', () => {
     const h = await harness(true), acceptedBuild: CadBuildResult = { buildId: 'accepted-build', meshes: [], diagnostics: [], durationMs: 1 };
     kernel.build.mockResolvedValue(acceptedBuild);
     await act(async () => { await h.cad().inspectBuild(); });
+    const acceptedIssues = h.cad().buildIssues;
     const before = h.session.getSnapshot(), pending = deferred<CadBuildResult>(), previewClient = { build: vi.fn(() => pending.promise), dispose: vi.fn() };
     createClient.mockReturnValueOnce(previewClient);
     await act(async () => {
@@ -554,9 +555,27 @@ describe('CAD controller asynchronous guards', () => {
     await act(async () => { pending.resolve({ buildId: 'candidate-build', meshes: [], diagnostics: [], durationMs: 1 }); });
     expect(h.cad().featurePreview).toMatchObject({ kind: 'ready', result: { buildId: 'candidate-build' } });
     expect(h.cad().build).toBe(acceptedBuild); expect(h.cad().buildVersion).toBe(before.version);
+    // A preview makes no issues: those shown stay the accepted build's.
+    expect(h.cad().buildIssues).toBe(acceptedIssues);
     await act(async () => { h.cad().previewFeature({ kind: 'clear', owner: 'pad-editor' }); h.session.setWorkflowOpen(false, 'editor'); });
     expect(previewClient.dispose).toHaveBeenCalledOnce(); expect(kernel.dispose).not.toHaveBeenCalled();
     expect(h.cad().featurePreview).toEqual({ kind: 'idle' }); expect(h.cad().build).toBe(acceptedBuild); expect(h.session.getSnapshot()).toEqual(before); expect(h.session.getSnapshot().document).toBe(before.document);
+  });
+  it('makes the issues of a build once, as it is published, prepared at its version', async () => {
+    const h = await harness(true);
+    kernel.build.mockImplementation(async (): Promise<CadBuildResult> => ({ buildId: 'failed', meshes: [], durationMs: 1,
+      diagnostics: [{ code: 'kernel-operation-failed', featureId: 'pad', message: 'The extrusion failed.' }] }));
+    await act(async () => h.session.edit([{ kind: 'add-feature', feature: { kind: 'extrude', id: 'pad', name: 'Pad', suppressed: false, sketchId: 'sketch', distance: 10, symmetric: false, operation: 'new', targetId: null } }]));
+    const version = h.session.getSnapshot().version;
+    await act(async () => { await h.cad().inspectBuild(); });
+    expect(h.cad().buildVersion).toBe(version);
+    const issues = h.cad().buildIssues;
+    expect(issues.items.map(issue => [issue.code, issue.state, issue.subject, issue.repairs.map(repair => [repair.id, repair.preparedAt])])).toEqual([
+      ['kernel-operation-failed', 'failed', { kind: 'feature', featureId: 'pad' }, [['command:edit-feature:pad', version]]]]);
+    expect(issues.byFeature.get('pad')).toBe(issues.items[0]);
+    // Rendering again makes no new issues.
+    await act(async () => { h.session.setWorkflowOpen(true, 'editor'); }); await act(async () => { h.session.setWorkflowOpen(false, 'editor'); });
+    expect(h.cad().buildIssues).toBe(issues);
   });
   it('borrows a consumed feature input through the controller without replacing the accepted build or granting tools editor access', async () => {
     const h = await harness(true);

@@ -24,7 +24,7 @@ CAD and CAM are separate documents with separate draft versions. Begin with `cad
 
 | Tool | Purpose |
 | --- | --- |
-| `cad_get_context` | Draft version, exact parameter/group summaries with omission counts, saved version, pending workflow and build diagnostics |
+| `cad_get_context` | Draft version, exact parameter/group summaries with omission counts, saved version, pending workflow, build diagnostics and issues |
 | `cad_describe_features` | Compact feature catalog or one exact accepted feature schema |
 | `cad_describe_edits` | Draft edit catalog or one operation's strict fields, without mutation |
 | `cad_describe_plugin_api` | Compact plugin API catalog or one complete strict package schema |
@@ -49,7 +49,7 @@ CAD and CAM are separate documents with separate draft versions. Begin with `cad
 | `cad_history` | Undo/redo using the current expected version |
 | `cad_get_viewport`, `cad_set_viewport` | Inspect selection and displayed build, page complete visible IDs; set named views, fit/grid, select features and enter/finish sketches |
 | `cad_capture_preview` | Actual 2D/3D draft pixels as a bounded local PNG artifact with version, view and SHA-256 |
-| `cad_build` | Real solid evaluation: body volumes in mm³, bounds in mm, native solid counts and feature errors |
+| `cad_build` | Real solid evaluation: body volumes in mm³, bounds in mm, native solid counts, feature errors and issues |
 | `cad_build_feature_input` | Read-only body before an existing Fillet, Chamfer or Shell, for replacing selected edges or an opening |
 | `cad_inspect_topology` | Paginated exact face/edge geometry pinned to a successful build |
 | `cad_resolve_topology` | Convert current picks into strict geometric selectors for fillet, chamfer or inward shell |
@@ -403,6 +403,12 @@ For a tilted bend, create two world datums with the same origin and rotation: an
 Discover `sweep`, then add `{ "id": "bend", "name": "Bend", "kind": "sweep", "suppressed": false, "sketchId": "section", "curveId": "rail", "operation": "new", "targetId": null }` through `cad_edit_document`. The section needs one active material boundary without holes; the open planar rail needs tangent-connected analytic lines/arcs. No source is automatically moved, reversed or repaired. Exact extrusions and revolutions preserve authored placement and fixed-binormal transport. The enclosing-disk clearance check is conservative, and precision uncertainty fails explicitly. Sweep supports 1–64 rail segments and at most 2,048 section-edge/rail-segment products; sharp reference curves remain usable independently. `join` and `cut` require a current target body, while both section and Curve remain references. Build, inspect diagnostics and verify the final-solid section before export or CAM handoff.
 
 Use `cad_import_curve_dxf` for one complete open planar DXF chain and `cad_export_curve_dxf` with its `curveId` for a local 2D millimetre download. Open LWPOLYLINE export preserves traversal and circular arcs using signed bulges; CAD JSON additionally preserves plane, offset, expressions and original source. Closed/mixed/branching input, unsupported entities, nonzero widths and uncertain arc reconstruction fail. Import has the same source-unit, cancellation, unsaved-draft and workflow guards as sketch DXF. A very long malformed unit declaration is shortened only in the operation receipt, with `rawValueTruncated` and original `rawValueLength`; embedded original text remains exact.
+
+### Build issues
+
+`cad_get_context` and `cad_build` also return `issues`: the problems the workbench lists for that build, bounded for a reply. `issues.items` holds at most 10 issues, failures first. Each has a `key`, a `namespace` (`kernel`, `feature` or `body`), `code`, `severity`, `state` (`failed`, or `blocked` when it follows from another failure), a `subject`, a summarized `message`, `causes` (the keys of the issues it follows from), typed `details` and the `repairs` the workbench offers (`id`, `kind`, `label`). A subject is a `feature`, a `reference-slot` (the feature, the `field` naming the input and its `inputId`), a `body` (its `key` and the `featureId` that reported it) or the `document`. Body warnings, such as pieces a rebuild could not trace, are listed with their body key. Features that were not evaluated because an input failed are not listed one by one: `issues.blocked` gives, for each listed cause, how many features it blocks and the first eight IDs. `omitted` and `omittedBlocked` count what the reply leaves out. The kernel's own text stays in `diagnostics[].details.kernelMessage` and is not repeated in an issue.
+
+A refused edit or CAM step that concerns a feature, one of its input slots or a CAM operation also returns `error.details.issue` in the same shape, with the refusal's own code and message. Other refusals, such as a stale version, keep their usual error.
 
 ## CAD plugin profiles
 

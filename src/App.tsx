@@ -128,7 +128,7 @@ function WorkbenchApp({ services }: AppProps) {
           onFailure={() => { cad.cancelImport(); closeCadSection(); closeCadDxfExport(); }}>
         <Suspense fallback={<p className="p-4 text-xs" role="status">Opening CAD workspace…</p>}>
           <CadWorkbench
-            document={cad.sketchEditing.snapshot.document} documentVersion={cad.sketchEditing.snapshot.version} build={cad.build} buildVersion={cad.buildVersion} buildState={cad.buildState}
+            document={cad.sketchEditing.snapshot.document} documentVersion={cad.sketchEditing.snapshot.version} build={cad.build} buildVersion={cad.buildVersion} buildState={cad.buildState} buildIssues={cad.buildIssues}
             featurePreview={cad.featurePreview} onFeaturePreview={cad.sketchEditing.sketchId ? undefined : cad.previewFeature}
             dirty={cad.sketchEditing.snapshot.dirty} canUndo={cad.sketchEditing.snapshot.canUndo} canRedo={cad.sketchEditing.snapshot.canRedo}
             errorMessage={cad.errorMessage} onStatusMessage={app.showStatusToast} storageBusy={cad.storageBusy || app.workbenchInteractionLocked}

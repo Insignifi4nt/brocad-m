@@ -63,6 +63,8 @@ interface CadFeatureEditorProps {
   previewEnabled?: boolean;
   onReferencePick?(command: CadFeatureReferencePickCommand): void;
   topologyPickingEnabled?: boolean;
+  /** Moves focus to the choice of edges or opening as it is asked for, by a repair that has them chosen again. */
+  focusTopologyPick?: boolean;
   onDepthInteractionReady?(control: CadExtrudeDepthControl | null, released?: CadExtrudeDepthControl): void;
 }
 
@@ -73,7 +75,7 @@ export function CadFeatureEditor(props: CadFeatureEditorProps) {
   return <CadFeatureEditorForm key={`${props.feature.id}/${props.feature.kind}`} {...props} />;
 }
 
-function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onPendingChange, currentBodyIds, documentVersion, onFeaturePreview, featurePreview, previewEnabled = true, onReferencePick, topologyPickingEnabled = false, onDepthInteractionReady }: CadFeatureEditorProps) {
+function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onPendingChange, currentBodyIds, documentVersion, onFeaturePreview, featurePreview, previewEnabled = true, onReferencePick, topologyPickingEnabled = false, focusTopologyPick = false, onDepthInteractionReady }: CadFeatureEditorProps) {
   const submission = useCadEditSubmission();
   const cancel = () => { submission.cancel(); onCancel(); };
   const previewOwner = useId(), previewCallback = useRef(onFeaturePreview);
@@ -87,6 +89,8 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
   const staleDraft = accepted.version !== documentVersion;
   const draftSource = useRef(feature);
   const pickerCallback = useRef(onReferencePick); pickerCallback.current = onReferencePick;
+  const topologyPickButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (focusTopologyPick) topologyPickButton.current?.focus(); }, [focusTopologyPick]);
   const [picker, setPicker] = useState<Exclude<CadFeatureReferencePickCommand, { kind: 'clear' }> | null>(null);
   const pickCurrent = picker?.expectedVersion === documentVersion ? picker : null;
   const pickToken = useRef<symbol | null>(null);
@@ -263,7 +267,7 @@ function CadFeatureEditorForm({ feature, document, isNew, onApply, onCancel, onP
     return <SelectField reference label={label} value={value} options={options} onChange={onChange} />;
   };
   const topologyPicker = (target: Extract<CadFeature, { kind: 'fillet' | 'chamfer' | 'shell' }>) => !isNew && topologyPickingEnabled && onReferencePick && documentVersion
-    ? <div className="cad-context-actions"><Button type="button" disabled={staleDraft || scalarPending || submission.applying || !visibleIds.includes(target.targetId)} onClick={() => {
+    ? <div className="cad-context-actions"><Button ref={topologyPickButton} type="button" data-cad-topology-pick={target.kind === 'shell' ? 'opening' : 'selection'} disabled={staleDraft || scalarPending || submission.applying || !visibleIds.includes(target.targetId)} onClick={() => {
       if (pickToken.current || depthGestureActive) return;
       const token = Symbol('topology-pick'); pickToken.current = token;
       pickerFocus.current = window.document.activeElement instanceof HTMLElement ? window.document.activeElement : null;

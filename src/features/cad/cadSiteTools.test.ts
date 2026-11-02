@@ -8,6 +8,7 @@ import { CadToolEditDefinitions, CadToolEditEnvelope } from './cadToolSchemas';
 import { cadSiteTools } from './cadSiteTools';
 import type { CadController } from './useCadController';
 import type { CadBuildResult } from '@/domain/cad/cadDocument';
+import { NO_CAD_BUILD_ISSUES } from '@/domain/cad/cadBuildIssues';
 import { refs as regionRefs, pad as regionPad, pocket as regionPocket, sketch as regionSketch } from '@/domain/cad/__tests__/cadSketchRegionFixtures';
 import { CadSketchSplitDependencyError } from '@/domain/cad/cadSketchSplit';
 import { CadSketchTrimDependencyError, CadSketchExtendDependencyError } from '@/domain/cad/cadSketchTrimExtend';
@@ -62,7 +63,7 @@ describe('CAD tool argument boundary and discovery', () => {
     const session = new CadSession(parseCadDocument({ ...createCadDocument(), schemaVersion: 2, features: [{ id: 'sketch', kind: 'sketch', name: 'Bar', suppressed: false, plane: 'XY', offset: 0, profiles: [], graph: {
       points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }], entities: [{ id: 'bar', kind: 'line', startPointId: 'a', endPointId: 'b', construction: false }], relations: [] } }] }));
     const edits = vi.fn((edits: Parameters<CadSession['edit']>[0], version?: string) => session.edit(edits, version));
-    const controller = { session, edit: edits, isOpen: () => true, isBusy: () => false, buildState: 'idle', buildVersion: null, build: null } as unknown as CadController;
+    const controller = { session, edit: edits, isOpen: () => true, isBusy: () => false, buildState: 'idle', buildVersion: null, build: null, buildIssues: NO_CAD_BUILD_ISSUES } as unknown as CadController;
     const tools = cadSiteTools(() => controller), edit = tools.find(tool => tool.name === 'cad_edit_document'), read = tools.find(tool => tool.name === 'cad_get_feature');
     if (!edit || !read) throw new Error('Edit or read tool missing.');
     const width = { id: 'width', kind: 'distance', pointIds: ['a', 'b'], value: 10 };
@@ -85,7 +86,7 @@ describe('CAD tool argument boundary and discovery', () => {
     const warning = (at: number) => ({ code: 'mirror-shrank', relationId: `mirror-${at}`, curves: [{ entityId: 'copy', beforeMm: 10, afterMm: 1e-6 }],
       message: 'Symmetric shrank Line 2 from 10.000 mm to 0.000001 mm. Check the mirror and its relations.', sketchId: 'sketch', sketchName: 'Sketch' });
     let given: readonly ReturnType<typeof warning>[] = [];
-    const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'idle', buildVersion: null, build: null,
+    const controller = { session, isOpen: () => true, isBusy: () => false, buildState: 'idle', buildVersion: null, build: null, buildIssues: NO_CAD_BUILD_ISSUES,
       edit: (edits: Parameters<CadSession['edit']>[0], version: string | undefined, _fromAgent: boolean, _signal: AbortSignal | undefined, warned?: (warnings: readonly unknown[]) => void) => {
         const accepted = session.edit(edits, version); warned?.(given); return accepted;
       } } as unknown as CadController;
@@ -357,7 +358,7 @@ describe('CAD tool argument boundary and discovery', () => {
     const mesh = { featureId: 'joined', name: 'Joined', positions: [0, 0, 0, 1, 0, 0, 0, 1, 0], normals: [0, 0, 1, 0, 0, 1, 0, 0, 1], indices: [0, 1, 2], edges: [],
       faceGroups: [{ start: 0, count: 3, key: 'face' }], edgeGroups: [], volume: 8064, bounds: { min: [0, 0, 0] as const, max: [24, 20, 20] as const } };
     const build: CadBuildResult = { buildId: 'accepted_join', meshes: [{ ...mesh, solidCount: 2 }, { ...mesh, featureId: 'older', name: 'Older body', volume: 64 }], diagnostics: [], durationMs: 1 };
-    const inspectBuild = vi.fn(async () => build), tool = cadSiteTools(() => ({ inspectBuild }) as unknown as CadController).find(entry => entry.name === 'cad_build');
+    const inspectBuild = vi.fn(async () => build), tool = cadSiteTools(() => ({ inspectBuild, buildIssuesOf: () => NO_CAD_BUILD_ISSUES }) as unknown as CadController).find(entry => entry.name === 'cad_build');
     if (!tool) throw new Error('Missing build tool');
     expect(await tool.execute({ expectedVersion: 'accepted', offset: 0, limit: 1 })).toMatchObject({ ok: true, data: {
       version: 'accepted', buildId: 'accepted_join', totalBodies: 2, nextBodyOffset: 1,

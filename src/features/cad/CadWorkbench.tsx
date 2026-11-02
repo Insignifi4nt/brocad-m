@@ -13,6 +13,8 @@ import { createCadPathDraftGraph } from './cadPathDraftGraph';
 import { inspectCadSketchCornerTarget } from '@/domain/cad/cadSketchCornerTreatment';
 import { cadPathDraftInferences, type CadPathDraft } from './cadPathDrawing';
 import { CadSketchContextHeader } from './CadSketchContextHeader';
+import { CadModelIssueList } from './CadModelIssueList';
+import { NO_CAD_BUILD_ISSUES, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { CadSketchDimensionValueEditor, isCadSketchValueRelation } from './CadSketchDimensionValueEditor';
 import { CadSketchCornerEditor, CadSketchMoveEditor } from './CadSketchGeometryEditors';
 import { CadSketchSelectionInspector } from './CadSketchSelectionInspector';
@@ -173,6 +175,8 @@ export interface CadWorkbenchProps extends CadPluginCommands {
   buildVersion: string | null;
   build: CadBuildResult | null;
   buildState: 'idle' | 'building' | 'ready' | 'error';
+  /** The issues of `build`, made once as it was published. */
+  buildIssues?: CadBuildIssues;
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -299,6 +303,9 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Selecting keeps a feature highlighted; only an explicit open shows its editor. */
   const [openFeatureId, setOpenFeatureId] = useState<string | null>(null);
+  // The feature whose editor a repair opened to choose its edges or opening again, until that editor closes.
+  const [repickFeatureId, setRepickFeatureId] = useState<string | null>(null);
+  useEffect(() => { if (openFeatureId !== repickFeatureId) setRepickFeatureId(null); }, [openFeatureId, repickFeatureId]);
   /** A selected origin plane, origin axis or the origin point; a datum plane is selected as its feature. */
   const [planeSelection, setPlaneSelection] = useState<{ documentId: string; plane?: CadSketchPlane; origin?: CadOriginSelection } | null>(null);
   // Pointer hover over a plane in either the tree or the design area; both views show it.
@@ -2082,6 +2089,22 @@ export function CadWorkbench(props: CadWorkbenchProps) {
     catch (cause) { setError(userFacingMessage(cause, 'The repair could not be applied.')); return; }
     if (prepared.kind === 'edit') applySketchEdits(prepared.edits);
   };
+  /**
+   * A repair a model issue offers: choosing a feature's edges or opening again opens its editor at that choice, editing it opens it as a
+   * double-click does, and an edit is applied. One prepared for an earlier version of the part is refused.
+   */
+  const repairModelIssue = (repair: CadIssueRepair) => {
+    if (interactionState.current.locked || props.sketchEdit) return;
+    let prepared: CadIssueRepair;
+    try { prepared = preparedCadIssueRepair(repair, props.documentVersion); }
+    catch (cause) { setError(userFacingMessage(cause, 'The repair could not be applied.')); return; }
+    if (prepared.kind === 'edit') { const edits = prepared.edits; submitEdit(signal => props.onEditMany(edits, signal)); return; }
+    const feature = document.features.find(entry => entry.id === prepared.featureId);
+    if (!feature) return;
+    if (prepared.kind === 're-pick') { setRepickFeatureId(feature.id); openFeatureEditor(feature); } else configureFeature(feature);
+  };
+  const modelRepairsLocked = props.sketchEdit ? 'Finish or cancel the sketch edit before repairing the model.' : locked ? 'Finish the current operation before repairing the model.'
+    : props.buildVersion !== props.documentVersion ? 'Repairs wait for the rebuild of this version.' : null;
   /** Inspecting an issue of a relation the canvas does not draw opens its row too, the one place it can be selected or deleted. */
   const inspectHeaderIssue = (issue: CadSketchIssue | null) => {
     inspectIssue(issue);
@@ -2099,7 +2122,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
   const valueEditor = valueEditorCurrent && valueCommand && valueRelation && sketch?.graph ? <CadSketchDimensionValueEditor key={valueCommand.token} document={document} sketch={sketch} graph={sketch.graph}
     relationId={valueRelation.id} findAnchor={findValueAnchor} onEditMany={props.onEditMany} onPrepareEdits={props.onPrepareEdits} onPendingChange={setEditorPending}
     onPreviewDocument={publishSketchPreview} onFeedback={reportEditFeedback} interactionLocked={sketchCommandLocked} onClose={closeValueEditor} onAccepted={closeValueEditor} /> : null;
-  const specificationTree = <CadFeatureTree sketchContent={sketchRelationContent} onSectionView={sketch || curve ? undefined : plane => setSectionView({ plane })} parameterContent={parameterContent} parameterMenu={parameterMenu} selectionOnly={Boolean(props.sketchEdit || currentReferencePick || currentSketchPlaneRequest || currentSketchReferencePick)} allowPrincipalPlaneSelection={Boolean(currentSketchPlaneRequest)} selectableFeatureIds={currentSketchReferencePick ? currentSketchReferencePick.eligibleSketchIds : props.sketchEdit ? [props.sketchEdit.sketchId] : currentReferencePick?.eligibleIds ?? (currentSketchPlaneRequest ? document.features.filter(feature => feature.kind === 'datum-plane' && cadFeatureActive(feature, document)).map(feature => feature.id) : undefined)} document={document} diagnostics={build?.diagnostics} selectedId={selectedId} selectedProfileId={profileId} locked={treeLocked} onRenamePendingChange={setTreeRenamePending} cancelSignal={cancelSignal} selectedReferencePlane={typeof selectedReferencePlane === 'string' ? selectedReferencePlane : null} onSelectReferencePlane={selectReferencePlane} hoveredReferencePlane={hoveredReferencePlane} onHoverReferencePlane={hoverReferencePlane} onCreateSketch={plane => { if (!interactionState.current.locked) run(() => createSketchOnPlane(plane)); }} onRename={(feature, name, renamedProfileId, signal) => {
+  const specificationTree = <CadFeatureTree sketchContent={sketchRelationContent} onSectionView={sketch || curve ? undefined : plane => setSectionView({ plane })} parameterContent={parameterContent} parameterMenu={parameterMenu} selectionOnly={Boolean(props.sketchEdit || currentReferencePick || currentSketchPlaneRequest || currentSketchReferencePick)} allowPrincipalPlaneSelection={Boolean(currentSketchPlaneRequest)} selectableFeatureIds={currentSketchReferencePick ? currentSketchReferencePick.eligibleSketchIds : props.sketchEdit ? [props.sketchEdit.sketchId] : currentReferencePick?.eligibleIds ?? (currentSketchPlaneRequest ? document.features.filter(feature => feature.kind === 'datum-plane' && cadFeatureActive(feature, document)).map(feature => feature.id) : undefined)} document={document} issues={props.buildIssues} selectedId={selectedId} selectedProfileId={profileId} locked={treeLocked} onRenamePendingChange={setTreeRenamePending} cancelSignal={cancelSignal} selectedReferencePlane={typeof selectedReferencePlane === 'string' ? selectedReferencePlane : null} onSelectReferencePlane={selectReferencePlane} hoveredReferencePlane={hoveredReferencePlane} onHoverReferencePlane={hoverReferencePlane} onCreateSketch={plane => { if (!interactionState.current.locked) run(() => createSketchOnPlane(plane)); }} onRename={(feature, name, renamedProfileId, signal) => {
     if (document.features.find(entry => entry.id === feature.id) !== feature) throw new Error('The part changed. Cancel and reopen the rename editor.');
     return props.onEdit({ kind: 'update-feature', feature: renamedProfileId && feature.kind === 'sketch' ? { ...feature, profiles: feature.profiles.map(entry => entry.id === renamedProfileId ? { ...entry, name } : entry) } : { ...feature, name } }, signal);
   }} onContextMenuOpenChange={setTreeMenuOpen} onProperties={id => openProperties(id ? { kind: 'feature', featureId: id } : { kind: 'body' })} onChangeSketchPlane={beginChangeSketchPlane} onSuppress={(feature, suppressed) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...feature, suppressed } }, signal))} onDelete={feature => { setSelectedId(feature.id); setProfileId(null); setDeleteFeature(feature); }} onUpdateProfile={(source, next) => submitEdit(signal => props.onEdit({ kind: 'update-feature', feature: { ...source, profiles: source.profiles.map(entry => entry.id === next.id ? next : entry) } }, signal))} onDeleteProfile={deleteProfile} onCopyProfile={props.sketchEdit ? undefined : beginProfileCopy} highlightedFeatureIds={parameterUsages.map(usage => usage.featureId)} onSelect={choose} onConfigure={configureFeature} onEditSketch={editSketch} onEditCurve={editCurve} onSelectProfile={(feature, id) => { editSketch(feature); setProfileId(id); setProfileCommand(null); }} />;
@@ -2108,6 +2131,8 @@ export function CadWorkbench(props: CadWorkbenchProps) {
       <Button className="cad-back" aria-label="Workbench" title="Back to Workbench" onClick={() => run(props.onBack)} disabled={locked || Boolean(props.sketchEdit)}><ArrowLeft size={14} /></Button>
       <span className={`cad-save-state ${dirty ? 'is-dirty' : ''}`}>{dirty ? 'Unsaved' : ''}</span>
       {buildState === 'error' && <span className="cad-header-build-state" role="status">Feature needs attention</span>}
+      {buildState !== 'building' && <CadModelIssueList issues={props.buildIssues ?? NO_CAD_BUILD_ISSUES} document={document} repairsLocked={modelRepairsLocked}
+        onSelectFeature={id => choose(id)} onRepair={repairModelIssue} />}
       <div className="cad-header-actions">
         <div className="cad-menu-anchor"><Button ref={fileMenuTrigger} disabled={locked || Boolean(props.sketchEdit)} aria-haspopup="menu" aria-expanded={fileMenu} aria-controls="cad-file-menu" onClick={() => setFileMenu(!fileMenu)}>File <ChevronDown size={12} /></Button>{fileMenu && <><Button variant="scrim" tabIndex={-1} className="cad-menu-scrim" aria-label="Close file menu" onClick={() => setFileMenu(false)} /><MenuSurface ref={fileMenuPanel} onKeyDown={event => {
           if (event.key !== 'Tab' || event.nativeEvent.isComposing) return;
@@ -2195,7 +2220,7 @@ export function CadWorkbench(props: CadWorkbenchProps) {
           : sketch?.graph && !profile && graphGeometry.length > 0 && graphRelationCommand?.kind !== 'move' && graphRelationCommand?.kind !== 'fillet' && graphRelationCommand?.kind !== 'chamfer' ? <CadSketchSelectionInspector
             key={JSON.stringify([document.id, sketch.id, graphGeometry, cancelSignal])} document={document} sketch={sketch} graph={sketch.graph} selection={graphGeometry} onEditMany={props.onEditMany}
             onPrepareEdits={props.onPrepareEdits} onPendingChange={setEditorPending} onPreviewDocument={publishSketchPreview} onFeedback={reportEditFeedback} interactionLocked={sketchCommandLocked}
-            onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })} /> : profile && sketch ? selectedProfileEditor : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
+            onApply={edits => applySketchEdits(edits)} onEditPattern={editSketchPattern} onSelectPatternSeed={id => selectGraph({ kind: 'entity', id })} /> : profile && sketch ? selectedProfileEditor : selected && (featureEditorOpen || curve?.id === selected.id || sketch?.id === selected.id && !graphSelections.length && !currentProperties) ? <CadFeatureEditor topologyPickingEnabled={Boolean(props.featureInputPicking)} focusTopologyPick={repickFeatureId === selected.id} onDepthInteractionReady={publishDepthInteraction} onReferencePick={requestReferencePick} key={`${selected.id}-${cancelSignal}`} feature={selected} document={document} documentVersion={props.documentVersion} onFeaturePreview={props.onFeaturePreview} featurePreview={props.featurePreview} previewEnabled={previewEnabled} isNew={false} onApply={applyFeature} onCancel={closeFeatureEditor} onPendingChange={setEditorPending} /> : currentProperties ? propertiesView : null}</fieldset>
         </div>
       </CadInspectorTitleContext.Provider></aside>}
     </div>

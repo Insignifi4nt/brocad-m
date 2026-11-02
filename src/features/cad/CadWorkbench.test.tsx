@@ -9,6 +9,8 @@ import { CadTangentContours, type CadTopologyAdjacency, type CadTopologyAdjacenc
 import { CAD_TOPOLOGY_LONE_EDGE_NOTE } from '@/domain/cad/selection/cadTopologySelection';
 import { applyCadEdits, type CadEdit } from '@/domain/cad/cadOperations';
 import { createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
+import { CAD_INPUT_BLOCKED, cadBuildIssues, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
+import type { CadBodyKey } from '@/domain/cad/cadBodies';
 import type { CadSketchGraphRelation } from '@/domain/cad/cadSketchGraph';
 import type { CadSketchGraphSelection } from '@/domain/cad/cadSketchGraphSelection';
 import { measureCadSketch } from '@/domain/cad/cadMeasurements';
@@ -88,6 +90,8 @@ let currentSession: CadSession;
 let currentViewport: CadWorkbenchViewportControls | null;
 let replaceDocument: (document: CadDocument) => void;
 let replaceBuild: (build: CadBuildResult | null, state?: CadWorkbenchProps['buildState']) => void;
+/** Publishes the issues of a build of the version they name, which the workbench then shows as built. */
+let publishBuildIssues: (issues: CadBuildIssues, version: string) => void;
 let replaceFeaturePreview: (preview: CadFeaturePreviewState) => void;
 let removeCad: () => void;
 let showCad: () => void;
@@ -128,11 +132,13 @@ async function mount(initial: CadDocument = createCadDocument(), buildProps: Pic
     removeCad = () => setVisible(false);
     showCad = () => setVisible(true);
     replaceBuild = (next, state = 'ready') => { setBuild(next); setBuildState(state); };
+    const [published, setPublished] = useState<{ readonly issues: CadBuildIssues; readonly version: string } | null>(null);
+    publishBuildIssues = (issues, version) => setPublished({ issues, version });
     const { document } = snapshot;
     currentDocument = document;
     replaceDocument = (replacement) => session.replace(replacement);
     const props: CadWorkbenchProps = {
-      document, documentVersion: snapshot.version, buildVersion: buildState === 'ready' ? snapshot.version : null, ...buildProps, build, buildState, featurePreview, dirty: true, canUndo: true, canRedo: true,
+      document, documentVersion: snapshot.version, buildVersion: published?.version ?? (buildState === 'ready' ? snapshot.version : null), ...buildProps, build, buildState, buildIssues: published?.issues, featurePreview, dirty: true, canUndo: true, canRedo: true,
       onEdit: buildProps.onEdit ?? (edit => { session.edit([edit]); }),
       onEditMany: buildProps.onEditMany ?? (edits => session.edit(edits)),
       onStatusMessage: statusMessage,
@@ -1673,6 +1679,48 @@ describe('CAD sketch interaction', () => {
     expect(document.querySelector('[role="menu"][aria-label="CAD document commands"]')).toBeNull();
     expect(document.activeElement).toBe(button('Undo'));
     expect(currentSession.getSnapshot()).toBe(before);
+  });
+  it('lists every model issue in the header with its subject and cause, and refuses a repair made for an earlier version', async () => {
+    const source = applyCadEdits(solidDocument(), [{ kind: 'add-feature', feature: { id: 'move', name: 'Moved plate', kind: 'transform', suppressed: false, sourceId: 'pad', translation: [5, 0, 0], rotation: [0, 0, 0] } }]);
+    await mount(source, { build: null, buildState: 'error' });
+    const version = currentSession.getSnapshot().version;
+    const issues = cadBuildIssues(currentDocument, { diagnostics: [{ code: 'kernel-operation-failed', featureId: 'pad', message: 'The extrusion failed.' }],
+        bodyIssues: [{ code: 'lost-body-parts', featureId: 'move', body: 'pad' as CadBodyKey, pieces: ['pad/split(1)' as CadBodyKey], message: '1 piece of the body is gone.' }] }, version, true);
+    await act(async () => publishBuildIssues(issues, version));
+    const trigger = button('3 model issues');
+    expect(trigger.closest('[data-cad-model-issues]')?.getAttribute('data-cad-model-issues')).toBe('3');
+    await act(async () => trigger.click());
+    const rows = () => [...container.querySelectorAll<HTMLLIElement>('ul[aria-label="Model issues"] > li')];
+    expect(rows().map(row => [row.dataset.cadIssueCode, row.dataset.cadIssueState, row.querySelector('[data-cad-issue-row]')?.textContent])).toEqual([
+      ['kernel-operation-failed', 'failed', 'Pad 1The extrusion failed.'],
+      ['input-blocked', 'blocked', `Moved plate${CAD_INPUT_BLOCKED}Cause: Pad 1`],
+      ['lost-body-parts', 'failed', 'Moved plate · body pad1 piece of the body is gone.']]);
+    // Choosing a row selects its feature; Edit feature opens the editor a double-click opens.
+    await act(async () => rows()[1].querySelector<HTMLButtonElement>('[data-cad-issue-row]')!.click());
+    expect(container.querySelector('.cad-tree-row[aria-pressed="true"]')?.getAttribute('aria-label')).toBe('Select Moved plate in history');
+    expect(rows()).toHaveLength(3);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-cad-issue-repair="command:edit-feature:pad"]')!.click());
+    expect(container.querySelector('ul[aria-label="Model issues"]')).toBeNull();
+    expect(container.querySelector('.cad-tree-row[aria-pressed="true"]')?.getAttribute('aria-label')).toBe('Select Pad 1 in history');
+    expect(field('Length')).toBeTruthy();
+    // Once the part changes, the issues shown are of an earlier version: their repairs wait for the rebuild, and say so.
+    await act(async () => { currentSession.edit([{ kind: 'set-parameter', name: 'depth', value: 4 }]); });
+    await act(async () => button('3 model issues').click());
+    const stale = container.querySelector<HTMLButtonElement>('[data-cad-issue-repair="command:edit-feature:pad"]')!;
+    expect([stale.disabled, stale.getAttribute('aria-label')]).toEqual([true, 'Edit feature: Pad 1']);
+    expect(container.querySelector('[data-cad-issue-repair]:not(:disabled)')).toBeNull();
+  });
+  it('opens a feature whose edges matched nothing at its edge choice when its issue asks for them again', async () => {
+    const selection = { expectedCount: 1, queries: [{ kind: 'edges' as const, expectedCount: 1, predicates: [{ kind: 'line-endpoints' as const, start: [0, 0, 0] as const, end: [40, 0, 0] as const }] }] };
+    const source = applyCadEdits(solidDocument(), [{ kind: 'add-feature', feature: { id: 'round', name: 'Round', kind: 'fillet', suppressed: false, targetId: 'pad', radius: 1, selection, tangentPropagation: true } }]);
+    await mount(source, { build: null, buildState: 'error' });
+    const version = currentSession.getSnapshot().version;
+    await act(async () => publishBuildIssues(cadBuildIssues(currentDocument, { diagnostics: [{ code: 'selection-empty', featureId: 'round', message: 'No edge matched.', facts: { expected: 1 } }] }, version, true), version));
+    await act(async () => button('1 model issue').click());
+    expect([...container.querySelectorAll('[data-cad-issue-repair]')].map(repair => repair.textContent)).toEqual(['Choose edges again', 'Edit feature']);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-cad-issue-repair="re-pick:round:selection"]')!.click());
+    expect(container.querySelector('.cad-tree-row[aria-pressed="true"]')?.getAttribute('aria-label')).toBe('Select Round in history');
+    expect(field('Radius')).toBeTruthy();
   });
   it('offers model rebuild recovery from File without editing the draft', async () => {
     const rebuild = vi.fn(async () => undefined);
