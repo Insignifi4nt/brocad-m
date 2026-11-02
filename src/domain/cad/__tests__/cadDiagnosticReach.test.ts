@@ -1,3 +1,4 @@
+import ts from '@typescript/typescript6';
 import { describe, expect, it } from 'vitest';
 import { CadSourceIndex, cadDiagnosticReach, type CadDiagnosticReachOptions } from './cadDiagnosticReach';
 import { cadSkippedMemberReads } from './cadMemberReads';
@@ -274,7 +275,10 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
       export function check(named: boolean) { throw named ? new Named() : new Deeper('deeper-code'); }`)).toEqual({ codes: ['deeper-code', 'named-code'], unexpanded: [] });
     // Testing an instance's class constructs nothing; any other use of the class is reported, since what constructs it is unseen.
     expect(reach(`${refusal} export function check(error: unknown) { if (error instanceof Refusal) return; throw new Refusal('refusal-code'); }`).unexpanded).toEqual([]);
-    expect(reach(`${refusal} export function check() { const make = Refusal; throw new make('hidden'); }`).unexpanded).toEqual([`${FILE}: Refusal passed on`]);
+    // A constant that holds the class is followed to its own uses; any other use is reported, since what constructs it is unseen.
+    expect(reach(`${refusal} export function check() { const make = Refusal; throw new make('held'); }`)).toEqual({ codes: ['held'], unexpanded: [] });
+    expect(reach(`${refusal} export function check() { const kinds = [Refusal]; throw new kinds[0]('hidden'); }`).unexpanded)
+      .toEqual([`${FILE}: Refusal passed on`, `${FILE}: kinds[0], a class the walk cannot tell, constructed`]);
     // A class that extends something else raises no CadError by its super call.
     expect(reach(`class Other extends Error { constructor(code: string) { super(code); } } export function check() { throw new Other('not-a-code'); }`).codes).toEqual([]);
   });
@@ -294,6 +298,101 @@ describe('CAD diagnostic reach through member reads', { timeout: 30_000 }, () =>
         export function check(kind: number) { if (kind === 1) throw new errors.CadError('ns-new', ''); if (kind === 2) throw errors.make('ns-make', ''); throw errors.CadError.received('ns-received', '', {}); }` });
     const namespaced = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()));
     expect([[...namespaced.codes].sort(), namespaced.unexpanded, cadSkippedMemberReads(index, namespaced)]).toEqual([['ns-make', 'ns-new', 'ns-received'], [], []]);
+  });
+
+  it('follows the class, a subclass and a function that raises through any name, heritage or re-export, and reports a class it cannot tell where it is constructed', () => {
+    const ERRORS = { 'src/errors.ts': `export ${CAD_ERROR}` };
+    const REFUSAL = { 'src/sub.ts': `import { CadError } from './errors'; export class Refusal extends CadError { constructor(code: string) { super(code, ''); } }` };
+    /** What the walk finds from `check` in `src/check.ts` among `files` and the errors module, having checked it skipped nothing. */
+    const across = (files: Readonly<Record<string, string>>) => {
+      const index = new CadSourceIndex({ ...ERRORS, ...files });
+      const found = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()));
+      expect(cadSkippedMemberReads(index, found), 'skipped silently').toEqual([]);
+      return { codes: [...found.codes].sort(), unexpanded: found.unexpanded };
+    };
+    const cases: readonly (readonly [string, Readonly<Record<string, string>>, readonly string[]])[] = [
+      // A namespace's member as a heritage, held by a constant by name or element, or constructed by element.
+      ['ns-super', { [FILE]: `import * as errors from './errors'; class Refusal extends errors.CadError { constructor() { super('ns-super', ''); } } export function check() { throw new Refusal(); }` }, []],
+      ['ns-alias', { [FILE]: `import * as errors from './errors'; const Failure = errors.CadError; export function check() { throw new Failure('ns-alias', ''); }` }, []],
+      ['ns-element-alias', { [FILE]: `import * as errors from './errors'; const Failure = errors['CadError']; export function check() { throw new Failure('ns-element-alias', ''); }` }, []],
+      ['ns-element-new', { [FILE]: `import * as errors from './errors'; export function check() { throw new errors['CadError']('ns-element-new', ''); }` }, []],
+      // A subclass without a constructor, declared or a class expression, is constructed with its base's arguments, at any depth.
+      ['subless-new', { [FILE]: `import { CadError } from './errors'; class Sub extends CadError {} export function check() { throw new Sub('subless-new', ''); }` }, []],
+      ['subless-super', { [FILE]: `import { CadError } from './errors'; class Mid extends CadError {} class Named extends Mid { constructor() { super('subless-super', ''); } } export function check() { throw new Named(); }` }, []],
+      ['class-expression', { [FILE]: `import { CadError } from './errors'; const Sub = class extends CadError {}; export function check() { throw new Sub('class-expression', ''); }` }, []],
+      // A subclass with a constructor, and a function, take their codes from each use the walk reaches, through namespaces and constants.
+      ['ns-subclass-new', { ...REFUSAL, [FILE]: `import * as sub from './sub'; export function check() { throw new sub.Refusal('ns-subclass-new'); }` }, []],
+      ['ns-subclass-extends', { ...REFUSAL, [FILE]: `import * as sub from './sub'; class Deeper extends sub.Refusal {} export function check() { throw new Deeper('ns-subclass-extends'); }` }, []],
+      ['ns-subclass-alias', { ...REFUSAL, [FILE]: `import * as sub from './sub'; const Held = sub.Refusal; export function check() { throw new Held('ns-subclass-alias'); }` }, []],
+      ['class-expression-constructor', { [FILE]: `import { CadError } from './errors'; const Refusal = class extends CadError { constructor(code: string) { super(code, ''); } };
+        export function check() { throw new Refusal('class-expression-constructor'); }` }, []],
+      ['ns-function', { 'src/raise.ts': `import { CadError } from './errors'; export function refuse(code: string): never { throw new CadError(code, ''); }`,
+        [FILE]: `import * as raise from './raise'; export function check() { raise.refuse('ns-function'); }` }, []],
+      // Re-exports: renamed, an import exported on, a namespace exported by name or a namespace import exported on.
+      ['renamed', { 'src/barrel.ts': `export { CadError as Failure } from './errors';`, [FILE]: `import { Failure } from './barrel'; export function check() { throw new Failure('renamed', ''); }` }, []],
+      ['exported-on', { 'src/barrel.ts': `import { CadError } from './errors'; export { CadError };`, [FILE]: `import { CadError } from './barrel'; export function check() { throw new CadError('exported-on', ''); }` }, []],
+      ['barrel-namespace', { 'src/barrel.ts': `export * as errors from './errors';`, [FILE]: `import { errors } from './barrel'; export function check() { throw new errors.CadError('barrel-namespace', ''); }` }, []],
+      ['namespace-on', { 'src/barrel.ts': `import * as errors from './errors'; export { errors };`, 'src/again.ts': `export * from './barrel';`,
+        [FILE]: `import { errors } from './again'; export function check() { throw new errors.CadError('namespace-on', ''); }` }, []],
+      // A function's calls through a namespace exported by name, or a namespace import exported on and re-exported.
+      ['barrel-function', { 'src/raise.ts': `import { CadError } from './errors'; export function refuse(code: string): never { throw new CadError(code, ''); }`,
+        'src/barrel.ts': `export * as raise from './raise';`, [FILE]: `import { raise } from './barrel'; export function check() { raise.refuse('barrel-function'); }` }, []],
+      ['function-on', { 'src/raise.ts': `import { CadError } from './errors'; export function refuse(code: string): never { throw new CadError(code, ''); }`,
+        'src/barrel.ts': `import * as raise from './raise'; export { raise };`, 'src/again.ts': `export * from './barrel';`,
+        [FILE]: `import { raise } from './again'; export function check() { raise['refuse']('function-on'); }` }, []],
+      // A constant object's property and a readonly field are read where constructed; the class given to them is reported, as it may go anywhere.
+      ['object-held', { [FILE]: `import { CadError } from './errors'; const kinds = { Failure: CadError }; export function check() { throw new kinds.Failure('object-held', ''); }` },
+        [`${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`]],
+      ['readonly-field', { [FILE]: `import { CadError } from './errors'; class Kinds { static readonly Failure = CadError; } export function check() { throw new Kinds.Failure('readonly-field', ''); }` },
+        [`${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`]]
+    ];
+    for (const [code, files, unexpanded] of cases) expect(across(files), code).toEqual({ codes: [code], unexpanded });
+    // A class the walk cannot tell is reported where it is constructed, a base given as a parameter included.
+    expect(across({ [FILE]: `import { CadError } from './errors'; class Kinds { static Failure = CadError; } export function check() { throw new Kinds.Failure('field', ''); }` }))
+      .toEqual({ codes: [], unexpanded: [`${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`, `${FILE}: Kinds.Failure, a class the walk cannot tell, constructed`] });
+    expect(across({ [FILE]: `import { CadError } from './errors';
+      function mix(Base: typeof CadError) { return class extends Base { constructor() { super('mixed', ''); } }; }
+      export function check() { const Mixed = mix(CadError); throw new Mixed(); }` })).toEqual({ codes: [], unexpanded: [`${FILE}: Base, a class the walk cannot tell, constructed`,
+      `${FILE}: CadError, the CadError class used as a value, which the walk cannot follow`, `${FILE}: Mixed, a class the walk cannot tell, constructed`] });
+    // A constant holding a namespace's class is reported when it is given on.
+    expect(across({ [FILE]: `import * as errors from './errors'; const Failure = errors.CadError; export function check() { return [Failure]; }` }))
+      .toEqual({ codes: [], unexpanded: [`${FILE}: Failure, a class raising CadError used as a value, which the walk cannot follow`] });
+  });
+
+  it('catches, in its check of calls, a raise or a code argument the walk did not read, by what TypeScript resolves each call to', () => {
+    const index = new CadSourceIndex({ 'src/errors.ts': `export ${CAD_ERROR}`,
+      'src/sub.ts': `import { CadError } from './errors'; export class Refusal extends CadError { constructor(code: string) { super(code, ''); } }`,
+      // An overload stands for its implementation.
+      'src/raise.ts': `import { CadError } from './errors'; export function refuse(code: 'ns-function'): never; export function refuse(code: string): never { throw new CadError(code, ''); }`,
+      [FILE]: `import * as errors from './errors'; import * as sub from './sub'; import * as raise from './raise';
+        class Named extends errors.CadError { constructor() { super('ns-super', ''); } }
+        const Failure = errors.CadError;
+        class Other extends Error { constructor(code: string, message: string) { super(message); } }
+        export function check(kind: number) { if (kind === 1) throw new Named(); if (kind === 2) throw new Failure('ns-alias', ''); if (kind === 3) throw new sub.Refusal('ns-subclass');
+          if (kind === 4) { const Pick = kind > 4 ? Other : errors.CadError; throw new Pick('ns-either', ''); } raise.refuse('ns-function'); }` });
+    const found = cadDiagnosticReach(index, index.exported(FILE, 'check', new Set()));
+    expect([[...found.codes].sort(), found.unexpanded, cadSkippedMemberReads(index, found)]).toEqual([['ns-alias', 'ns-either', 'ns-function', 'ns-subclass', 'ns-super'], [], []]);
+    // A walk that took none of these raises, as one that knew the class by its own name only did.
+    expect(cadSkippedMemberReads(index, { ...found, raises: new Set() })).toEqual([
+      `${FILE}: new Failure('ns-alias', ''), a CadError raised whose code the walk did not read`,
+      `${FILE}: new Pick('ns-either', ''), a CadError raised whose code the walk did not read`,
+      `${FILE}: super('ns-super', ''), a CadError raised whose code the walk did not read`,
+      `src/raise.ts: new CadError(code, ''), a CadError raised whose code the walk did not read`,
+      `src/sub.ts: super(code, ''), a CadError raised whose code the walk did not read`]);
+    // A walk that sought the subclass's and the function's code parameters but found their calls by their own names only.
+    expect(cadSkippedMemberReads(index, { ...found, argumentsRead: new Map([...found.argumentsRead.keys()].map(owner => [owner, new Set()])) })).toEqual([
+      `${FILE}: new sub.Refusal('ns-subclass'), a call whose code argument the walk did not read`,
+      `${FILE}: raise.refuse('ns-function'), a call whose code argument the walk did not read`]);
+    // A callee of a union type may run either part's constructor, while TypeScript resolves the construction to the first part's only.
+    const either = new CadSourceIndex({ 'src/errors.ts': `export ${CAD_ERROR}`, [FILE]: `import { CadError } from './errors';
+      class Other extends Error { constructor(code: string, message: string) { super(message); } }
+      export function check(kind: number) { const Pick = kind > 4 ? Other : CadError; throw new Pick('either', ''); }` });
+    const constructions: ts.NewExpression[] = [];
+    const visit = (node: ts.Node): void => { if (ts.isNewExpression(node)) constructions.push(node); ts.forEachChild(node, visit); };
+    visit(either.files.get(FILE)!);
+    const classOf = (declaration: ts.Node) => (declaration.parent as ts.ClassDeclaration).name?.text;
+    expect(constructions.map(construction => either.calledDeclarations(construction, ts.isConstructorDeclaration).map(classOf))).toEqual([['Other', 'CadError']]);
+    expect(either.calledDeclarations(constructions[0], declaration => classOf(declaration) === 'CadError').map(classOf)).toEqual(['CadError']);
   });
 
   it('reports a raise whose code it cannot read, and a factory or the class used where it cannot read the code', () => {
