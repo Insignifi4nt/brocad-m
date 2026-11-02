@@ -23,6 +23,8 @@ import type { CadSketchEditWarning } from './cadEditPreparation';
 import { CadToolDocumentEnvelope, CadToolEditDefinitions, CadToolEditEnvelope, CadToolPluginPackageEnvelope, CadToolSketchEnvelope, CadToolSketchConstraintsQuerySchema } from './cadToolSchemas';
 import { pageCadSketchConstraints, summarizeCadSketchConstraintAnalysis } from './cadSketchConstraintInspection';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { cadSketchIssues } from './cadSketchIssues';
+import type { CadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { CadSketchRegionProposalSchema, CadSketchTrimAtSchema, CadSketchExtendAtSchema, CadSketchRegionReadTargetSchema } from '@/domain/cad/cadSketchRegionInspection';
 import { CadSketchCutAxesSchema } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchSplitDependencyError } from '@/domain/cad/cadSketchSplit';
@@ -107,6 +109,20 @@ function buildProblems(diagnostics: readonly CadDiagnostic[], issues: CadBuildIs
   return { diagnostics: summaries, omittedDiagnostics: diagnostics.length - summaries.length,
     issues: cadAgentIssueDigest(issues.items, new Map(keys.map((key, index) => [key, index]))) };
 }
+/**
+ * The issues of a refused sketch edit as the sketch's header gives them (`cadSketchIssues`): the refusal and the attempted subjects it
+ * names, read against the accepted graph and the warnings of the current version, so a Delete relation repair is prepared only for a
+ * relation the accepted sketch has. A sketch the accepted document lacks, as a refused new sketch, has no accepted record to repair.
+ */
+function sketchRefusalIssues(error: CadSketchPreparationError, cad: CadController | undefined) {
+  const state = cad?.session.getSnapshot(), sketchId = error.feedback.sketchId;
+  const sketch = state?.document.features.find(feature => feature.id === sketchId);
+  const warnings = cad?.sketchWarnings && cad.sketchWarnings.version === state?.version ? cad.sketchWarnings.warnings : null;
+  // Without an accepted graph no repair is prepared, so no version is named.
+  return cadSketchIssues({ sketchId, graph: sketch?.kind === 'sketch' && sketch.graph ? sketch.graph : NO_ACCEPTED_SKETCH_GRAPH, version: state?.version ?? '',
+    feedback: error.feedback, warnings });
+}
+const NO_ACCEPTED_SKETCH_GRAPH: CadSketchGraph = Object.freeze({ points: [], entities: [], relations: [] });
 /** Tool summaries retain complete entries; the immutable document stays complete. */
 function parameterContext(document: CadDocument) {
   const parameters: Record<string, number> = {};
@@ -140,10 +156,16 @@ export function cadSiteTools(getController: () => CadController) {
   function tool<S extends TSchema>(name: string, description: string, schema: S,
     execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema) {
     const operation = siteTool(name, description, schema, async (input, signal) => {
-      try { return await execute(getController(), input, signal); }
+      let cad: CadController | undefined;
+      try { cad = getController(); return await execute(cad, input, signal); }
       catch (error) {
-        if (error instanceof CadSketchPreparationError) throw new ToolError(error.code, error.message, { feedback: error.feedback,
-          analysis: summarizeCadSketchConstraintAnalysis({ kind: 'rejected', reason: error.feedback.reason, message: error.solverMessage, diagnostics: error.diagnostics }) });
+        // A refused sketch edit gives the issues its sketch's header gives: the refusal, as `issue`, and the subjects it names.
+        if (error instanceof CadSketchPreparationError) {
+          const sketchIssues = sketchRefusalIssues(error, cad);
+          throw new ToolError(error.code, error.message, { feedback: error.feedback,
+            analysis: summarizeCadSketchConstraintAnalysis({ kind: 'rejected', reason: error.feedback.reason, message: error.solverMessage, diagnostics: error.diagnostics }),
+            ...(sketchIssues.refusal ? { issue: cadAgentIssue(sketchIssues.refusal) } : {}), issues: cadAgentIssueDigest(sketchIssues.issues) });
+        }
         if (error instanceof CadSketchSplitDependencyError) throw new ToolError(error.code, error.message, {
           relationIds: error.relationIds.slice(0, 8), relationCount: error.relationIds.length, omittedRelationCount: Math.max(0, error.relationIds.length - 8)
         });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { parseCadSketchGraph } from '@/domain/cad/cadSketchGraph';
 import { jsonByteLength } from '@/features/webmcp/diagnosticSummaries';
 import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { cadSketchIssues } from './cadSketchIssues';
 import { cadSiteTools } from './cadSiteTools';
 import type { CadController } from './useCadController';
 
@@ -30,10 +31,29 @@ describe('CAD tool structured sketch rejection', () => {
         partiallyRedundant: { ids: ids.slice(0, 8), count: 12, omittedCount: 4 },
         issueCount: 3, omittedIssueCount: 1, issues: [expect.objectContaining({ messageTruncated: true }), expect.objectContaining({ messageTruncated: true })] }
     } } });
+    // The refusal and the subjects it kept, as many as fit the issue bytes; the rest are counted.
+    const { issue, issues } = (reply as { error: { details: { issue: { key: string }; issues: { items: { key: string; subject: unknown }[]; omitted: number } } } }).error.details;
+    expect(issue).toMatchObject({ key: 'edit/refusal', code: 'sketch-conflicting', subject: { kind: 'feature', featureId: 'sketch' }, details: { subjectCount: 39, omittedSubjectCount: 31 } });
+    expect(issues.items[0].key).toBe(issue.key);
+    expect(issues.items.slice(1).map(item => item.subject)).toEqual(ids.slice(0, issues.items.length - 1).map(relationId => ({ kind: 'sketch-relation', sketchId: 'sketch', relationId })));
+    expect([issues.items.length > 1, issues.items.length + issues.omitted, jsonByteLength(issues.items) <= 4096]).toEqual([true, 9, true]);
     expect(jsonByteLength(reply)).toBeLessThan(24 * 1024);
     expect(failure.diagnostics.conflictingIds).toHaveLength(12);
     expect(failure.diagnostics.issues).toHaveLength(3);
     expect(failure.solverMessage).toBe(rawMessage);
     expect(getController).toHaveBeenCalledOnce();
+  });
+
+  it('gives a refused sketch edit the refusal issue its sketch header shows, with no repair when no accepted sketch can be read', async () => {
+    const graph = parseCadSketchGraph({ points: [{ id: 'a', position: [0, 0] }, { id: 'b', position: [10, 0] }], entities: [],
+      relations: [{ id: 'r', kind: 'distance', pointIds: ['a', 'b'], value: 20 }] });
+    const failure = new CadSketchPreparationError({ sketchId: 's', sketchName: 'Outline', graph, rejection: { kind: 'rejected', reason: 'conflicting', message: 'No',
+      diagnostics: { status: 'success', degreesOfFreedom: -1, conflictingIds: ['r'], redundantIds: [], partiallyRedundantIds: [], issues: [] } } });
+    const header = cadSketchIssues({ sketchId: 's', graph, version: 'current', feedback: failure.feedback });
+    const tool = cadSiteTools(() => { throw failure; }).find(tool => tool.name === 'cad_edit_document')!;
+    const reply = await tool.execute({ expectedVersion: 'current', edits: [{ kind: 'rename-document', name: 'Pending' }] });
+    expect(header.refusal?.causes).toHaveLength(1);
+    expect(reply).toMatchObject({ ok: false, error: { details: { issue: { key: header.refusal!.key, code: header.refusal!.code, subject: header.refusal!.subject, causes: header.refusal!.causes },
+      issues: { items: [{ key: header.refusal!.key }, { key: header.list[0].key, code: 'relation-conflicting', details: { origin: 'edit' }, repairs: [] }], omitted: 0 } } } });
   });
 });

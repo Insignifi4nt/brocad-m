@@ -13,6 +13,9 @@ import { CAD_BUDGET_APP_ID, CAD_FORMER_DOCUMENT_BYTES, cadBudgetFixture, cadBudg
 import { CadSession } from './cadSession';
 import { useCadController, type CadController } from './useCadController';
 import { cadSiteTools } from './cadSiteTools';
+import { CadSketchPreparationError } from './cadSketchConstraintFeedback';
+import { cadSketchIssues } from './cadSketchIssues';
+import { cadAgentIssue, cadAgentIssueDigest } from './cadAgentIssues';
 import { CAD_STAR_PLUGIN, CAD_GEAR_V2_PLUGIN, createCadPluginProfile, fingerprintCadPluginPackage } from '@/domain/cad/plugins/cadPlugins';
 import type { CadRenderedViewState, CadViewportCapture, CadViewportState } from './cadViewportControls';
 import { cadReferenceFeatureIds, cadReferencePlanes, prepareCadViewportReferences, selectCadViewportReferences } from './cadViewportReferences';
@@ -2213,6 +2216,49 @@ describe('CAD controller asynchronous guards', () => {
 });
 
 describe('CAD issues agents receive through the controller', () => {
+  it('gives a refused sketch edit the issues its sketch header shows: the refusal, its attempted subjects and the warnings of the version', async () => {
+    const warning = { code: 'mirror-shrank', relationId: 'length', curves: [{ entityId: 'edge', beforeMm: 20, afterMm: 1e-5 }],
+      message: 'Symmetric shrank Line 1 from 20.000 mm to 0.00001 mm. Check the mirror and its relations.' } as const;
+    const h = await harness(); await act(async () => h.session.replace(inspectedSketchDocument()));
+    sketchSolver.solve.mockImplementation(async (input: CadSketchSolveInput) => inspectedSolve(input));
+    shrinkWarnings.mockReturnValue([warning]);
+    await act(async () => { await h.cad().edit([{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'length', kind: 'distance', pointIds: ['a', 'b'], value: 20 } }]); });
+    const { document, version } = h.session.getSnapshot();
+    sketchSolver.solve.mockImplementation(async () => ({ kind: 'rejected', reason: 'conflicting', message: 'Sketch constraints conflict.',
+      diagnostics: { status: 'failed', degreesOfFreedom: null, conflictingIds: ['length', 'extra'], redundantIds: [], partiallyRedundantIds: [], issues: [] } }));
+    // The edit proposes relation extra, which the accepted sketch does not have.
+    const edits: CadEdit[] = [{ kind: 'set-sketch-relation', sketchId: 'sketch', relation: { id: 'extra', kind: 'distance', pointIds: ['a', 'b'], value: 30 } }];
+    let refused: unknown;
+    await act(async () => { refused = await Promise.resolve(h.cad().edit(edits)).then(() => null, (error: unknown) => error); });
+    if (!(refused instanceof CadSketchPreparationError)) throw new Error('Expected a refused sketch edit');
+    // The header reads the refused edit's feedback against the accepted sketch, at the version it shows, with that version's warnings.
+    const sketch = document.features.find(feature => feature.id === 'sketch'), record = h.cad().sketchWarnings;
+    if (sketch?.kind !== 'sketch' || !sketch.graph || record?.version !== version) throw new Error('Missing accepted sketch or its warnings');
+    const header = cadSketchIssues({ sketchId: 'sketch', graph: sketch.graph, version, feedback: refused.feedback, warnings: record.warnings });
+    const reply = await cadSiteTools(h.cad).find(tool => tool.name === 'cad_edit_document')!.execute({ expectedVersion: version, edits });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'sketch-conflicting', details: { feedback: refused.feedback, analysis: { conflicting: { ids: ['length', 'extra'] } } } } });
+    const details = (reply as { error: { details: { issue: unknown; issues: unknown } } }).error.details;
+    expect(details.issue).toEqual(cadAgentIssue(header.refusal!));
+    expect(details.issues).toEqual(cadAgentIssueDigest(header.issues));
+    // Both subjects are the edit's; only the accepted relation has a repair, prepared at the version shown; the warning follows them.
+    expect(header.issues.map(issue => [issue.code, issue.subject, 'origin' in issue.details ? issue.details.origin : null, issue.repairs.map(repair => [repair.id, repair.preparedAt])])).toEqual([
+      ['sketch-conflicting', { kind: 'feature', featureId: 'sketch' }, null, []],
+      ['relation-conflicting', { kind: 'sketch-relation', sketchId: 'sketch', relationId: 'length' }, 'edit', [['delete-relation:length', version]]],
+      ['relation-conflicting', { kind: 'sketch-relation', sketchId: 'sketch', relationId: 'extra' }, 'edit', []],
+      ['mirror-shrank', { kind: 'sketch-relation', sketchId: 'sketch', relationId: 'length' }, null, []]]);
+    expect(header.refusal?.causes).toEqual(header.list.slice(0, 2).map(row => row.key));
+    expect(h.session.getSnapshot().version).toBe(version);
+    // Undo shows a version the warnings were not given for, so neither the header nor the reply lists them.
+    await act(async () => h.session.undo());
+    const undone = h.session.getSnapshot().version, restored = h.session.getSnapshot().document.features.find(feature => feature.id === 'sketch');
+    if (restored?.kind !== 'sketch' || !restored.graph) throw new Error('Missing restored sketch');
+    expect([undone === version, h.cad().sketchWarnings?.version]).toEqual([false, version]);
+    const again = await cadSiteTools(h.cad).find(tool => tool.name === 'cad_edit_document')!.execute({ expectedVersion: undone, edits });
+    const repeated = cadSketchIssues({ sketchId: 'sketch', graph: restored.graph, version: undone, feedback: refused.feedback, warnings: null });
+    expect((again as { error: { details: { issues: unknown } } }).error.details.issues).toEqual(cadAgentIssueDigest(repeated.issues));
+    expect(repeated.issues.map(issue => issue.code)).toEqual(['sketch-conflicting', 'relation-conflicting', 'relation-conflicting']);
+  });
+
   it('keeps a bounded account of long kernel words for the one failure of a build', async () => {
     kernel.build.mockResolvedValue({ buildId: 'built', meshes: [], durationMs: 0, diagnostics: [{ code: 'kernel-operation-failed', featureId: 'sketch', message: 'The profile failed. Edit the sketch.',
       details: { operation: 'profile', input: null, kernelMessage: '孔'.repeat(2048) } }] });
