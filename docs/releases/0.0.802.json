@@ -1,6 +1,6 @@
 {
-  "version": "0.0.804",
-  "previousVersion": "0.0.803",
+  "version": "0.0.802",
+  "previousVersion": "0.0.801",
   "postCompatibility": "preserved-tests-only",
   "summary": "Test-only guards against two silent regressions. The CAD body loss search skips removed pieces whose keys stay in a group, since none of their keys can be lost, and a domain test now makes that skip observable through the search's own step count: in two nested splits of 2,000 pieces that the kernel may order any way, reading the keys of one removed piece passes MAX_CAD_BODY_ORDER_WORK and leaves the body untracked, while the same piece kept in a carried group, or in the group a solid keeping no face makes, is never read and the body stays tracked. Removing the skip fails the test. A second test counts the per-solid bound on lost keys through reads of a supplied order's keys, and removing that bound fails it before the list it bounds grows. Three section cap tests checked caps as soon as a build started, under the view's 6 ms time slice, so a slow runner could leave a cap for a later slice and fail them; they now build caps in one go, as the other cap tests do, and the slicing test now checks that a build finished in a later slice is kept across hide and show.",
   "warning": "No breaking change for installed posts, machine packages, saved revisions, CAD files or controller output. Only tests change: no application code, schema, agent tool, diagnostic or stored data.",
