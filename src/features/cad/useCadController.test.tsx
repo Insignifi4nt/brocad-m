@@ -36,6 +36,7 @@ import type { CadSketchLineExtendPreparation } from '@/domain/cad/cadSketchTrimE
 import { graphCellSelectionAt, intersectingCircleSketch, lensAreaMm2 } from '@/domain/cad/__tests__/cadIntersectingCellFixtures';
 import { CadError } from '@/domain/cad/cadError';
 import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
 
 const kernel = vi.hoisted(() => ({ build: vi.fn(), section: vi.fn(), export: vi.fn(), importSolid: vi.fn(), importDxf: vi.fn(), importDxfCurve: vi.fn(), inspectTopology: vi.fn(), resolveTopologyPicks: vi.fn(), dispose: vi.fn() }));
 const createClient = vi.hoisted(() => vi.fn());
@@ -1927,6 +1928,33 @@ describe('CAD controller asynchronous guards', () => {
     if (!exportIssue) expect(exportReply).not.toHaveProperty('error.details.issue');
     expect(kernel.section).toHaveBeenCalledTimes(4);
     expect(h.session.getSnapshot()).toMatchObject({ version, workflowOpen: false });
+  });
+  it('names only the steps of the operation that raised a refusal again, so a reused refusal keeps no CAM step of its earlier use', async () => {
+    const h = await harness(true, true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 5 } as const;
+    const tool = (name: string) => cadSiteTools(h.cad).find(entry => entry.name === name)!;
+    const refusal = async (operation: () => Promise<unknown>) => { let caught: unknown; await act(async () => { caught = await operation().then(() => undefined, (error: unknown) => error); }); return caught; };
+    // A kernel that gives one cached refusal to every request, which an earlier check recorded at its feature.
+    const cached = CadError.received('kernel-operation-failed', 'The section could not be cut. The kernel gave no reason; its message is below.', { kernelMessage: 'BRepAlgoAPI_Section failed' });
+    kernel.section.mockRejectedValue(cached); kernel.export.mockRejectedValue(cached);
+    const earlier = { kind: 'feature', featureId: 'pad' } as const, step = { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } as const;
+    cadRefusalAt(cached, earlier);
+    await act(async () => h.session.setWorkflowOpen(true, 'section'));
+    expect(await refusal(() => h.cad().sendSectionToCam(request, version, undefined, 'section'))).toBe(cached);
+    expect(cadRefusalIssue(cached)?.subject).toEqual(step);
+    await act(async () => h.session.setWorkflowOpen(false, 'section'));
+    cadRefusalAt(cached, earlier);
+    expect(await refusal(() => h.cad().inspectSection(request, version, 'section'))).toBe(cached);
+    expect(cadRefusalIssue(cached)?.subject).toEqual(step);
+    await act(async () => h.session.setWorkflowOpen(true, 'dxf-export'));
+    expect(await refusal(() => h.cad().exportSectionDxf(request, version, undefined, 'dxf-export'))).toBe(cached);
+    await act(async () => h.session.setWorkflowOpen(false, 'dxf-export'));
+    expect(cadRefusalIssue(cached)).toMatchObject({ namespace: 'feature', subject: { kind: 'document' } });
+    // The next Section for CAM is the step's again, and a solid export, which records no step, gives the agent no step of either.
+    expect(await tool('cad_inspect_section').execute({ expectedVersion: version, section: request })).toMatchObject({ ok: false,
+      error: { code: 'kernel-operation-failed', details: { issue: { namespace: 'cam', subject: { kind: 'cam-operation', operation: 'section', sourceId: 'pad' } } } } });
+    expect(await tool('cad_export_solid').execute({ expectedVersion: version, format: 'step' })).toMatchObject({ ok: false,
+      error: { code: 'kernel-operation-failed', details: { issue: { namespace: 'feature', subject: { kind: 'document' } } } } });
+    expect(kernel.export).toHaveBeenCalledTimes(1);
   });
   it('reads the section back as part of the step, so an offset naming no parameter is the step\'s refusal there too', async () => {
     const h = await harness(true), version = h.session.getSnapshot().version, request = { bodyId: 'pad', plane: 'XY', offset: 'depth / 2' } as const;

@@ -1,7 +1,7 @@
 import { CadError } from './cadError';
 import { isCadCamCode, isCadRefusalCode, isCadRefusalFacts, type CadRefusalFactCode, type CadRefusalFacts } from './cadIssueCodes';
 import { createCadIssue, type CadCamIssueOf, type CadFeatureIssueOf } from './cadIssues';
-import { cadRefusalSubject } from './cadRefusalSubjects';
+import { cadRefusalSubject, type CadRefusalMark } from './cadRefusalSubjects';
 
 /** A refusal as the issue model gives it: a feature's, or a CAM step's. */
 export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf;
@@ -12,7 +12,8 @@ export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf;
  *   any code the step can raise (`CAD_CAM_STEP_CODES`);
  * - the document check's refusal with a code a feature can be refused with, about the feature or input slot it was checking, or the
  *   document when it was checking none, with the facts its code carries.
- * Its message is the refusal's own. It has no repairs, since a refused edit was never applied and leaves nothing to repair, and no causes.
+ * Where it was raised is what the steps of the reader's operation recorded (`since`, when the reader marked its start), never a step of
+ * an earlier operation that raised the same refusal. Its message is the refusal's own. It has no repairs, since a refused edit was never applied and leaves nothing to repair, and no causes.
  * Null for any other refusal, which its own producer reports (a sketch refusal) or which is no problem of the part (a stale version). A CAM
  * step's other failures are no problem of the step or its source either, so they give null too:
  * - `kernel-unavailable`: the kernel could not be loaded;
@@ -20,9 +21,9 @@ export type CadRefusalIssue = CadFeatureIssueOf | CadCamIssueOf;
  * - a request the controller refuses before the step names its source, such as a malformed section request;
  * - a disposed model or kernel client, or a full request queue, which are no `CadError` either.
  */
-export function cadRefusalIssue(error: unknown, key = 'refusal'): CadRefusalIssue | null {
+export function cadRefusalIssue(error: unknown, key = 'refusal', since?: CadRefusalMark): CadRefusalIssue | null {
   if (!(error instanceof CadError)) return null;
-  const { code, message } = error, subject = cadRefusalSubject(error);
+  const { code, message } = error, subject = cadRefusalSubject(error, since);
   const common = { key, severity: 'error', state: 'failed', message, causes: [], repairs: [] } as const;
   if (subject?.kind === 'cam-operation') {
     if (subject.operation === 'section') return isCadCamCode('section', code) ? createCadIssue({ ...common, namespace: 'cam', code, subject: { ...subject, operation: 'section' }, details: {} }) : null;

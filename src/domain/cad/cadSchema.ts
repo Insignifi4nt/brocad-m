@@ -10,7 +10,7 @@ import { MAX_CAD_PATTERN_INSTANCES } from './cadPatterns';
 import { CadLabelSchema, CadNumberSchema } from './cadPrimitives';
 import type { CadResolvedFrame } from './cadDatumPlanes';
 import { cadFeatureInputField, cadFeatureInputs, cadFeatureProducesBody } from './cadFeatureInputs';
-import { cadRefusalAt, type CadRefusalSubject } from './cadRefusalSubjects';
+import { cadRefusalAt, cadRefusalMark, type CadRefusalSubject } from './cadRefusalSubjects';
 import { createCadBodyLineage } from './cadBodies';
 import { validateCadSketchConstraints } from './cadSketchConstraints';
 import { assertNoReservedCadSketchIds, cadSketchGraphWithPlacements } from './cadSketchGraph';
@@ -206,6 +206,8 @@ export function parseCadDocument(value: unknown): CadDocument {
       }
     }
   };
+  // A refusal recorded before this check is of an earlier propagation, which names no feature of it.
+  const since = cadRefusalMark();
   for (const feature of document.features) {
     if (previous.has(feature.id)) throw new CadError('duplicate-id', `Duplicate feature ID "${feature.id}".`);
     // A refusal raised while checking the feature names it, or the input slot it was reading, as where it was raised.
@@ -250,7 +252,7 @@ export function parseCadDocument(value: unknown): CadDocument {
       previous.set(feature.id, feature);
       expandedInstances.set(feature.id, instances);
       bodies.apply(feature, document);
-    } catch (error) { throw cadRefusalAt(error, { kind: 'feature', featureId: feature.id }); }
+    } catch (error) { throw cadRefusalAt(error, { kind: 'feature', featureId: feature.id }, since); }
   }
   // Detach from callers, then freeze the complete history so neither a caller's
   // edit payload nor a UI/tool snapshot can mutate an accepted revision later.

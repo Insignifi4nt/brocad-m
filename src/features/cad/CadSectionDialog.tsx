@@ -9,6 +9,7 @@ import type { CadSectionRequest, CadSectionResult } from '@/domain/cad/cadSectio
 import type { DxfEntity } from '@/domain/dxf/types';
 import { cadSectionMiddleOffset } from './cadSectionMidpoint';
 import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 
 /** Display exact analytic curves. This preview never becomes the machining source. */
 export function CadSectionPreview({ entities, label = 'Exact section preview' }: { entities: readonly DxfEntity[]; label?: string }) {
@@ -61,7 +62,7 @@ export function CadSectionDialog({ bodies, initialBodyId, version, onClose, onIn
   useEffect(() => { dialog.current?.showModal(); return () => { pending.current?.abort(); }; }, []);
   async function execute(kind: 'inspect' | 'send') {
     if (pending.current || kind === 'send' && reviewed !== requestKey) return;
-    const controller = new AbortController(); pending.current = controller;
+    const controller = new AbortController(), since = cadRefusalMark(); pending.current = controller;
     setBusy(kind); setError(null);
     try {
       if (kind === 'inspect') {
@@ -74,7 +75,7 @@ export function CadSectionDialog({ bodies, initialBodyId, version, onClose, onIn
       }
     } catch (error) {
       // A refusal of the Section step is a CAM issue about the operation and its body; the alert keeps the refusal's own message.
-      if (!controller.signal.aborted) setError({ message: userFacingMessage(error, 'Section operation failed.'), code: cadRefusalIssue(error)?.code ?? null, kernelMessage: cadKernelMessageOf(error) });
+      if (!controller.signal.aborted) setError({ message: userFacingMessage(error, 'Section operation failed.'), code: cadRefusalIssue(error, 'refusal', since)?.code ?? null, kernelMessage: cadKernelMessageOf(error) });
     } finally {
       if (pending.current === controller) { pending.current = null; setBusy(null); }
     }

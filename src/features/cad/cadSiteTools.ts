@@ -31,6 +31,7 @@ import { CadSketchSplitDependencyError } from '@/domain/cad/cadSketchSplit';
 import { CadSketchTrimDependencyError, CadSketchExtendDependencyError } from '@/domain/cad/cadSketchTrimExtend';
 import { CadSketchTangentOwnershipError } from '@/domain/cad/cadSketchTangentRelations';
 import { cadRefusalIssue } from '@/domain/cad/cadRefusalIssues';
+import { cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 import { cadAgentIssue, cadAgentIssueDigest, cadAgentKernelMessage } from './cadAgentIssues';
 import type { CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { CadSketchPlacementDependencyError } from '@/domain/cad/cadSketchPlacement';
@@ -157,6 +158,7 @@ export function cadSiteTools(getController: () => CadController) {
     execute: (cad: CadController, input: Static<S>, signal: AbortSignal) => unknown | Promise<unknown>, readOnly = true, discoverySchema?: TSchema) {
     const operation = siteTool(name, description, schema, async (input, signal) => {
       let cad: CadController | undefined;
+      const since = cadRefusalMark();
       try { cad = getController(); return await execute(cad, input, signal); }
       catch (error) {
         // A refused sketch edit gives the issues its sketch's header gives: the refusal, as `issue`, and the subjects it names.
@@ -175,10 +177,10 @@ export function cadSiteTools(getController: () => CadController) {
           pointIds: error.pointIds.slice(0, 8), pointCount: error.pointIds.length, omittedPointCount: Math.max(0, error.pointIds.length - 8)
         });
         if (error instanceof CadSketchTangentOwnershipError) throw new ToolError(error.code, error.message, { ownerRelationId: error.ownerRelationId });
-        // A refusal of a feature or a CAM step also gives its issue: the feature, input slot or CAM step it is about. The kernel's own words
-        // go with the issue, or alone when no issue covers the refusal.
+        // A refusal of a feature or a CAM step also gives its issue: the feature, input slot or CAM step this call's steps recorded it at. The
+        // kernel's own words go with the issue, or alone when no issue covers the refusal.
         if (error instanceof CadError) {
-          const issue = cadRefusalIssue(error), kernelMessage = error.kernelMessage;
+          const issue = cadRefusalIssue(error, 'refusal', since), kernelMessage = error.kernelMessage;
           throw new ToolError(error.code, error.message, issue ? { issue: cadAgentIssue(issue, kernelMessage) } : kernelMessage ? { kernelMessage: cadAgentKernelMessage(kernelMessage) } : undefined);
         }
         if (error instanceof CadSessionError || error instanceof CadStorageError) throw new ToolError(error.code, error.message);

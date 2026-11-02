@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import type { useWorkbenchAppController } from '@/app/useWorkbenchAppController';
 import type { CadBuildResult, CadDocument } from '@/domain/cad/cadDocument';
 import { cadFeatureProducesBody, createCadDocument, parseCadDocument } from '@/domain/cad/cadSchema';
-import { cadRefusalAt } from '@/domain/cad/cadRefusalSubjects';
+import { cadRefusalAt, cadRefusalMark } from '@/domain/cad/cadRefusalSubjects';
 import { cadBuildIssues, NO_CAD_BUILD_ISSUES, type CadBuildIssues } from '@/domain/cad/cadBuildIssues';
 import { archiveCadDocument, listCadDocuments, loadCadDocument, renameCadDocument, restoreCadDocument, saveCadDocument, type CadLibraryEntry } from '@/domain/cad/cadStorage';
 import { readExactUtf8Blob } from '@/domain/storage/exactTextStream';
@@ -737,11 +737,13 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
    * may run inside, so an agent, which owns none, still names its intent.
    */
   async function inspectSection(request: CadSectionRequest, expectedVersion: string, intent: CadSectionIntent, signal?: AbortSignal, scope?: 'section' | 'dxf-export') {
+    const since = cadRefusalMark();
     editable(expectedVersion); session.assertWorkflowClosed(scope);
     signal?.throwIfAborted();
     const section = { ...parseCadSectionRequest(request) };
     const document = session.getSnapshot().document;
-    const refused = (error: unknown) => intent === 'section' ? cadRefusalAt(error, { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId }) : error;
+    // A DXF export records the document, so a refusal it shares with an earlier Section for CAM is no CAM step's here.
+    const refused = (error: unknown) => cadRefusalAt(error, intent === 'section' ? { kind: 'cam-operation', operation: 'section', sourceId: section.bodyId } : { kind: 'document' }, since);
     const result = await (await getKernel()).section(document, section, signal).catch((error: unknown) => { throw refused(error); });
     signal?.throwIfAborted(); editable(expectedVersion); session.assertWorkflowClosed(scope);
     // Reading the result evaluates the offset again, so a refusal there is the step's too.
@@ -749,6 +751,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
   }
   type CamSource = { kind: 'sketch'; sketchId: string } | { kind: 'section'; section: CadSectionRequest };
   async function prepareHandoffGeometry(source: CamSource, document: CadDocument, signal?: AbortSignal) {
+    const since = cadRefusalMark();
     const { cadSketchToCam, cadEntitiesToCam } = await import('@/domain/cad/cadCam');
     // Each refusal names the CAM step and its source: the sketch sent, or the body a section cuts.
     try {
@@ -759,7 +762,7 @@ export function useCadController(app: App, session: CadSession, open: boolean, s
       } } };
     } catch (error) {
       throw cadRefusalAt(error, source.kind === 'sketch' ? { kind: 'cam-operation', operation: 'send-sketch', sourceId: source.sketchId }
-        : { kind: 'cam-operation', operation: 'section', sourceId: source.section.bodyId });
+        : { kind: 'cam-operation', operation: 'section', sourceId: source.section.bodyId }, since);
     }
   }
   async function handoffToCam(source: CamSource, expectedVersion: string, signal?: AbortSignal, scope?: 'section') {

@@ -67,6 +67,11 @@ it('shows a refused Section with its own message and the code of its CAM issue',
   recorded = false;
   await act(async () => button('Preview section').click());
   expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
+  // Nor does one a step recorded before this preview started, which the preview gives again unrecorded.
+  const earlier = refusal(true);
+  inspect.mockImplementation(async () => { throw earlier; });
+  await act(async () => button('Preview section').click());
+  expect([alert()?.textContent, alert()?.hasAttribute('data-cad-issue-code')]).toEqual(['The section plane does not cross the body.', false]);
   expect(host.querySelector('details')).toBeNull();
 });
 it('keeps the kernel\'s own words for a failed Section under a closed disclosure, out of the alert', async () => {

@@ -1,12 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CadFeature, CadSketchFeature } from '../cadDocument';
 import { cadSketchToCam } from '../cadCam';
 import { CadError } from '../cadError';
 import { createCadIssueList } from '../cadIssues';
 import { cadRefusalIssue } from '../cadRefusalIssues';
-import { cadRefusalAt } from '../cadRefusalSubjects';
+import { cadRefusalAt, cadRefusalMark, cadRefusalSubject } from '../cadRefusalSubjects';
 import { evaluateCadScalar } from '../cadExpression';
 import { createCadDocument, parseCadDocument } from '../cadSchema';
+import { cadFeatureDefinition } from '../features/cadFeatureRegistry';
 
 const sketch: CadSketchFeature = { id: 'sketch1', name: 'Profile', kind: 'sketch', suppressed: false, plane: 'XY', offset: 0,
   profiles: [{ id: 'disc', name: 'disc', construction: false, role: 'outer', geometry: { kind: 'circle', x: 0, y: 0, radius: 5 } }] };
@@ -52,15 +53,62 @@ describe('refusals in the CAD issue model', () => {
     cadRefusalAt(empty, { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' });
     expect(cadRefusalIssue(empty)).toEqual({ key: 'refusal', namespace: 'cam', code: (empty as CadError).code, severity: 'error', state: 'failed',
       subject: { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' }, message: (empty as CadError).message, causes: [], repairs: [], details: {} });
-    // The first step to record a refusal names it.
-    cadRefusalAt(empty, { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
-    expect(cadRefusalIssue(empty)?.subject).toMatchObject({ operation: 'send-sketch' });
     const section = cadRefusalAt(new CadError('empty-section', 'The plane misses the body.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
     expect(cadRefusalIssue(section)).toMatchObject({ namespace: 'cam', code: 'empty-section', subject: { operation: 'section', sourceId: 'body' } });
     // A CAM step reports the codes it can raise, and only those.
     expect(cadRefusalIssue(cadRefusalAt(new CadError('invalid-reference', 'No.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' }))).toBeNull();
     expect(cadRefusalIssue(cadRefusalAt(new CadError('missing-sketch', 'No.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' }))).toBeNull();
     expect(cadRefusalIssue(cadRefusalAt(new CadError('missing-body', 'No.'), { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' }))).toBeNull();
+  });
+
+  it('names the nearest step of one propagation, which a refusal raised again starts over', () => {
+    const slot = (featureId: string, inputId: string) => ({ kind: 'reference-slot', featureId, field: 'sketchId', inputId }) as const;
+    // The reviewer's probe: an independent check rethrows a cached refusal while checking a different feature.
+    const error = new CadError('invalid-reference', 'Missing');
+    cadRefusalAt(error, slot('first', 's1'));
+    cadRefusalAt(error, { kind: 'feature', featureId: 'first' });
+    expect(cadRefusalIssue(error)?.subject).toMatchObject({ kind: 'reference-slot', featureId: 'first' });
+    cadRefusalAt(error, slot('second', 's2'));
+    cadRefusalAt(error, { kind: 'feature', featureId: 'second' });
+    expect(cadRefusalIssue(error)?.subject).toMatchObject({ kind: 'reference-slot', featureId: 'second', inputId: 's2' });
+    // The real check: the slot it was reading, kept by the feature and the document around it; a refusal raised again elsewhere in the
+    // same feature after the check started is that feature's, not the slot of its first use.
+    const missing = refusal([extrude('body')]);
+    expect(cadRefusalIssue(missing)?.subject).toEqual(slot('body', 'sketch1'));
+    let since = cadRefusalMark();
+    cadRefusalAt(missing, { kind: 'feature', featureId: 'body' }, since);
+    expect(cadRefusalIssue(missing)?.subject).toEqual({ kind: 'feature', featureId: 'body' });
+    since = cadRefusalMark();
+    cadRefusalAt(missing, slot('body', 'sketch1'));
+    cadRefusalAt(missing, { kind: 'feature', featureId: 'body' }, since);
+    cadRefusalAt(missing, { kind: 'document' }, since);
+    expect(cadRefusalIssue(missing)?.subject).toEqual(slot('body', 'sketch1'));
+    // A CAM step keeps the feature its document check names, and a later operation that is no CAM step keeps no CAM step.
+    since = cadRefusalMark();
+    cadRefusalAt(missing, slot('body', 'sketch1'));
+    cadRefusalAt(missing, { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' }, since);
+    expect(cadRefusalIssue(missing)?.subject).toEqual(slot('body', 'sketch1'));
+    const empty = cadRefusalAt(new CadError('empty-section', 'The plane misses the body.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
+    cadRefusalAt(empty, { kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' });
+    expect(cadRefusalSubject(empty)).toEqual({ kind: 'cam-operation', operation: 'send-sketch', sourceId: 'sketch1' });
+    cadRefusalAt(empty, { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
+    cadRefusalAt(empty, { kind: 'document' }, cadRefusalMark());
+    expect(cadRefusalSubject(empty)).toEqual({ kind: 'document' });
+    // A reader that marks its operation's start reads no step recorded before it.
+    const read = cadRefusalAt(new CadError('kernel-operation-failed', 'The body could not be built.'), { kind: 'cam-operation', operation: 'section', sourceId: 'body' });
+    since = cadRefusalMark();
+    expect(cadRefusalIssue(read)).toMatchObject({ namespace: 'cam' });
+    expect(cadRefusalIssue(read, 'refusal', since)).toMatchObject({ namespace: 'feature', subject: { kind: 'document' } });
+    cadRefusalAt(read, { kind: 'feature', featureId: 'body' });
+    expect(cadRefusalIssue(read, 'refusal', since)?.subject).toEqual({ kind: 'feature', featureId: 'body' });
+  });
+
+  it('names the feature whose check raises a refusal again, not the input slot of its first use', () => {
+    const cached = refusal([extrude('body')]);
+    expect(cadRefusalIssue(cached)?.subject).toEqual({ kind: 'reference-slot', featureId: 'body', field: 'sketchId', inputId: 'sketch1' });
+    const check = vi.spyOn(cadFeatureDefinition('extrude'), 'check').mockImplementation(() => { throw cached; });
+    try { expect(refusal([sketch, extrude('body')])).toBe(cached); } finally { check.mockRestore(); }
+    expect(cadRefusalIssue(cached)?.subject).toEqual({ kind: 'feature', featureId: 'body' });
   });
 
   it('gives a Section for CAM of an unavailable body, or with an offset its parameters cannot evaluate, as the step\'s issue with its own code', () => {
