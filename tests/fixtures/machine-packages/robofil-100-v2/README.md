@@ -1,6 +1,6 @@
 # Cristian's Robofil 100 V2 candidate machine package
 
-This machine-specific regression fixture is retained for installation, controller-output and browser tests. It is not a default package or a template for other machines. Its identities, evidence, hashes and golden output must remain intact when reorganizing tests. For a new user's machine, start with the hosted [package authoring guide](https://insignifi4nt.github.io/wireedm-gcode-parser/documentation/authoring/).
+This machine-specific regression fixture is retained for installation, controller-output and browser tests. It is not a default package or a template for other machines. Its identities, evidence, hashes and golden output must remain intact when reorganizing tests. For a new user's machine, start with the hosted [package authoring guide](https://brocad-m.visionforge.cc/documentation/authoring/).
 
 The human-installable artifact is `cristian-robofil-100-v2.wireedm-package`. In Workbench Settings, open **Machines & setups**, choose **Install machine package**, review the detected machine and post, then confirm the installation. Do not install the loose machine or post JSON files separately; they are reproducible authoring inputs.
 

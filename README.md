@@ -2,7 +2,7 @@
 
 Design parts and plan wire EDM cuts in your browser. Build parametric sketches and solids, bring in a drawing, set up the machining sequence, inspect the part in 3D and export a program for your machine.
 
-[Open the app](https://insignifi4nt.github.io/wireedm-gcode-parser/) · [Read the guides](https://insignifi4nt.github.io/wireedm-gcode-parser/documentation/)
+[Open the app](https://brocad-m.visionforge.cc/) · [Read the guides](https://brocad-m.visionforge.cc/documentation/)
 
 > broCAD/M is alpha software. Its file formats change without backward compatibility: files from older versions may not open, and files from newer versions won't open in older ones.
 
@@ -18,4 +18,4 @@ Your work stays in your browser or an optional local folder. Export projects to 
 
 In compatible browsers, an agent can help import files, edit projects and export results through the app's tools.
 
-[Agent guide](https://insignifi4nt.github.io/wireedm-gcode-parser/documentation/agents/) · [Machine packages](https://insignifi4nt.github.io/wireedm-gcode-parser/documentation/authoring/) · [Contributing](AGENTS.md)
+[Agent guide](https://brocad-m.visionforge.cc/documentation/agents/) · [Machine packages](https://brocad-m.visionforge.cc/documentation/authoring/) · [Contributing](AGENTS.md)

@@ -123,7 +123,7 @@ describe('CAD corresponding source distribution', () => {
     const { root, fetchSource } = await fixture();
     await distributeCadSources(root, fetchSource);
     const page = path.join(root, 'dist/third-party/sketch-solver/index.html');
-    expect(await readFile(page, 'utf8')).toContain('https://github.com/Insignifi4nt/wireedm-gcode-parser/releases/tag/planegcs-1.3.0-sources');
+    expect(await readFile(page, 'utf8')).toContain('https://github.com/Insignifi4nt/brocad-m/releases/tag/planegcs-1.3.0-sources');
     await writeFile(page, 'changed');
     await expect(checkCadSourceDistribution(root)).rejects.toThrow('archived sketch solver page differs');
   });

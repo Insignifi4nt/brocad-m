@@ -513,7 +513,7 @@ Start with `edm_get_context` and `edm_workflow_context`. They identify the curre
 
 ## From DXF to controller file
 
-Open the [main app](https://insignifi4nt.github.io/wireedm-gcode-parser/). Supply the drawing, the intended machining choices and a complete machine package for the actual machine. An agent can carry out the workflow below without a repository checkout or terminal.
+Open the [main app](https://brocad-m.visionforge.cc/). Supply the drawing, the intended machining choices and a complete machine package for the actual machine. An agent can carry out the workflow below without a repository checkout or terminal.
 
 1. Read `edm_get_context` and `edm_workflow_context`. Pass the DXF directly to `edm_prepare_dxf` as `source: { "fileName": "part.dxf", "text": "<complete DXF text>" }`. Review its unit choices, dimensions and warnings, then call `edm_import_dxf` with the preparation ID and chosen units. For an existing job, use `edm_list_projects` and `edm_open_project`, or `edm_import_upid` with the same `source` shape containing portable UPID JSON text.
 2. Read the current draft's operations and geometry. Use `edm_describe_edits` to find the supported edit and its exact fields, then `edm_edit_project` to configure the machining intent in millimeters. It applies a complete batch as one undoable edit and updates the visible editor. It does not save.
@@ -592,7 +592,7 @@ The result is an image artifact receipt, not an inline image delivered to the mo
 
 ## Create or repair a machine package
 
-Open the [Package workbench](https://insignifi4nt.github.io/wireedm-gcode-parser/package-tools/) and follow the [authoring guide](authoring.md). Its tools work with that page's temporary inputs and show their results in the interface.
+Open the [Package workbench](https://brocad-m.visionforge.cc/package-tools/) and follow the [authoring guide](authoring.md). Its tools work with that page's temporary inputs and show their results in the interface.
 
 | Tool | Use |
 | --- | --- |
@@ -617,7 +617,7 @@ For a repair: select the original archive, inspect it, reuse its contents, edit 
 
 ## Inspect a project
 
-Open the [main app](https://insignifi4nt.github.io/wireedm-gcode-parser/). These tools read its connected workbench and current editor:
+Open the [main app](https://brocad-m.visionforge.cc/). These tools read its connected workbench and current editor:
 
 | Tool | Use |
 | --- | --- |

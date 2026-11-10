@@ -33,5 +33,5 @@ export default defineConfig({
     strictPort: true,
     open: true
   },
-  base: '/wireedm-gcode-parser/'
+  base: '/'
 });

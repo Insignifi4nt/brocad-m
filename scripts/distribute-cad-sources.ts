@@ -90,7 +90,7 @@ async function inputs(root: string) {
  */
 const archivedSketchSolverPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sketch solver licenses and source</title><body>
 <h1>Sketch solver licenses and source</h1><p>broCAD/M versions up to 0.0.756 included the unmodified PlaneGCS 1.3.0 sketch solver (<code>@salusoft89/planegcs</code>): a wrapper under LGPL 2.1-or-later notices and a copied FreeCAD core under GNU Library GPL 2-or-later notices. Since 0.0.757 the app solves sketches with its own MIT-licensed solver and no longer includes PlaneGCS.</p>
-<p>The PlaneGCS package, its exact source, the dependency sources, license notices and rebuild and replacement instructions served with those versions are archived in the <a href="https://github.com/Insignifi4nt/wireedm-gcode-parser/releases/tag/planegcs-1.3.0-sources">PlaneGCS 1.3.0 sources release</a>.</p></body></html>
+<p>The PlaneGCS package, its exact source, the dependency sources, license notices and rebuild and replacement instructions served with those versions are archived in the <a href="https://github.com/Insignifi4nt/brocad-m/releases/tag/planegcs-1.3.0-sources">PlaneGCS 1.3.0 sources release</a>.</p></body></html>
 `;
 
 export async function distributeCadSources(root = process.cwd(), fetchSource: typeof fetch = fetch) {

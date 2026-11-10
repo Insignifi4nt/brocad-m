@@ -16,7 +16,7 @@ test('saved CAD survives dashboard reopen, browser history, direct reload and ST
   await expect(page).toHaveURL(new RegExp(`/cad/${projectId}$`));
   const projectUrl = page.url();
   await page.goBack();
-  await expect(page).toHaveURL(/wireedm-gcode-parser\/$/);
+  await expect(page).toHaveURL(/\/$/);
   await page.getByRole('button', { name: `Open project ${projectId} in CAD`, exact: true }).click();
   await expect(page).toHaveURL(projectUrl);
   // The URL publishes before the guarded open finishes. Navigate history after the actual CAD view is ready.
@@ -42,7 +42,7 @@ test('static-host deep links show recoverable missing projects and settings has 
   await prepareCadTools(page);
   const fallback = await readFile('dist/404.html', 'utf8');
   await page.route('**/cad/cad_missing', route => route.fulfill({ status: 404, contentType: 'text/html', body: fallback }));
-  await page.goto('/wireedm-gcode-parser/cad/cad_missing');
+  await page.goto('/cad/cad_missing');
   await expect(page.getByRole('region', { name: 'Page unavailable' })).toBeVisible();
   await page.getByRole('button', { name: 'Back to projects', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Design in CAD', exact: true })).toBeEnabled();
@@ -52,5 +52,5 @@ test('static-host deep links show recoverable missing projects and settings has 
   await page.reload();
   await expect(page.getByRole('dialog', { name: 'Workbench settings' })).toBeVisible();
   await page.getByRole('button', { name: 'Close settings', exact: true }).click();
-  await expect(page).toHaveURL(/wireedm-gcode-parser\/$/);
+  await expect(page).toHaveURL(/\/$/);
 });

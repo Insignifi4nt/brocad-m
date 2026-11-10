@@ -1,7 +1,7 @@
 {
   "name": "wire-edm-workbench",
-  "homepage": "https://insignifi4nt.github.io/wireedm-gcode-parser",
-  "version": "0.0.805",
+  "homepage": "https://brocad-m.visionforge.cc",
+  "version": "0.0.806",
   "description": "A local-first Wire EDM workbench with controller-neutral CAM state and complete installable machine packages.",
   "type": "module",
   "scripts": {
@@ -34,7 +34,7 @@
     "machine-package:validate-source": "tsx scripts/machine-package.ts validate-source",
     "machine-package:validate": "tsx scripts/machine-package.ts validate",
     "machine-package:inspect": "tsx scripts/machine-package.ts inspect",
-    "pw:open": "playwright-cli open http://127.0.0.1:3777/wireedm-gcode-parser/ --headed && playwright-cli resize 1920 1200",
+    "pw:open": "playwright-cli open http://127.0.0.1:3777/ --headed && playwright-cli resize 1920 1200",
     "pw:seed": "node scripts/seed-playwright-workbench.mjs",
     "pw:seed:reload": "node scripts/seed-playwright-workbench.mjs --reload",
     "postbuild": "node scripts/build-spa-fallback.mjs && npm run docs:build && npm run docs:check && npm run third-party:bundle",

@@ -269,7 +269,7 @@ const generatedFiles = [
           'sdk/wire-edm-machine-package.d.ts',
           'sdk/wire-edm-machine-package-source.d.ts'
         ],
-        browserWorkbench: 'https://insignifi4nt.github.io/wireedm-gcode-parser/package-tools/',
+        browserWorkbench: 'https://brocad-m.visionforge.cc/package-tools/',
         buildAction: 'Build package: Validate and build package',
         inspectAction: 'Inspect package: Validate and inspect package'
       },

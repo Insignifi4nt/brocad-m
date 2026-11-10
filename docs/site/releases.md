@@ -2,7 +2,7 @@
 
 The app version appears in Settings, the export dialog and the Package workbench. A package's `manifest.authoredFor.appVersion` records the release used when writing it. Its `documentationUrl` points to that release's authoring contract.
 
-Check the **current release** link in the navigation for compatibility changes and the versioned documentation link. The [release records](https://insignifi4nt.github.io/wireedm-gcode-parser/documentation/releases.json) are also available as JSON.
+Check the **current release** link in the navigation for compatibility changes and the versioned documentation link. The [release records](https://brocad-m.visionforge.cc/documentation/releases.json) are also available as JSON.
 
 ## Before updating a package
 

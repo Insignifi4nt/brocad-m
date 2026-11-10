@@ -1,6 +1,6 @@
 # Simulate a saved UPID process
 
-Open a path project in the [main app](https://insignifi4nt.github.io/wireedm-gcode-parser/), save it, then choose **Simulation** in the app header's **Editor / Simulation** switch. Finish any active editor tool first. Simulation follows the saved UPID's reviewed machining intent; it does not need a generated controller file or an installed postprocessor.
+Open a path project in the [main app](https://brocad-m.visionforge.cc/), save it, then choose **Simulation** in the app header's **Editor / Simulation** switch. Finish any active editor tool first. Simulation follows the saved UPID's reviewed machining intent; it does not need a generated controller file or an installed postprocessor.
 
 The scene fills the workspace. **Stock**, **Machine** and **Checks** open a focused panel; close it or press Escape to return to the scene. The information button contains the **SAVED UPID** source, saved time and assumptions. Unsaved editor changes are excluded, with a notice linking back to the editor. Save those changes before using them in simulation. An external G-code text project does not provide this UPID simulation. If the saved job has incomplete machining intent, use **Review in editor**, resolve the listed diagnostics and save again. Use **Simulation operation** to jump to an operation from the saved process.
 
