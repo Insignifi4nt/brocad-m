@@ -5,10 +5,10 @@ import { marked } from 'marked';
 const root = process.cwd();
 const destination = path.join(root, 'dist');
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-const origin = 'https://insignifi4nt.github.io';
-const base = '/wireedm-gcode-parser/';
+const origin = 'https://brocad-m.visionforge.cc';
+const base = '/';
 const docs = `${base}documentation/`;
-const repository = `https://github.com/Insignifi4nt/wireedm-gcode-parser/blob/v${pkg.version}/`;
+const repository = `https://github.com/Insignifi4nt/brocad-m/blob/v${pkg.version}/`;
 const guides = ['index', 'cad', 'simulation', 'authoring', 'tools', 'agents', 'compatibility', 'reference', 'releases'];
 const titles = ['Start here', 'CAD design', 'Saved-process simulation', 'Author a package', 'Package workbench', 'Agent tools', 'Compatibility & repairs', 'Contract reference', 'App releases'];
 const routes = new Map(guides.map((slug) => [`docs/site/${slug}.md`, `${docs}${slug === 'index' ? '' : slug + '/'}index.md`]));
@@ -61,7 +61,7 @@ function renderMarkdown(markdown) {
 function page(title, body, htmlUrl, markdownUrl) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)} · broCAD/M</title><meta name="description" content="broCAD/M guides: saved-UPID simulation, browser agent tools, complete machine packages, postprocessor authoring and compatibility."><link rel="canonical" href="${origin}${htmlUrl}"><link rel="alternate" type="text/markdown" href="${markdownUrl}"><link rel="describedby" href="${base}llms.txt"><link rel="stylesheet" href="${docs}style.css"></head>
-<body><a class="skip" href="#content">Skip to content</a><header><a href="${base}" class="brand">broCAD/M</a><span>Documentation · ${escape(pkg.version)}</span></header><div class="layout"><nav aria-label="Documentation">${guides.map((slug, index) => `<a href="${docs}${slug === 'index' ? '' : slug + '/'}">${titles[index]}</a>`).join('')}<hr><a href="${base}llms.txt">Agent index · llms.txt</a><a href="${docs}releases/${pkg.version}/">Release ${escape(pkg.version)}</a><a href="https://github.com/Insignifi4nt/wireedm-gcode-parser">Source on GitHub</a></nav><main id="content"><div class="page-tools"><a href="${markdownUrl}">Read as Markdown</a></div>${body}<footer>App ${escape(pkg.version)} · Exact machine evidence and validated output govern compatibility.</footer></main></div></body></html>`;
+<body><a class="skip" href="#content">Skip to content</a><header><a href="${base}" class="brand">broCAD/M</a><span>Documentation · ${escape(pkg.version)}</span></header><div class="layout"><nav aria-label="Documentation">${guides.map((slug, index) => `<a href="${docs}${slug === 'index' ? '' : slug + '/'}">${titles[index]}</a>`).join('')}<hr><a href="${base}llms.txt">Agent index · llms.txt</a><a href="${docs}releases/${pkg.version}/">Release ${escape(pkg.version)}</a><a href="https://github.com/Insignifi4nt/brocad-m">Source on GitHub</a></nav><main id="content"><div class="page-tools"><a href="${markdownUrl}">Read as Markdown</a></div>${body}<footer>App ${escape(pkg.version)} · Exact machine evidence and validated output govern compatibility.</footer></main></div></body></html>`;
 }
 for (const [source, url] of routes) {
   const contents = await readFile(source);
@@ -81,7 +81,7 @@ for (const file of releaseFiles) {
   const published = { version: release.version, previousVersion: release.previousVersion, ...release.publicNotes };
   releases.push(published);
   const directory = `${docs}releases/${release.version}/`;
-  const markdown = `# App ${release.version}\n\n${published.summary}\n\n## Changes\n\n${published.changes.map((change) => `- ${change}`).join('\n')}\n\n## Compatibility\n\n${published.compatibility}\n\n## Updating a package\n\n${published.action}\n\n[Versioned authoring contract](https://github.com/Insignifi4nt/wireedm-gcode-parser/tree/v${release.version}/docs/post-authoring/v1)\n`;
+  const markdown = `# App ${release.version}\n\n${published.summary}\n\n## Changes\n\n${published.changes.map((change) => `- ${change}`).join('\n')}\n\n## Compatibility\n\n${published.compatibility}\n\n## Updating a package\n\n${published.action}\n\n[Versioned authoring contract](https://github.com/Insignifi4nt/brocad-m/tree/v${release.version}/docs/post-authoring/v1)\n`;
   await output(directory + 'index.md', markdown);
   await output(directory + 'index.html', page(`App ${release.version}`, renderMarkdown(markdown), directory + 'index.html', directory + 'index.md'));
   await output(directory + 'release.json', JSON.stringify(published, null, 2) + '\n');

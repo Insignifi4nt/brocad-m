@@ -1,0 +1,25 @@
+{
+  "version": "0.0.806",
+  "previousVersion": "0.0.805",
+  "postCompatibility": "preserved-posts-with-renamed-pages-path",
+  "summary": "Moves the hosted app to https://brocad-m.visionforge.cc/ after the repository rename. Application assets, deep links, documentation and authoring tools use the custom domain root; source links use the renamed brocad-m repository.",
+  "warning": "No breaking change to installed posts, project file formats, saved revisions or controller output. The app now uses a new browser origin, which starts with its own browser cache and permissions. No legacy URL routing or automatic storage migration is added.",
+  "checklist": {
+    "schema": "No UPID, post, CAD, machine package, saved revision or storage schema change.",
+    "events": "No execution event, cancellation, input-version or WebMCP operation change.",
+    "capabilities": "No post or machine capability change.",
+    "auditAndOutput": "No audit, output, numbering, encoding, wrapper or controller-file change.",
+    "installationAndStorage": "Browser cache and folder adapters are unchanged. Project files remain readable. The new domain has separate browser storage and permissions, with no migration or data rewrite.",
+    "verification": "Production build and published-link checks; navigation browser journeys for saved-project history, reload and static-host fallback; source distribution test; lint and release checks."
+  },
+  "testedPosts": [],
+  "publicNotes": {
+    "summary": "Moves the app to brocad-m.visionforge.cc.",
+    "changes": [
+      "Loads application assets and project routes at the custom domain root.",
+      "Updates help, documentation and package authoring links to brocad-m.visionforge.cc, and source links to the renamed repository."
+    ],
+    "compatibility": "Project files, installed machine packages, posts, saved revisions and controller output are unchanged. The new domain has its own browser storage.",
+    "action": "Open https://brocad-m.visionforge.cc/. Existing exported projects and folder workbenches remain supported."
+  }
+}

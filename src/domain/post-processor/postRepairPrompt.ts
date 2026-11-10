@@ -49,7 +49,7 @@ export function postRepairPrompt(input: {
     `Current documentation: ${DOCUMENTATION_URL}`,
     `App source: ${APP_SOURCE_URL}`,
     `Compatibility and upgrade guide: ${DOCUMENTATION_URL}compatibility/`,
-    'Browser authoring tools: https://insignifi4nt.github.io/wireedm-gcode-parser/package-tools/ — no checkout or terminal required.',
+    'Browser authoring tools: https://brocad-m.visionforge.cc/package-tools/ — no checkout or terminal required.',
     '## Diagnostic context',
     JSON.stringify(context, null, 2),
     '## Known contract changes (check relevance; they are not a diagnosis)',

@@ -1,6 +1,6 @@
 # Package workbench
 
-[Open the Package workbench](https://insignifi4nt.github.io/wireedm-gcode-parser/package-tools/).
+[Open the Package workbench](https://brocad-m.visionforge.cc/package-tools/).
 
 [Agent tools](agents.md) expose these operations to compatible browsers through WebMCP.
 

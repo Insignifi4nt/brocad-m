@@ -1,8 +1,8 @@
 import packageInfo from '../../../package.json';
 
 export const APP_VERSION = packageInfo.version;
-export const DOCUMENTATION_URL = 'https://insignifi4nt.github.io/wireedm-gcode-parser/documentation/';
-export const APP_SOURCE_URL = `https://github.com/Insignifi4nt/wireedm-gcode-parser/tree/v${APP_VERSION}`;
+export const DOCUMENTATION_URL = 'https://brocad-m.visionforge.cc/documentation/';
+export const APP_SOURCE_URL = `https://github.com/Insignifi4nt/brocad-m/tree/v${APP_VERSION}`;
 
 /** App provenance is informational. Exact schemas, capabilities and conformance decide execution. */
 export const POST_CONTRACT_CHANGES = [

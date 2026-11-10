@@ -3,7 +3,8 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
-const base = 'https://insignifi4nt.github.io/wireedm-gcode-parser/';
+const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+const base = `${pkg.homepage.replace(/\/$/, '')}/`;
 async function walk(directory) {
   const result = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -25,6 +26,20 @@ async function exists(url) {
       assert.ok(dom.window.document.getElementById(decodeURIComponent(target.hash.slice(1))), `Broken published section link: ${url}`);
     } finally { dom.window.close(); }
   }
+}
+// Check the entry points as well as documentation: a renamed deployment can
+// serve HTML successfully while every script still points at the old path.
+for (const entry of ['index.html', '404.html', 'package-tools/index.html']) {
+  const dom = new JSDOM(await readFile(path.join('dist', entry), 'utf8'));
+  try {
+    const assets = dom.window.document.querySelectorAll('script[src], link[rel="stylesheet"], link[rel="modulepreload"]');
+    assert.ok(assets.length > 0, `Missing application assets: ${entry}`);
+    for (const asset of assets) {
+      const url = new URL(asset.getAttribute('src') ?? asset.getAttribute('href'), base + entry).href;
+      assert.ok(url.startsWith(base), `Application asset outside deployment base: ${url}`);
+      await exists(url);
+    }
+  } finally { dom.window.close(); }
 }
 const files = await walk('dist/documentation');
 for (const file of files.filter((file) => file.endsWith('.html'))) {
